@@ -1,0 +1,33 @@
+spring:
+  datasource:
+    url: "jdbc:mysql://127.0.0.1:3306/supportflow_rebuild?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
+    username: supportflow_app
+    password: "${SUPPORTFLOW_APP_PASSWORD}"
+
+  flyway:
+    enabled: true
+    url: "${spring.datasource.url}"
+    user: supportflow_migrator
+    password: "${SUPPORTFLOW_MIGRATOR_PASSWORD}"
+    locations: classpath:db/migration
+    validate-on-migrate: true
+    baseline-on-migrate: false
+    clean-disabled: true
+    create-schemas: false
+
+  config:
+    import:
+      - "file:./.local/secrets.yml"
+      - "file:./.local/day4-security-secrets.yml"
+
+supportflow:
+  security:
+    local:
+      accounts:
+        - username: customer-200
+          password-hash: "${SUPPORTFLOW_CUSTOMER_200_PASSWORD_HASH}"
+          identity:
+            tenant-id: 100
+            customer-id: 200
+          permissions:
+            - ORDER_READ

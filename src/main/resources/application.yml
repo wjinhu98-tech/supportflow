@@ -1,0 +1,11 @@
+spring:
+  application:
+    name: supportflow-backend
+
+  sql:
+    init:
+      mode: never
+
+  flyway:
+    enabled: false
+

@@ -1,0 +1,11 @@
+spring:
+  application:
+    name: supportflow-day4-test
+  sql:
+    init:
+      mode: never
+  flyway:
+    enabled: false
+logging:
+  level:
+    root: WARN
