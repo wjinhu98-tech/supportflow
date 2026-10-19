@@ -57,7 +57,7 @@ class LocalAuthenticationConfigurationTest {
                     (CustomerPrincipal) authentication.getPrincipal();
             assertThat(principal.getUsername()).isEqualTo("customer-200");
             assertThat(principal.getIdentity())
-                    .isEqualTo(new CustomerIdentity(100L, 200L));
+                    .isEqualTo(new CustomerIdentity(200L));
             assertThat(authentication.getAuthorities())
                     .extracting(GrantedAuthority::getAuthority)
                     .contains(SecurityPermission.ORDER_READ.getAuthority());
@@ -104,6 +104,25 @@ class LocalAuthenticationConfigurationTest {
                 });
     }
 
+    @Test
+    @DisplayName("旧账号缺少全局buyerId时拒绝启动，不自动用客户编号替代")
+    void shouldRejectLegacyConfigurationWithoutGlobalBuyerId() {
+        String hash = PasswordEncoderFactories.createDelegatingPasswordEncoder()
+                .encode(UUID.randomUUID().toString());
+        contextRunner
+                .withInitializer(context ->
+                        context.getEnvironment().setActiveProfiles("local")
+                )
+                .withPropertyValues(
+                        "supportflow.security.local.accounts[0].username=customer-200",
+                        "supportflow.security.local.accounts[0].password-hash=" + hash,
+                        "supportflow.security.local.accounts[0].identity.tenant-id=100",
+                        "supportflow.security.local.accounts[0].identity.customer-id=200",
+                        "supportflow.security.local.accounts[0].permissions[0]=ORDER_READ"
+                )
+                .run(context -> assertThat(context).hasFailed());
+    }
+
     private ApplicationContextRunner withLocalAccount(String passwordHash) {
         return contextRunner
                 .withInitializer(context ->
@@ -112,8 +131,7 @@ class LocalAuthenticationConfigurationTest {
                 .withPropertyValues(
                         "supportflow.security.local.accounts[0].username=customer-200",
                         "supportflow.security.local.accounts[0].password-hash=" + passwordHash,
-                        "supportflow.security.local.accounts[0].identity.tenant-id=100",
-                        "supportflow.security.local.accounts[0].identity.customer-id=200",
+                        "supportflow.security.local.accounts[0].identity.buyer-id=200",
                         "supportflow.security.local.accounts[0].permissions[0]=ORDER_READ"
                 );
     }

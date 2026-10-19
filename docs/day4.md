@@ -1,12 +1,15 @@
-# 第4天：带身份范围的订单查询接口
+# 第4天：带买家身份范围的订单查询接口
 
 本日完成了本地账号配置绑定、真实密码认证、安全过滤链、订单 HTTP 接口和整链测试。
 账号密码为独立生成的开发凭据；原有数据库密码文件未读取或修改。
 本地账号来源是外部配置，生产身份接入属于后续工作。
+后续已按“同一买家查看多家商铺订单”的需求调整身份模型。
+当前身份为全局 buyerId；旧的固定 tenantId/customerId 身份和单订单号详情入口已停用。
+接口、分页与存量迁移说明见 docs/cross-shop-buyer-orders.md。
 
 ## 一次请求怎样流动
 
-    GET /api/v1/orders/SF10001 + HTTP Basic 凭据
+    GET /api/v1/shops/100/orders/SF10001 + HTTP Basic 凭据
       → Spring Security 安全过滤链
       → ProviderManager
       → DaoAuthenticationProvider
@@ -41,18 +44,20 @@ LocalAuthenticationConfiguration 只在 local profile 生效，把账号来源�
 
     orderQueryService.getOwnedOrder(
         principal.getIdentity(),
+        shopId,
         orderNo
     )
 
-orderNo 来自 URL。identity 来自认证成功的 principal，其中租户和客户来自服务端账号配置。
-请求中的 tenantId、customerId 或 X-Tenant-Id、X-Customer-Id 不作为查询身份来源。
+shopId 和 orderNo 来自 URL，用来定位商铺内订单。
+identity 来自认证成功的 principal，仅包含服务端账号配置中的全局 buyerId。
+请求中的 buyerId、customerId 或相关身份请求头不作为查询身份来源。
 请求前置权限验证检查能否执行订单读取；仓储 SQL 进一步限制能读取哪一行。
 
 ## 应用服务怎样解释没有结果
 
     supportOrderRepository.findByOrderNo(
-        identity.tenantId(),
-        identity.customerId(),
+        shopId,
+        identity.buyerId(),
         orderNo
     ).orElseThrow(OrderNotFoundException::new)
 
@@ -62,8 +67,10 @@ orderNo 来自 URL。identity 来自认证成功的 principal，其中租户和�
 
 ## 响应 DTO 的作用
 
-OrderResponse 公开订单号、状态编码与描述、金额、币种及两个 UTC 时间。
-内部主键、tenantId 和 customerId 不出现在接口响应中。
+OrderResponse 公开 shopId、订单号、状态编码与描述、金额、币种及两个 UTC 时间。
+shopId 对应订单中的 tenant_id，供跨商铺同号订单定位。
+内部主键、buyerId 和历史 customerId 不出现在订单响应中。
+列表响应的 nextAfterId 仅作分页游标；每次翻页仍强制校验当前买家归属。
 领域模型继续供业务与仓储使用，DTO 用来维护对外接口契约。
 
 | 状态 | 错误码或结果 | 含义 |
@@ -106,17 +113,17 @@ IDEA 打开 orders.http 并选择 local 环境，会从 http-client.private.env.
     mvn verify
 
 第一个命令运行 Surefire 单元与配置测试；第二个命令进一步打包并执行 Failsafe 集成测试。
-当前验收为14个 Surefire 测试和34个 Failsafe 测试，合计48个，全部通过且无跳过。
+测试数量以本次 Maven 报告为准；跨商铺改造新增了列表、分页、全局归属和迁移验收。
 
 OrderApiIT 加载真实 Spring Boot 配置与安全过滤链，使用 httpBasic 进行实际密码认证。
 它加载专用测试配置，不读取本地私密配置；Testcontainers 创建独立 MySQL，管理员准备数据，
 实际应用使用只读账号。测试同时验证只读授权和 MySQL 会话 UTC。
 
-覆盖本人订单、同号订单隔离、跨客户与跨租户拒绝、伪造身份、无效订单号、SQL注入式输入、
+覆盖本人跨商铺订单、同号订单定位、其他买家拒绝、伪造身份、无效订单号、SQL注入式输入、
 JSON401/403、真实CSRF token往返、消息参数校验及错误派发。
 
-第4天到此结束。下一天的工作需要另行开始。
+本次身份模型调整不增加新的登录方式或下单功能。
 
-实际 local 服务启动涉及现有业务库，本轮自动审批未放行该操作。
+实际 local 服务启动会连接现有业务库，本次改造未启动该服务。
 公开 local YAML 模板已用内存测试哈希绑定验收，未读取私密文件；
 完整接口链路在独立 Testcontainers 数据库中验收。

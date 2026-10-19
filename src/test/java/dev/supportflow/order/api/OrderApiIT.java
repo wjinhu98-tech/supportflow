@@ -1,6 +1,7 @@
 package dev.supportflow.order.api;
 
 import dev.supportflow.SupportFlowApplication;
+import dev.supportflow.order.domain.OrderQueryLimits;
 import jakarta.servlet.DispatcherType;
 import jakarta.servlet.RequestDispatcher;
 import org.flywaydb.core.Flyway;
@@ -34,6 +35,7 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -102,27 +104,24 @@ class OrderApiIT {
         registry.add("spring.datasource.url", MYSQL::getJdbcUrl);
         registry.add("spring.datasource.username", () -> "order_reader");
         registry.add("spring.datasource.password", () -> QUERY_PASSWORD);
-        registerAccount(registry, 0, "customer-200", 100, 200, "ORDER_READ");
-        registerAccount(registry, 1, "customer-201", 100, 201, "ORDER_READ");
-        registerAccount(
-                registry, 2, "tenant-300-customer-200", 300, 200, "ORDER_READ"
-        );
-        registerAccount(registry, 3, "no-order-access", 100, 200, "");
+        registerAccount(registry, 0, "customer-200", 200, "ORDER_READ");
+        registerAccount(registry, 1, "customer-201", 201, "ORDER_READ");
+        registerAccount(registry, 2, "customer-999", 999, "ORDER_READ");
+        registerAccount(registry, 3, "no-order-access", 200, "");
+        registerAccount(registry, 4, "empty-buyer", 888, "ORDER_READ");
     }
 
     private static void registerAccount(
             DynamicPropertyRegistry registry,
             int index,
             String username,
-            long tenantId,
-            long customerId,
+            long buyerId,
             String permissions
     ) {
         String prefix = "supportflow.security.local.accounts[" + index + "].";
         registry.add(prefix + "username", () -> username);
         registry.add(prefix + "password-hash", () -> PASSWORD_HASH);
-        registry.add(prefix + "identity.tenant-id", () -> tenantId);
-        registry.add(prefix + "identity.customer-id", () -> customerId);
+        registry.add(prefix + "identity.buyer-id", () -> buyerId);
         registry.add(prefix + "permissions", () -> permissions);
     }
 
@@ -168,16 +167,20 @@ class OrderApiIT {
             statement.executeUpdate(
                     """
                     INSERT INTO support_order (
-                        id, tenant_id, customer_id, order_no, status,
+                        id, tenant_id, customer_id, buyer_id, order_no, status,
                         total_amount, currency, created_at, updated_at
                     ) VALUES
-                    (1001, 100, 200, 'SF10001', 'SHIPPED', 199.90, 'CNY',
+                    (1001, 100, 200, 200, 'SF10001', 'SHIPPED', 199.90, 'CNY',
                      '2026-10-01 02:03:04.123', '2026-10-02 05:06:07.456'),
-                    (1002, 300, 200, 'SF10001', 'PAID', 899.00, 'CNY',
+                    (1002, 300, 777, 200, 'SF10001', 'PAID', 899.00, 'CNY',
                      '2026-10-03 01:02:03.123', '2026-10-04 04:05:06.456'),
-                    (1003, 100, 201, 'SF20001', 'PAID', 49.50, 'CNY',
+                    (1003, 100, 201, 201, 'SF20001', 'PAID', 49.50, 'CNY',
                      '2026-10-01 02:03:04.123', '2026-10-02 05:06:07.456'),
-                    (1004, 100, 200, 'SF10002', 'COMPLETED', 9.90, 'CNY',
+                    (1004, 100, 200, 200, 'SF10002', 'COMPLETED', 9.90, 'CNY',
+                     '2026-10-01 02:03:04.123', '2026-10-02 05:06:07.456'),
+                    (1005, 300, 200, 999, 'FOREIGN', 'PAID', 66.00, 'CNY',
+                     '2026-10-01 02:03:04.123', '2026-10-02 05:06:07.456'),
+                    (1006, 300, 200, NULL, 'LEGACY', 'PAID', 77.00, 'CNY',
                      '2026-10-01 02:03:04.123', '2026-10-02 05:06:07.456')
                     """
             );
@@ -205,14 +208,14 @@ class OrderApiIT {
     @Test
     @DisplayName("未登录查询订单返回统一401")
     void shouldRejectAnonymousOrderQuery() throws Exception {
-        expectUnauthorized(mockMvc.perform(get("/api/v1/orders/SF10001")));
+        expectUnauthorized(mockMvc.perform(get("/api/v1/shops/100/orders/SF10001")));
     }
 
     @Test
     @DisplayName("错误密码返回统一401")
     void shouldRejectWrongPassword() throws Exception {
         expectUnauthorized(mockMvc.perform(
-                get("/api/v1/orders/SF10001").with(
+                get("/api/v1/shops/100/orders/SF10001").with(
                         httpBasic("customer-200", LOGIN_PASSWORD + "-wrong")
                 )
         ));
@@ -222,7 +225,7 @@ class OrderApiIT {
     @DisplayName("未知账号返回相同401")
     void shouldRejectUnknownAccount() throws Exception {
         expectUnauthorized(mockMvc.perform(
-                get("/api/v1/orders/SF10001").with(
+                get("/api/v1/shops/100/orders/SF10001").with(
                         httpBasic("unknown-customer", LOGIN_PASSWORD)
                 )
         ));
@@ -237,7 +240,7 @@ class OrderApiIT {
     }
 
     @Test
-    @DisplayName("本人订单返回正确客户字段且不暴露内部归属ID")
+    @DisplayName("本人订单返回商铺信息但不暴露买家及店铺客户编号")
     void shouldReturnOwnedOrderWithoutInternalIdentifiers() throws Exception {
         orderGet("customer-200", "SF10001")
                 .andExpect(status().isOk())
@@ -245,6 +248,7 @@ class OrderApiIT {
                         MediaType.APPLICATION_JSON
                 ))
                 .andExpect(jsonPath("$.orderNo").value("SF10001"))
+                .andExpect(jsonPath("$.shopId").value(100))
                 .andExpect(jsonPath("$.status").value("SHIPPED"))
                 .andExpect(jsonPath("$.statusDescription").value("已发货"))
                 .andExpect(jsonPath("$.totalAmount").value(199.90))
@@ -257,7 +261,8 @@ class OrderApiIT {
                 ))
                 .andExpect(jsonPath("$.id").doesNotExist())
                 .andExpect(jsonPath("$.tenantId").doesNotExist())
-                .andExpect(jsonPath("$.customerId").doesNotExist());
+                .andExpect(jsonPath("$.customerId").doesNotExist())
+                .andExpect(jsonPath("$.buyerId").doesNotExist());
     }
 
     @Test
@@ -273,20 +278,22 @@ class OrderApiIT {
     }
 
     @Test
-    @DisplayName("客户编号相同但租户不同仍不能读取订单")
-    void shouldHideOtherTenantOrder() throws Exception {
-        expectNotFound(orderGet("tenant-300-customer-200", "SF10002"));
+    @DisplayName("店铺内客户编号相同也不能冒充其他平台买家")
+    void shouldHideOtherBuyerWithSameLocalCustomerNumber() throws Exception {
+        expectNotFound(orderGet("customer-200", 300L, "FOREIGN"));
+        expectNotFound(orderGet("customer-999", "SF10002"));
     }
 
     @Test
-    @DisplayName("两个租户的相同订单号分别返回各自数据")
+    @DisplayName("同一个买家可以读取两家商铺的同号订单")
     void shouldDistinguishOrderNumberAcrossTenants() throws Exception {
         orderGet("customer-200", "SF10001")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.totalAmount").value(199.90));
 
-        orderGet("tenant-300-customer-200", "SF10001")
+        orderGet("customer-200", 300L, "SF10001")
                 .andExpect(status().isOk())
+                .andExpect(jsonPath("$.shopId").value(300))
                 .andExpect(jsonPath("$.status").value("PAID"))
                 .andExpect(jsonPath("$.totalAmount").value(899.00));
     }
@@ -295,12 +302,14 @@ class OrderApiIT {
     @DisplayName("伪造查询参数和身份请求头不能改变认证身份")
     void shouldIgnoreClientSuppliedIdentity() throws Exception {
         expectNotFound(mockMvc.perform(
-                get("/api/v1/orders/SF10001")
+                get("/api/v1/shops/100/orders/SF10001")
                         .with(httpBasic("customer-201", LOGIN_PASSWORD))
                         .param("tenantId", "100")
                         .param("customerId", "200")
+                        .param("buyerId", "200")
                         .header("X-Tenant-Id", "100")
                         .header("X-Customer-Id", "200")
+                        .header("X-Buyer-Id", "200")
         ));
     }
 
@@ -428,7 +437,7 @@ class OrderApiIT {
     @Test
     @DisplayName("订单接口仅开放声明的GET操作")
     void shouldDenyUndeclaredOrderOperation() throws Exception {
-        mockMvc.perform(post("/api/v1/orders/SF10001")
+        mockMvc.perform(post("/api/v1/shops/100/orders/SF10001")
                         .with(httpBasic("customer-200", LOGIN_PASSWORD))
                         .with(csrf()))
                 .andExpect(status().isForbidden());
@@ -463,10 +472,322 @@ class OrderApiIT {
             String username,
             String orderNo
     ) throws Exception {
+        return orderGet(username, 100L, orderNo);
+    }
+
+    private ResultActions orderGet(
+            String username,
+            long shopId,
+            String orderNo
+    ) throws Exception {
         return mockMvc.perform(
-                get("/api/v1/orders/{orderNo}", orderNo)
+                get("/api/v1/shops/{shopId}/orders/{orderNo}", shopId, orderNo)
                         .with(httpBasic(username, LOGIN_PASSWORD))
         );
+    }
+
+    @Test
+    @DisplayName("我的订单包含多家商铺，排除其他买家和归属未知的历史订单")
+    void shouldListOnlyAuthenticatedBuyersOrdersAcrossShops() throws Exception {
+        mockMvc.perform(get("/api/v1/orders")
+                        .with(httpBasic("customer-200", LOGIN_PASSWORD)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(3))
+                .andExpect(jsonPath("$.items[0].shopId").value(100))
+                .andExpect(jsonPath("$.items[1].shopId").value(300))
+                .andExpect(jsonPath("$.items[0].orderNo").value("SF10001"))
+                .andExpect(jsonPath("$.items[1].orderNo").value("SF10001"))
+                .andExpect(jsonPath("$.items[2].orderNo").value("SF10002"))
+                .andExpect(jsonPath("$.items[0].buyerId").doesNotExist())
+                .andExpect(jsonPath("$.items[0].customerId").doesNotExist())
+                .andExpect(jsonPath("$.items[0].id").doesNotExist())
+                .andExpect(jsonPath("$.nextAfterId").value(
+                        org.hamcrest.Matchers.nullValue()
+                ));
+    }
+
+    @Test
+    @DisplayName("连续游标分页跨越商铺且不重复或遗漏订单")
+    void shouldPageAcrossShopsWithoutDuplicates() throws Exception {
+        MvcResult first = mockMvc.perform(get("/api/v1/orders")
+                        .param("size", "1")
+                        .with(httpBasic("customer-200", LOGIN_PASSWORD)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].shopId").value(100))
+                .andReturn();
+        long cursor = objectMapper.readTree(first.getResponse().getContentAsString())
+                .get("nextAfterId").asLong();
+
+        mockMvc.perform(get("/api/v1/orders")
+                        .param("afterId", Long.toString(cursor))
+                        .param("size", "1")
+                        .with(httpBasic("customer-200", LOGIN_PASSWORD)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].shopId").value(300))
+                .andExpect(jsonPath("$.nextAfterId").value(1002));
+
+        mockMvc.perform(get("/api/v1/orders")
+                        .param("afterId", "1002")
+                        .param("size", "1")
+                        .with(httpBasic("customer-200", LOGIN_PASSWORD)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].orderNo").value("SF10002"))
+                .andExpect(jsonPath("$.nextAfterId").value(
+                        org.hamcrest.Matchers.nullValue()
+                ));
+    }
+
+    @Test
+    @DisplayName("修改买家参数、身份头或他人的游标不能扩大订单范围")
+    void shouldKeepOwnershipWhenListIdentityAndCursorAreForged() throws Exception {
+        mockMvc.perform(get("/api/v1/orders")
+                        .param("buyerId", "200")
+                        .param("customerId", "200")
+                        .param("afterId", "1001")
+                        .header("X-Buyer-Id", "200")
+                        .with(httpBasic("customer-201", LOGIN_PASSWORD)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].orderNo").value("SF20001"));
+    }
+
+    @Test
+    @DisplayName("历史订单没有可信买家映射时不可读取")
+    void shouldHideUnmappedLegacyOrder() throws Exception {
+        expectNotFound(orderGet("customer-200", 300L, "LEGACY"));
+    }
+
+    @Test
+    @DisplayName("没有订单的买家得到空列表")
+    void shouldReturnEmptyOrderList() throws Exception {
+        mockMvc.perform(get("/api/v1/orders")
+                        .with(httpBasic("empty-buyer", LOGIN_PASSWORD)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(0))
+                .andExpect(jsonPath("$.nextAfterId").value(
+                        org.hamcrest.Matchers.nullValue()
+                ));
+    }
+
+    @Test
+    @DisplayName("跨商铺列表同样要求认证与订单读取权限")
+    void shouldProtectOrderList() throws Exception {
+        expectUnauthorized(mockMvc.perform(get("/api/v1/orders")));
+        mockMvc.perform(get("/api/v1/orders")
+                        .with(httpBasic("no-order-access", LOGIN_PASSWORD)))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
+    }
+
+    @Test
+    @DisplayName("接口允许最大页大小，超出时返回与分页规则一致的错误提示")
+    void shouldEnforceSharedPageSizeLimit() throws Exception {
+        mockMvc.perform(get("/api/v1/orders")
+                        .param("size", Integer.toString(OrderQueryLimits.MAX_PAGE_SIZE))
+                        .with(httpBasic("customer-200", LOGIN_PASSWORD)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(3));
+
+        mockMvc.perform(get("/api/v1/orders")
+                        .param("size", Integer.toString(OrderQueryLimits.MAX_PAGE_SIZE + 1))
+                        .with(httpBasic("customer-200", LOGIN_PASSWORD)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_ARGUMENT"))
+                .andExpect(jsonPath("$.message").value(
+                        "每页最多返回" + OrderQueryLimits.MAX_PAGE_SIZE + "条"));
+    }
+
+    @Test
+    @DisplayName("分页参数越界或格式错误返回400")
+    void shouldValidatePageParameters() throws Exception {
+        for (String size : new String[]{"0", "-1", Integer.toString(OrderQueryLimits.MAX_PAGE_SIZE + 1), "abc"}) {
+            mockMvc.perform(get("/api/v1/orders")
+                            .param("size", size)
+                            .with(httpBasic("customer-200", LOGIN_PASSWORD)))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value("INVALID_ARGUMENT"));
+        }
+        for (String cursor : new String[]{"-1", "abc", "9223372036854775808"}) {
+            mockMvc.perform(get("/api/v1/orders")
+                            .param("afterId", cursor)
+                            .with(httpBasic("customer-200", LOGIN_PASSWORD)))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value("INVALID_ARGUMENT"));
+        }
+    }
+
+    @Test
+    @DisplayName("商铺定位必须为正数，切换商铺仍检查买家归属")
+    void shouldValidateShopIdAndOwnership() throws Exception {
+        orderGet("customer-200", 0L, "SF10001")
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/v1/shops/abc/orders/SF10001")
+                        .with(httpBasic("customer-200", LOGIN_PASSWORD)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_ARGUMENT"));
+        expectNotFound(orderGet("customer-201", 300L, "SF10001"));
+        expectNotFound(orderGet("customer-200", 999L, "SF10001"));
+    }
+
+    @Test
+    @DisplayName("不带商铺的旧详情入口不再开放以避免同号歧义")
+    void shouldDenyAmbiguousLegacyDetailRoute() throws Exception {
+        mockMvc.perform(get("/api/v1/orders/SF10001")
+                        .with(httpBasic("customer-200", LOGIN_PASSWORD)))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @DisplayName("聊天查单返回本人订单的真实状态和金额")
+    void shouldReplyWithOwnedOrderDetailsFromChat() throws Exception {
+        chatPost("customer-200", "查订单 100 SF10001")
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.reply").value(
+                        "商铺 100 的订单 SF10001：已发货，订单金额 199.90 CNY。"))
+                .andExpect(jsonPath("$.id").doesNotExist())
+                .andExpect(jsonPath("$.buyerId").doesNotExist())
+                .andExpect(jsonPath("$.customerId").doesNotExist())
+                .andExpect(jsonPath("$.tenantId").doesNotExist());
+    }
+
+    @Test
+    @DisplayName("聊天按输入商铺区分同一买家的同号订单")
+    void shouldReplyWithRequestedShopOrderFromChat() throws Exception {
+        chatPost("customer-200", "查订单 300 SF10001")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reply").value(
+                        "商铺 300 的订单 SF10001：待发货，订单金额 899.00 CNY。"));
+    }
+
+    @Test
+    @DisplayName("聊天不能读取其他买家或归属未知的历史订单")
+    void shouldHideOtherBuyersOrdersInChat() throws Exception {
+        expectNotFound(chatPost("customer-201", "查订单 100 SF10001"));
+        expectNotFound(chatPost("customer-200", "查订单 300 FOREIGN"));
+        expectNotFound(chatPost("customer-200", "查订单 300 LEGACY"));
+    }
+
+    @Test
+    @DisplayName("聊天查不到订单时沿用统一404响应")
+    void shouldReturnNotFoundForMissingOrderInChat() throws Exception {
+        expectNotFound(chatPost("customer-200", "查订单 100 SF_NOT_EXISTS"));
+    }
+
+    @Test
+    @DisplayName("聊天请求体参数和请求头中的伪造身份不能改变认证买家")
+    void shouldKeepAuthenticatedBuyerWhenChatIdentityIsForged() throws Exception {
+        expectNotFound(mockMvc.perform(post("/api/v1/chat/messages")
+                .with(httpBasic("customer-201", LOGIN_PASSWORD))
+                .with(csrf())
+                .param("buyerId", "200")
+                .param("customerId", "200")
+                .param("tenantId", "100")
+                .header("X-Buyer-Id", "200")
+                .header("X-Customer-Id", "200")
+                .header("X-Tenant-Id", "100")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(Map.of(
+                        "message", "查订单 100 SF10001",
+                        "buyerId", 200L,
+                        "customerId", 200L,
+                        "tenantId", 100L
+                )))));
+    }
+
+    @Test
+    @DisplayName("无订单权限仍可普通聊天但不能通过聊天查单")
+    void shouldEnforceOrderPermissionOnlyForOrderChat() throws Exception {
+        chatPost("no-order-access", "你好")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reply").value("收到你的问题：你好"));
+
+        chatPost("no-order-access", "查订单 100 SF10001")
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
+    }
+
+    @Test
+    @DisplayName("匿名聊天查单在提供CSRF后仍被身份认证拒绝")
+    void shouldRejectAnonymousOrderChat() throws Exception {
+        expectUnauthorized(mockMvc.perform(post("/api/v1/chat/messages")
+                .with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(chatBody("查订单 100 SF10001"))));
+    }
+
+    @Test
+    @DisplayName("认证客户聊天查单缺少CSRF仍返回403")
+    void shouldRejectOrderChatWithoutCsrf() throws Exception {
+        mockMvc.perform(post("/api/v1/chat/messages")
+                        .with(httpBasic("customer-200", LOGIN_PASSWORD))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(chatBody("查订单 100 SF10001")))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
+    }
+
+    @Test
+    @DisplayName("不完整或非法查单指令返回统一格式提示")
+    void shouldRejectMalformedOrderChatCommands() throws Exception {
+        String[] commands = {
+                "查订单",
+                "查订单 100",
+                "查订单 abc SF10001",
+                "查订单 0 SF10001",
+                "查订单 -1 SF10001",
+                "查订单 1.5 SF10001",
+                "查订单 9223372036854775808 SF10001",
+                "查订单 100 " + "A".repeat(65),
+                "查订单 100 SF10001 extra",
+                "查订单100 SF10001"
+        };
+
+        for (String command : commands) {
+            chatPost("customer-200", command)
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value("INVALID_ARGUMENT"))
+                    .andExpect(jsonPath("$.message").value(
+                            "查单格式：查订单 <商铺ID> <订单号>，例如：查订单 100 SF10001"));
+        }
+    }
+
+    @Test
+    @DisplayName("聊天消息超过1000字符时拒绝请求")
+    void shouldRejectOversizedChatMessage() throws Exception {
+        chatPost("customer-200", "A".repeat(1001))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_ARGUMENT"));
+    }
+
+    @Test
+    @DisplayName("聊天消息恰好1000字符时仍可正常处理")
+    void shouldAcceptMaximumLengthChatMessage() throws Exception {
+        String message = "A".repeat(1000);
+
+        chatPost("customer-200", message)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reply").value("收到你的问题：" + message));
+    }
+
+    @Test
+    @DisplayName("恰好64字符的订单号进入正常查询而非格式拒绝")
+    void shouldAcceptMaximumLengthOrderNumberInChat() throws Exception {
+        expectNotFound(chatPost("customer-200", "查订单 100 " + "A".repeat(64)));
+    }
+
+    private ResultActions chatPost(String username, String message) throws Exception {
+        return mockMvc.perform(post("/api/v1/chat/messages")
+                .with(httpBasic(username, LOGIN_PASSWORD))
+                .with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(chatBody(message)));
+    }
+
+    private String chatBody(String message) throws Exception {
+        return objectMapper.writeValueAsString(Map.of("message", message));
     }
 
     private void expectUnauthorized(ResultActions result) throws Exception {

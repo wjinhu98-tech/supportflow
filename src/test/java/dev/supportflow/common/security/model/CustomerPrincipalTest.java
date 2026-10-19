@@ -23,7 +23,6 @@ class CustomerPrincipalTest {
         );
 
         CustomerIdentity identity = new CustomerIdentity(
-                100L,
                 200L
         );
 

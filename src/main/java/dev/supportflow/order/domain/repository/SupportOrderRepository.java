@@ -2,30 +2,37 @@ package dev.supportflow.order.domain.repository;
 
 import dev.supportflow.order.domain.model.SupportOrder;
 
+import java.util.List;
 import java.util.Optional;
 
 /**
  * 客服订单读取能力。
  *
- * <p>查询必须同时限定租户、客户和订单号。</p>
+ * <p>每次查询必须限定认证结果中的平台买家ID。</p>
  */
 public interface SupportOrderRepository {
 
     /**
-     * 查询指定租户、客户名下的订单。
+     * 查询买家在指定商铺中的订单。
      *
-     * <p>租户和客户标识必须来自可信身份上下文，
-     * 不得直接使用客户端或模型自报的身份作为查询范围。</p>
+     * <p>商铺ID是定位条件，买家ID必须来自可信认证结果。</p>
      *
-     * @param tenantId 所属租户ID
-     * @param customerId 所属客户ID
+     * @param tenantId 商铺ID，不能代替买家归属校验
+     * @param buyerId 平台全局买家ID
      * @param orderNo 业务订单号，不得为 null 或空白
      * @return 范围内的订单；未找到时返回 Optional.empty()，不得返回 null
      * @throws IllegalArgumentException 订单号为 null 或空白
      */
-    Optional<SupportOrder> findByOrderNo(
-            long tenantId,
-            long customerId,
-            String orderNo
-    );
+    Optional<SupportOrder> findByOrderNo(long tenantId, long buyerId, String orderNo);
+
+    /**
+     * 跨商铺查询买家的订单，按 id 递增且仅返回 id 大于游标的记录。
+     *
+     * @param buyerId 来自认证结果的平台买家ID
+     * @param afterId 上一页游标，首次为0
+     * @param limit 最大读取行数，1至
+     *              {@value dev.supportflow.order.domain.OrderQueryLimits#MAX_FETCH_SIZE}，
+     *              含用于判断下一页的预读行
+     */
+    List<SupportOrder> findByBuyerId(long buyerId, long afterId, int limit);
 }

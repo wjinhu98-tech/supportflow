@@ -30,7 +30,7 @@ class LocalCustomerUserDetailsServiceTest {
                 .createDelegatingPasswordEncoder()
                 .encode(UUID.randomUUID().toString());
 
-        identity = new CustomerIdentity(100L, 200L);
+        identity = new CustomerIdentity(200L);
 
         LocalCustomerAccount account = new LocalCustomerAccount(
                 "customer-200",

@@ -13,6 +13,7 @@ public record SupportOrder(
         long id,
         long tenantId,
         long customerId,
+        long buyerId,
         String orderNo,
         OrderStatus status,
         BigDecimal totalAmount,
@@ -22,6 +23,9 @@ public record SupportOrder(
 ) {
 
     public SupportOrder {
+        if (buyerId <= 0) {
+            throw new IllegalArgumentException("buyerId must be positive");
+        }
         Objects.requireNonNull(orderNo, "orderNo must not be null");
         Objects.requireNonNull(status, "status must not be null");
         Objects.requireNonNull(totalAmount, "totalAmount must not be null");

@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
@@ -22,6 +23,7 @@ import org.springframework.security.web.savedrequest.NullRequestCache;
  */
 @Configuration(proxyBeanMethods = false)
 @Profile("local")
+@EnableMethodSecurity
 public class ApiSecurityConfiguration {
 
     @Bean
@@ -38,7 +40,9 @@ public class ApiSecurityConfiguration {
                                 HttpMethod.GET, "/api/v1/chat/welcome"
                         ).permitAll()
                         .requestMatchers(
-                                HttpMethod.GET, "/api/v1/orders/*"
+                                HttpMethod.GET,
+                                "/api/v1/orders",
+                                "/api/v1/shops/*/orders/*"
                         ).hasAuthority(
                                 SecurityPermission.ORDER_READ.getAuthority()
                         )

@@ -66,7 +66,7 @@ class LocalConfigurationTemplateTest {
                                     principal -> assertThat(
                                             principal.getIdentity()
                                     ).isEqualTo(
-                                            new CustomerIdentity(100L, 200L)
+                                            new CustomerIdentity(200L)
                                     )
                             );
                 });

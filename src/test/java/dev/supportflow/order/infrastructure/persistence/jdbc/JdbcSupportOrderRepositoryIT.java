@@ -1,5 +1,6 @@
 package dev.supportflow.order.infrastructure.persistence.jdbc;
 
+import dev.supportflow.order.domain.OrderQueryLimits;
 import dev.supportflow.order.domain.model.OrderStatus;
 import dev.supportflow.order.domain.repository.SupportOrderRepository;
 import org.flywaydb.core.Flyway;
@@ -112,6 +113,7 @@ class JdbcSupportOrderRepositoryIT {
                         id,
                         tenant_id,
                         customer_id,
+                        buyer_id,
                         order_no,
                         status,
                         total_amount,
@@ -121,6 +123,7 @@ class JdbcSupportOrderRepositoryIT {
                     ) VALUES (
                         1001,
                         100,
+                        200,
                         200,
                         'SF10001',
                         'SHIPPED',
@@ -138,6 +141,7 @@ class JdbcSupportOrderRepositoryIT {
                         id,
                         tenant_id,
                         customer_id,
+                        buyer_id,
                         order_no,
                         status,
                         total_amount,
@@ -147,6 +151,7 @@ class JdbcSupportOrderRepositoryIT {
                     ) VALUES (
                         1002,
                         300,
+                        777,
                         200,
                         'SF10001',
                         'PAID',
@@ -173,6 +178,7 @@ class JdbcSupportOrderRepositoryIT {
             assertThat(order.id()).isEqualTo(1001L);
             assertThat(order.tenantId()).isEqualTo(100L);
             assertThat(order.customerId()).isEqualTo(200L);
+            assertThat(order.buyerId()).isEqualTo(200L);
             assertThat(order.orderNo()).isEqualTo("SF10001");
             assertThat(order.status()).isEqualTo(OrderStatus.SHIPPED);
             assertThat(order.totalAmount())
@@ -210,7 +216,7 @@ class JdbcSupportOrderRepositoryIT {
     }
 
     @Test
-    @DisplayName("客户不匹配时不能查询到订单")
+    @DisplayName("平台买家不匹配时不能查询到订单")
     void shouldReturnEmptyWhenCustomerDoesNotMatch() {
         var result = repository.findByOrderNo(
                 100L,
@@ -249,7 +255,8 @@ class JdbcSupportOrderRepositoryIT {
         assertThat(secondTenantResult).hasValueSatisfying(order -> {
             assertThat(order.id()).isEqualTo(1002L);
             assertThat(order.tenantId()).isEqualTo(300L);
-            assertThat(order.customerId()).isEqualTo(200L);
+            assertThat(order.customerId()).isEqualTo(777L);
+            assertThat(order.buyerId()).isEqualTo(200L);
             assertThat(order.orderNo()).isEqualTo("SF10001");
             assertThat(order.status()).isEqualTo(OrderStatus.PAID);
             assertThat(order.totalAmount())
@@ -288,4 +295,35 @@ class JdbcSupportOrderRepositoryIT {
                 .hasMessage("orderNo must not be null or blank");
     }
 
+
+    @Test
+    @DisplayName("按平台买家查询跨商铺列表，支持游标与数量限制")
+    void shouldListAcrossShopsWithBoundedCursor() {
+        assertThat(repository.findByBuyerId(200L, 0L, OrderQueryLimits.MAX_FETCH_SIZE))
+                .extracting(order -> order.id())
+                .containsExactly(1001L, 1002L);
+        assertThat(repository.findByBuyerId(200L, 0L, 1))
+                .extracting(order -> order.id())
+                .containsExactly(1001L);
+        assertThat(repository.findByBuyerId(200L, 1001L, 10))
+                .extracting(order -> order.id())
+                .containsExactly(1002L);
+        assertThat(repository.findByBuyerId(999L, 0L, 10)).isEmpty();
+        assertThat(repository.findByBuyerId(200L, Long.MAX_VALUE, 10)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("仓储拒绝无效身份和超出上限的查询数量")
+    void shouldRejectInvalidBuyerAndLimits() {
+        assertThatThrownBy(() -> repository.findByBuyerId(200L, 0L, 0))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.findByBuyerId(0L, 0L, 10))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.findByBuyerId(200L, -1L, 10))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.findByBuyerId(200L, 0L, OrderQueryLimits.MAX_FETCH_SIZE + 1))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.findByOrderNo(0L, 200L, "SF10001"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 }

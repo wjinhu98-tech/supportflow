@@ -39,3 +39,11 @@ build/
 
 /.local/
 /http-client.private.env.json
+
+### IntelliJ 本地/敏感文件 ###
+.idea/dataSources.local.xml
+.idea/dataSources/
+.idea/httpRequests/
+.idea/workspace.xml
+.idea/uiDesigner.xml
+.idea/sqldialects.xml

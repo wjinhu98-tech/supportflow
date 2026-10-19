@@ -27,7 +27,6 @@ supportflow:
         - username: customer-200
           password-hash: "${SUPPORTFLOW_CUSTOMER_200_PASSWORD_HASH}"
           identity:
-            tenant-id: 100
-            customer-id: 200
+            buyer-id: 200
           permissions:
             - ORDER_READ

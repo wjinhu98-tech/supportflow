@@ -4,10 +4,18 @@
 GET {{baseUrl}}/api/v1/chat/welcome
 
 ### 未认证查询：401
-GET {{baseUrl}}/api/v1/orders/SF10001
+GET {{baseUrl}}/api/v1/orders
 
-### 本人订单：存在则200，不存在或不属于当前身份则404
-GET {{baseUrl}}/api/v1/orders/SF10001
+### 我的跨商铺订单：200，首次查询从 afterId=0 开始
+GET {{baseUrl}}/api/v1/orders?afterId=0&size=20
+Authorization: Basic {{username}} {{password}}
+
+### 商铺100中的本人订单：存在则200，不存在或属于其他买家则404
+GET {{baseUrl}}/api/v1/shops/100/orders/SF10001
+Authorization: Basic {{username}} {{password}}
+
+### 同一账号查询商铺300的订单，仍按当前买家身份检查归属
+GET {{baseUrl}}/api/v1/shops/300/orders/SF10001
 Authorization: Basic {{username}} {{password}}
 
 ### 取得 CSRF token；HTTP 客户端会保存 session cookie

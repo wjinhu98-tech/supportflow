@@ -7,9 +7,11 @@ import java.time.Instant;
 import java.util.Objects;
 
 /**
- * 当前客户可见的订单响应，不包含内部主键及归属标识。
+ * 买家可见的订单响应；商铺ID用于区分跨商铺同号订单。
+ * 不公开内部主键、平台买家ID及店铺内客户编号。
  */
 public record OrderResponse(
+        long shopId,
         String orderNo,
         String status,
         String statusDescription,
@@ -26,6 +28,7 @@ public record OrderResponse(
         Objects.requireNonNull(order, "order must not be null");
 
         return new OrderResponse(
+                order.tenantId(),
                 order.orderNo(),
                 order.status().getCode(),
                 order.status().getDescription(),

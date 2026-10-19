@@ -1,4 +1,48 @@
-POST http://localhost:8080/api/v1/chat/messages
+### 在 IDEA 选择 local 环境；凭据从已忽略的私密环境文件取得。
+### SF10001 是自动化测试数据；本地没有此订单时应返回404，不会自动插入数据。
+
+### 先取得 CSRF token；保持 HTTP 客户端保存的 session cookie
+GET {{baseUrl}}/api/v1/security/csrf
+Authorization: Basic {{username}} {{password}}
+
+> {%
+    client.global.set("csrfToken", response.body.token);
+%}
+
+### 普通消息仍回显：200
+POST {{baseUrl}}/api/v1/chat/messages
+Authorization: Basic {{username}} {{password}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{
+  "message": "你好"
+}
+
+### 查当前买家在商铺100的订单：存在则200，不存在或属于别人则404
+POST {{baseUrl}}/api/v1/chat/messages
+Authorization: Basic {{username}} {{password}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{
+  "message": "查订单 100 SF10001"
+}
+
+### 查单指令缺少订单号：400，并提示正确格式
+POST {{baseUrl}}/api/v1/chat/messages
+Authorization: Basic {{username}} {{password}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{
+  "message": "查订单 100"
+}
+
+### 空消息：400
+POST {{baseUrl}}/api/v1/chat/messages
+Authorization: Basic {{username}} {{password}}
+X-CSRF-TOKEN: {{csrfToken}}
 Content-Type: application/json
 
 {
@@ -6,7 +50,9 @@ Content-Type: application/json
 }
 
 ### JSON 格式错误：预期 400
-POST http://localhost:8080/api/v1/chat/messages
+POST {{baseUrl}}/api/v1/chat/messages
+Authorization: Basic {{username}} {{password}}
+X-CSRF-TOKEN: {{csrfToken}}
 Content-Type: application/json
 
 {"message": }

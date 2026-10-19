@@ -42,7 +42,7 @@ class CustomerAuthenticationTest {
 
         String passwordHash = passwordEncoder.encode(rawPassword);
 
-        identity = new CustomerIdentity(100L, 200L);
+        identity = new CustomerIdentity(200L);
 
         LocalCustomerAccount account = new LocalCustomerAccount(
                 "customer-200",

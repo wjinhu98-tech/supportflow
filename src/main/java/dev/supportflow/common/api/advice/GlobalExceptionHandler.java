@@ -1,5 +1,6 @@
 package dev.supportflow.common.api.advice;
 
+import dev.supportflow.chat.application.InvalidChatCommandException;
 import dev.supportflow.common.api.error.ErrorCode;
 import dev.supportflow.common.api.response.ApiErrorResponse;
 import dev.supportflow.order.application.exception.OrderNotFoundException;
@@ -9,12 +10,14 @@ import org.springframework.context.MessageSourceResolvable;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.ErrorResponse;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import java.util.Objects;
 
@@ -26,6 +29,21 @@ public class GlobalExceptionHandler {
 
     private static final Logger LOGGER =
             LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    @ExceptionHandler(InvalidChatCommandException.class)
+    public ResponseEntity<ApiErrorResponse> handleInvalidChatCommand(
+            InvalidChatCommandException exception) {
+        return ResponseEntity.badRequest().body(
+                new ApiErrorResponse(ErrorCode.INVALID_ARGUMENT, exception.getMessage()));
+    }
+
+    /** 方法级授权在业务调用时拒绝访问，也要返回统一403，不能落入500兜底。 */
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<ApiErrorResponse> handleAccessDenied() {
+        ErrorCode code = ErrorCode.ACCESS_DENIED;
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(
+                new ApiErrorResponse(code, code.getDefaultMessage()));
+    }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ApiErrorResponse> handleValidationException(
@@ -93,6 +111,19 @@ public class GlobalExceptionHandler {
 
         return ResponseEntity.badRequest().body(
                 new ApiErrorResponse(ErrorCode.INVALID_ARGUMENT, message)
+        );
+    }
+
+    /**
+     * 路径或查询参数无法转换成声明类型时属于客户端参数错误。
+     */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ApiErrorResponse> handleArgumentTypeMismatch() {
+        return ResponseEntity.badRequest().body(
+                new ApiErrorResponse(
+                        ErrorCode.INVALID_ARGUMENT,
+                        "请求参数类型不正确"
+                )
         );
     }
 
