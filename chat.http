@@ -29,6 +29,37 @@ Content-Type: application/json
   "message": "查订单 100 SF10001"
 }
 
+### 查看当前买家的跨商铺订单：最多20笔，首次没有订单时回复“暂无订单。”
+POST {{baseUrl}}/api/v1/chat/messages
+Authorization: Basic {{username}} {{password}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{
+  "message": "我的订单"
+}
+
+### 继续查看：把示例2020换成上一条回复给出的游标；它不是页码，不能按页码加一
+### 只有回复中出现“还有更多订单，请发送”时，才需要复制那条完整指令继续
+POST {{baseUrl}}/api/v1/chat/messages
+Authorization: Basic {{username}} {{password}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{
+  "message": "我的订单 2020"
+}
+
+### 列表指令非法游标：400，并提示正确格式
+POST {{baseUrl}}/api/v1/chat/messages
+Authorization: Basic {{username}} {{password}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{
+  "message": "我的订单 -1"
+}
+
 ### 查单指令缺少订单号：400，并提示正确格式
 POST {{baseUrl}}/api/v1/chat/messages
 Authorization: Basic {{username}} {{password}}

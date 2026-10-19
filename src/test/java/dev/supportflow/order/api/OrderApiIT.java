@@ -35,8 +35,10 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -109,6 +111,8 @@ class OrderApiIT {
         registerAccount(registry, 2, "customer-999", 999, "ORDER_READ");
         registerAccount(registry, 3, "no-order-access", 200, "");
         registerAccount(registry, 4, "empty-buyer", 888, "ORDER_READ");
+        registerAccount(registry, 5, "paged-buyer", 555, "ORDER_READ");
+        registerAccount(registry, 6, "full-page-buyer", 556, "ORDER_READ");
     }
 
     private static void registerAccount(
@@ -184,8 +188,40 @@ class OrderApiIT {
                      '2026-10-01 02:03:04.123', '2026-10-02 05:06:07.456')
                     """
             );
+            insertChatListOrders(connection, 555L, 2001L,
+                    OrderQueryLimits.DEFAULT_PAGE_SIZE + 1, "PAGED-");
+            insertChatListOrders(connection, 556L, 3001L,
+                    OrderQueryLimits.DEFAULT_PAGE_SIZE, "FULL-");
         }
         databasePrepared = true;
+    }
+
+    private static void insertChatListOrders(
+            Connection connection, long buyerId, long firstId, int count, String orderPrefix
+    ) throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement(
+                """
+                INSERT INTO support_order (
+                    id, tenant_id, customer_id, buyer_id, order_no, status,
+                    total_amount, currency, created_at, updated_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, 'PAID', 10.00, 'CNY',
+                    '2026-10-01 02:03:04.123', '2026-10-02 05:06:07.456'
+                )
+                """
+        )) {
+            for (int offset = 0; offset < count; offset++) {
+                int sequence = offset + 1;
+                long shopId = sequence % 2 == 1 ? 100L : 300L;
+                insert.setLong(1, firstId + offset);
+                insert.setLong(2, shopId);
+                insert.setLong(3, shopId == 100L ? 700L : 701L);
+                insert.setLong(4, buyerId);
+                insert.setString(5, orderPrefix + sequence);
+                insert.addBatch();
+            }
+            insert.executeBatch();
+        }
     }
 
     @BeforeEach
@@ -776,6 +812,204 @@ class OrderApiIT {
     @DisplayName("恰好64字符的订单号进入正常查询而非格式拒绝")
     void shouldAcceptMaximumLengthOrderNumberInChat() throws Exception {
         expectNotFound(chatPost("customer-200", "查订单 100 " + "A".repeat(64)));
+    }
+
+    @Test
+    @DisplayName("聊天我的订单只展示本人跨商铺订单，显式零游标与首次查询一致")
+    void shouldListOwnedOrdersAcrossShopsFromChat() throws Exception {
+        String expectedReply = """
+                你的订单（本批 3 笔）：
+                1. 商铺 100 的订单 SF10001：已发货，订单金额 199.90 CNY。
+                2. 商铺 300 的订单 SF10001：待发货，订单金额 899.00 CNY。
+                3. 商铺 100 的订单 SF10002：已完成，订单金额 9.90 CNY。
+                没有更多订单。""";
+
+        chatPost("customer-200", "我的订单")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reply").value(expectedReply))
+                .andExpect(jsonPath("$.buyerId").doesNotExist())
+                .andExpect(jsonPath("$.customerId").doesNotExist());
+
+        chatPost("customer-200", "我的订单 0")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reply").value(expectedReply));
+    }
+
+    @Test
+    @DisplayName("首次查询没有订单时给出明确空列表提示")
+    void shouldReturnNoOrdersForFirstEmptyChatList() throws Exception {
+        chatPost("empty-buyer", "我的订单")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reply").value("暂无订单。"));
+        chatPost("empty-buyer", "我的订单 0")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reply").value("暂无订单。"));
+    }
+
+    @Test
+    @DisplayName("聊天列表按回复中的指令继续翻页，预读订单不提前展示且不重复不漏单")
+    void shouldFollowChatListContinuationWithoutShowingLookahead() throws Exception {
+        String firstReply = chatReply("paged-buyer", "我的订单");
+        List<String> firstLines = firstReply.lines().toList();
+        int pageSize = OrderQueryLimits.DEFAULT_PAGE_SIZE;
+
+        assertThat(firstLines).hasSize(pageSize + 2);
+        assertThat(firstLines.getFirst()).isEqualTo("你的订单（本批 " + pageSize + " 笔）：");
+        assertThat(firstLines.subList(1, pageSize + 1))
+                .containsExactlyElementsOf(expectedChatListOrderLines("PAGED-", 1, pageSize));
+        assertThat(firstReply).doesNotContain("订单 PAGED-" + (pageSize + 1) + "：");
+
+        String continuation = chatListContinuation(firstReply);
+        String lastReply = chatReply("paged-buyer", continuation);
+        List<String> lastLines = lastReply.lines().toList();
+
+        assertThat(lastLines).hasSize(3);
+        assertThat(lastLines.getFirst()).isEqualTo("你的订单（本批 1 笔）：");
+        assertThat(lastLines.get(1))
+                .isEqualTo(expectedChatListOrderLines("PAGED-", pageSize + 1, 1).getFirst());
+        assertThat(lastLines.getLast()).isEqualTo("没有更多订单。");
+        assertThat(lastReply).doesNotContain("还有更多订单，请发送：");
+    }
+
+    @Test
+    @DisplayName("恰好一整批订单没有下一页，不向客户提供多余翻页指令")
+    void shouldNotOfferContinuationForExactlyFullChatList() throws Exception {
+        String reply = chatReply("full-page-buyer", "我的订单");
+        List<String> lines = reply.lines().toList();
+        int pageSize = OrderQueryLimits.DEFAULT_PAGE_SIZE;
+
+        assertThat(lines).hasSize(pageSize + 2);
+        assertThat(lines.getFirst()).isEqualTo("你的订单（本批 " + pageSize + " 笔）：");
+        assertThat(lines.subList(1, pageSize + 1))
+                .containsExactlyElementsOf(expectedChatListOrderLines("FULL-", 1, pageSize));
+        assertThat(lines.getLast()).isEqualTo("没有更多订单。");
+        assertThat(reply).doesNotContain("还有更多订单，请发送：");
+    }
+
+    @Test
+    @DisplayName("非零游标已无订单时表示翻页结束而非首次空列表")
+    void shouldReportNoMoreOrdersForExhaustedChatCursor() throws Exception {
+        chatPost("customer-200", "我的订单 1004")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reply").value("没有更多订单。"));
+        chatPost("customer-200", "我的订单 " + Long.MAX_VALUE)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reply").value("没有更多订单。"));
+    }
+
+    @Test
+    @DisplayName("聊天列表忽略请求体查询参数和请求头中的伪造买家身份")
+    void shouldKeepBuyerWhenChatListIdentityIsForged() throws Exception {
+        mockMvc.perform(post("/api/v1/chat/messages")
+                        .with(httpBasic("customer-201", LOGIN_PASSWORD))
+                        .with(csrf())
+                        .param("buyerId", "555")
+                        .param("customerId", "700")
+                        .param("tenantId", "300")
+                        .header("X-Buyer-Id", "555")
+                        .header("X-Customer-Id", "700")
+                        .header("X-Tenant-Id", "300")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "message", "我的订单",
+                                "buyerId", 555L,
+                                "customerId", 700L,
+                                "tenantId", 300L
+                        ))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reply").value("""
+                        你的订单（本批 1 笔）：
+                        1. 商铺 100 的订单 SF20001：待发货，订单金额 49.50 CNY。
+                        没有更多订单。"""));
+    }
+
+    @Test
+    @DisplayName("复制其他买家回复中的翻页指令不会取得对方剩余订单")
+    void shouldKeepBuyerWhenAnotherBuyersChatCursorIsCopied() throws Exception {
+        String anotherBuyersReply = chatReply("paged-buyer", "我的订单");
+        String copiedContinuation = chatListContinuation(anotherBuyersReply);
+
+        chatPost("customer-201", copiedContinuation)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reply").value("没有更多订单。"));
+    }
+
+    @Test
+    @DisplayName("没有订单读取权限的账号不能通过聊天查询或翻页")
+    void shouldRequireOrderPermissionForChatList() throws Exception {
+        chatPost("no-order-access", "我的订单")
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
+        chatPost("no-order-access", "我的订单 0")
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
+    }
+
+    @Test
+    @DisplayName("匿名聊天订单列表即使带有CSRF也必须认证")
+    void shouldRejectAnonymousChatList() throws Exception {
+        expectUnauthorized(mockMvc.perform(post("/api/v1/chat/messages")
+                .with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(chatBody("我的订单"))));
+    }
+
+    @Test
+    @DisplayName("已认证的聊天订单列表缺少CSRF仍然拒绝")
+    void shouldRejectChatListWithoutCsrf() throws Exception {
+        mockMvc.perform(post("/api/v1/chat/messages")
+                        .with(httpBasic("customer-200", LOGIN_PASSWORD))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(chatBody("我的订单")))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
+    }
+
+    @Test
+    @DisplayName("聊天列表拒绝负数溢出及额外字段并给出统一复制提示")
+    void shouldRejectInvalidChatListCommands() throws Exception {
+        String[] commands = {
+                "我的订单 -1",
+                "我的订单 9223372036854775808",
+                "我的订单 abc",
+                "我的订单 1.5",
+                "我的订单 1 2",
+                "我的订单 buyerId=200",
+                "我的订单 0 buyerId=200",
+                "我的订单1"
+        };
+
+        for (String command : commands) {
+            chatPost("customer-200", command)
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value("INVALID_ARGUMENT"))
+                    .andExpect(jsonPath("$.message").value(
+                            "列表格式：我的订单，或：我的订单 <非负整数游标>；翻页请复制回复中的指令"));
+        }
+    }
+
+    private List<String> expectedChatListOrderLines(String orderPrefix, int firstSequence, int count) {
+        return IntStream.range(0, count).mapToObj(offset -> {
+            int sequence = firstSequence + offset;
+            long shopId = sequence % 2 == 1 ? 100L : 300L;
+            return (offset + 1) + ". 商铺 " + shopId + " 的订单 " + orderPrefix + sequence
+                    + "：待发货，订单金额 10.00 CNY。";
+        }).toList();
+    }
+
+    private String chatReply(String username, String message) throws Exception {
+        MvcResult result = chatPost(username, message)
+                .andExpect(status().isOk()).andReturn();
+        return objectMapper.readTree(result.getResponse().getContentAsString()).get("reply").asString();
+    }
+
+    private String chatListContinuation(String reply) {
+        String prefix = "还有更多订单，请发送：";
+        String lastLine = reply.lines().toList().getLast();
+        assertThat(lastLine).startsWith(prefix);
+        String command = lastLine.substring(prefix.length());
+        assertThat(command).startsWith("我的订单 ");
+        return command;
     }
 
     private ResultActions chatPost(String username, String message) throws Exception {
