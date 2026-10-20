@@ -4,21 +4,23 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import dev.supportflow.order.domain.OrderQueryLimits;
 
 /**
- * 只解析“查订单 商铺ID 订单号”；普通聊天返回空，格式错误则明确拒绝。
- * 本次不实现自然语言理解，也不从消息中提取买家身份。
+ * 只解析“查订单 订单号”。商铺由HTTP入口决定，指令不携带商铺或买家身份。
+ * 无分隔符的自然语言交给模型；单独“查订单”由服务展示可选订单。
  */
-record OrderLookupCommand(long shopId, String orderNo) {
+record OrderLookupCommand(String orderNo) {
 
     private static final String PREFIX = "查订单";
-    private static final int MAX_ORDER_NO_LENGTH = 64;
     private static final Pattern COMMAND_PATTERN = Pattern.compile(
-            "\\A查订单\\s+([0-9]+)\\s+(\\S+)\\z", Pattern.UNICODE_CHARACTER_CLASS);
+            "\\A查订单\\s+(\\S+)\\z", Pattern.UNICODE_CHARACTER_CLASS);
 
     OrderLookupCommand {
-        if (shopId <= 0 || orderNo == null || orderNo.isBlank()
-                || orderNo.length() > MAX_ORDER_NO_LENGTH) {
+        if (orderNo == null || orderNo.isBlank() || orderNo.length() > OrderQueryLimits.MAX_ORDER_NO_LENGTH
+                || orderNo.codePoints().anyMatch(codePoint ->
+                        Character.isWhitespace(codePoint) || Character.isSpaceChar(codePoint)
+                                || Character.isISOControl(codePoint))) {
             throw new InvalidChatCommandException();
         }
     }
@@ -26,7 +28,9 @@ record OrderLookupCommand(long shopId, String orderNo) {
     static Optional<OrderLookupCommand> parse(String message) {
         Objects.requireNonNull(message, "message must not be null");
         String normalized = message.strip();
-        if (!normalized.startsWith(PREFIX)) {
+        if (!normalized.startsWith(PREFIX) || normalized.equals(PREFIX)
+                || !(Character.isWhitespace(normalized.codePointAt(PREFIX.length()))
+                || Character.isSpaceChar(normalized.codePointAt(PREFIX.length())))) {
             return Optional.empty();
         }
 
@@ -34,11 +38,6 @@ record OrderLookupCommand(long shopId, String orderNo) {
         if (!matcher.matches()) {
             throw new InvalidChatCommandException();
         }
-        try {
-            return Optional.of(new OrderLookupCommand(
-                    Long.parseLong(matcher.group(1)), matcher.group(2)));
-        } catch (NumberFormatException exception) {
-            throw new InvalidChatCommandException();
-        }
+        return Optional.of(new OrderLookupCommand(matcher.group(1)));
     }
 }

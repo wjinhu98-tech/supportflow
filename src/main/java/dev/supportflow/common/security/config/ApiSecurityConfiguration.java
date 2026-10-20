@@ -50,7 +50,9 @@ public class ApiSecurityConfiguration {
                                 HttpMethod.GET, "/api/v1/security/csrf"
                         ).authenticated()
                         .requestMatchers(
-                                HttpMethod.POST, "/api/v1/chat/messages"
+                                HttpMethod.POST,
+                                "/api/v1/shops/*/chat/messages",
+                                "/api/v1/chat/messages"
                         ).authenticated()
                         .anyRequest().denyAll()
                 )

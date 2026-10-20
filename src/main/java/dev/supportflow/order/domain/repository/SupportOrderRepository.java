@@ -35,4 +35,16 @@ public interface SupportOrderRepository {
      *              含用于判断下一页的预读行
      */
     List<SupportOrder> findByBuyerId(long buyerId, long afterId, int limit);
+
+    /**
+     * Lists a buyer's orders within one shop, filtered in the database before
+     * applying the ascending id cursor and bounded limit.
+     *
+     * @param shopId requested shop id, must be positive
+     * @param buyerId authenticated platform buyer id, must be positive
+     * @param afterId exclusive id cursor, zero for the first page
+     * @param limit bounded fetch size, including any lookahead row
+     */
+    List<SupportOrder> findByShopAndBuyerId(
+            long shopId, long buyerId, long afterId, int limit);
 }

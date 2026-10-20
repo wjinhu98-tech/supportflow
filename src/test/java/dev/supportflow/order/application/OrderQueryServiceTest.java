@@ -22,6 +22,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class OrderQueryServiceTest {
@@ -205,6 +206,153 @@ class OrderQueryServiceTest {
         assertThatThrownBy(() -> orderQueryService.listOwnedOrders(
                 CUSTOMER_IDENTITY, 0L, OrderQueryLimits.MAX_PAGE_SIZE + 1
         )).isInstanceOf(IllegalArgumentException.class);
+        verifyNoInteractions(supportOrderRepository);
+    }
+
+    @Test
+    @DisplayName("Shop pagination keeps the lookahead order for the next page")
+    void shouldBuildShopCursorWithoutDroppingNextPageOrder() {
+        SupportOrder first = order(1001L, 100L);
+        SupportOrder second = order(1004L, 100L);
+        SupportOrder third = order(1006L, 100L);
+        when(supportOrderRepository.findByShopAndBuyerId(100L, 200L, 0L, 3))
+                .thenReturn(List.of(first, second, third));
+        when(supportOrderRepository.findByShopAndBuyerId(100L, 200L, 1004L, 3))
+                .thenReturn(List.of(third));
+
+        OrderPage firstPage = orderQueryService.listOwnedOrdersInShop(
+                CUSTOMER_IDENTITY, 100L, 0L, 2);
+        assertThat(firstPage.items()).containsExactly(first, second);
+        assertThat(firstPage.nextAfterId()).isEqualTo(1004L);
+
+        OrderPage secondPage = orderQueryService.listOwnedOrdersInShop(
+                CUSTOMER_IDENTITY, 100L, firstPage.nextAfterId(), 2);
+        assertThat(secondPage.items()).containsExactly(third);
+        assertThat(secondPage.nextAfterId()).isNull();
+        verify(supportOrderRepository).findByShopAndBuyerId(100L, 200L, 0L, 3);
+        verify(supportOrderRepository).findByShopAndBuyerId(100L, 200L, 1004L, 3);
+        verifyNoMoreInteractions(supportOrderRepository);
+    }
+
+    @Test
+    @DisplayName("An exactly full shop page has no next cursor without a lookahead row")
+    void shouldFinishShopPaginationWhenResultExactlyFillsPage() {
+        SupportOrder first = order(1001L, 100L);
+        SupportOrder second = order(1004L, 100L);
+        when(supportOrderRepository.findByShopAndBuyerId(100L, 200L, 0L, 3))
+                .thenReturn(List.of(first, second));
+
+        OrderPage page = orderQueryService.listOwnedOrdersInShop(
+                CUSTOMER_IDENTITY, 100L, 0L, 2);
+
+        assertThat(page.items()).containsExactly(first, second);
+        assertThat(page.nextAfterId()).isNull();
+        verify(supportOrderRepository).findByShopAndBuyerId(100L, 200L, 0L, 3);
+        verifyNoMoreInteractions(supportOrderRepository);
+    }
+
+    @Test
+    @DisplayName("An empty shop query never falls back to account-wide orders")
+    void shouldReturnEmptyShopPageWithoutAccountWideFallback() {
+        when(supportOrderRepository.findByShopAndBuyerId(999L, 200L, 0L, 3))
+                .thenReturn(List.of());
+
+        OrderPage page = orderQueryService.listOwnedOrdersInShop(
+                CUSTOMER_IDENTITY, 999L, 0L, 2);
+
+        assertThat(page.items()).isEmpty();
+        assertThat(page.nextAfterId()).isNull();
+        verify(supportOrderRepository).findByShopAndBuyerId(999L, 200L, 0L, 3);
+        verifyNoMoreInteractions(supportOrderRepository);
+    }
+
+    @Test
+    @DisplayName("The authenticated platform buyer is used for the requested shop")
+    void shouldUseAuthenticatedBuyerForShopQuery() {
+        CustomerIdentity otherBuyer = new CustomerIdentity(987L);
+        when(supportOrderRepository.findByShopAndBuyerId(300L, 987L, 17L, 2))
+                .thenReturn(List.of());
+
+        OrderPage page = orderQueryService.listOwnedOrdersInShop(
+                otherBuyer, 300L, 17L, 1);
+
+        assertThat(page.items()).isEmpty();
+        assertThat(page.nextAfterId()).isNull();
+        verify(supportOrderRepository).findByShopAndBuyerId(300L, 987L, 17L, 2);
+        verifyNoMoreInteractions(supportOrderRepository);
+    }
+
+    @Test
+    @DisplayName("Maximum shop page size uses the shared bound and hides lookahead")
+    void shouldAllowMaximumShopPageSizeWithLookahead() {
+        List<SupportOrder> rows = LongStream.rangeClosed(1, OrderQueryLimits.MAX_FETCH_SIZE)
+                .mapToObj(id -> order(id, 100L))
+                .toList();
+        when(supportOrderRepository.findByShopAndBuyerId(
+                100L, 200L, 0L, OrderQueryLimits.MAX_FETCH_SIZE))
+                .thenReturn(rows);
+
+        OrderPage page = orderQueryService.listOwnedOrdersInShop(
+                CUSTOMER_IDENTITY, 100L, 0L, OrderQueryLimits.MAX_PAGE_SIZE);
+
+        assertThat(page.items()).containsExactlyElementsOf(
+                rows.subList(0, OrderQueryLimits.MAX_PAGE_SIZE));
+        assertThat(page.nextAfterId()).isEqualTo((long) OrderQueryLimits.MAX_PAGE_SIZE);
+        verify(supportOrderRepository).findByShopAndBuyerId(
+                100L, 200L, 0L, OrderQueryLimits.MAX_FETCH_SIZE);
+        verifyNoMoreInteractions(supportOrderRepository);
+    }
+
+    @Test
+    @DisplayName("The largest id cursor remains a valid empty shop page")
+    void shouldAllowLastLongCursorForShopQuery() {
+        when(supportOrderRepository.findByShopAndBuyerId(
+                100L, 200L, Long.MAX_VALUE, 2)).thenReturn(List.of());
+
+        OrderPage page = orderQueryService.listOwnedOrdersInShop(
+                CUSTOMER_IDENTITY, 100L, Long.MAX_VALUE, 1);
+
+        assertThat(page.items()).isEmpty();
+        assertThat(page.nextAfterId()).isNull();
+        verify(supportOrderRepository).findByShopAndBuyerId(
+                100L, 200L, Long.MAX_VALUE, 2);
+        verifyNoMoreInteractions(supportOrderRepository);
+    }
+
+    @Test
+    @DisplayName("Invalid shop or pagination is rejected before repository access")
+    void shouldRejectInvalidShopAndShopPagination() {
+        assertThatThrownBy(() -> orderQueryService.listOwnedOrdersInShop(
+                CUSTOMER_IDENTITY, 0L, 0L, 20))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> orderQueryService.listOwnedOrdersInShop(
+                CUSTOMER_IDENTITY, -1L, 0L, 20))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> orderQueryService.listOwnedOrdersInShop(
+                CUSTOMER_IDENTITY, 100L, -1L, 20))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> orderQueryService.listOwnedOrdersInShop(
+                CUSTOMER_IDENTITY, 100L, 0L, 0))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> orderQueryService.listOwnedOrdersInShop(
+                CUSTOMER_IDENTITY, 100L, 0L, -1))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> orderQueryService.listOwnedOrdersInShop(
+                CUSTOMER_IDENTITY, 100L, 0L, OrderQueryLimits.MAX_PAGE_SIZE + 1))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> orderQueryService.listOwnedOrdersInShop(
+                CUSTOMER_IDENTITY, 100L, 0L, Integer.MAX_VALUE))
+                .isInstanceOf(IllegalArgumentException.class);
+        verifyNoInteractions(supportOrderRepository);
+    }
+
+    @Test
+    @DisplayName("Shop queries require a trusted customer identity")
+    void shouldRejectNullIdentityForShopQuery() {
+        assertThatThrownBy(() -> orderQueryService.listOwnedOrdersInShop(
+                null, 100L, 0L, 20))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("identity must not be null");
         verifyNoInteractions(supportOrderRepository);
     }
 

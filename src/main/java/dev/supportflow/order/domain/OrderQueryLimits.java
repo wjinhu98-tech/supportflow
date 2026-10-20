@@ -5,6 +5,7 @@ package dev.supportflow.order.domain;
  */
 public final class OrderQueryLimits {
 
+    public static final int MAX_ORDER_NO_LENGTH = 64;
     public static final int DEFAULT_PAGE_SIZE = 20;
     public static final int MAX_PAGE_SIZE = 100;
 

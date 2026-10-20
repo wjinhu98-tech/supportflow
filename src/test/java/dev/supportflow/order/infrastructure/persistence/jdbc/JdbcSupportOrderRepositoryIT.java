@@ -1,5 +1,7 @@
 package dev.supportflow.order.infrastructure.persistence.jdbc;
 
+import dev.supportflow.common.security.model.CustomerIdentity;
+import dev.supportflow.order.application.OrderQueryService;
 import dev.supportflow.order.domain.OrderQueryLimits;
 import dev.supportflow.order.domain.model.OrderStatus;
 import dev.supportflow.order.domain.repository.SupportOrderRepository;
@@ -160,6 +162,23 @@ class JdbcSupportOrderRepositoryIT {
                         '2026-10-03 01:02:03.123',
                         '2026-10-04 04:05:06.456'
                     )
+                    """
+            );
+
+            // Interleaved out-of-scope rows expose filtering after LIMIT.
+            // Legacy customer numbers intentionally overlap the global buyer id.
+            statement.executeUpdate(
+                    """
+                    INSERT INTO support_order (
+                        id, tenant_id, customer_id, buyer_id,
+                        order_no, status, total_amount
+                    ) VALUES
+                    (1003, 100, 5101, 800, 'SCOPED-A', 'PAID', 10.00),
+                    (1004, 100, 800, 900, 'SCOPED-OTHER-BUYER', 'PAID', 20.00),
+                    (1005, 300, 5101, 800, 'SCOPED-OTHER-SHOP', 'PAID', 30.00),
+                    (1006, 100, 5102, 800, 'SCOPED-B', 'SHIPPED', 40.00),
+                    (1007, 100, 800, NULL, 'SCOPED-UNMAPPED', 'PAID', 50.00),
+                    (1008, 100, 5103, 800, 'SCOPED-C', 'COMPLETED', 60.00)
                     """
             );
         }
@@ -325,5 +344,121 @@ class JdbcSupportOrderRepositoryIT {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> repository.findByOrderNo(0L, 200L, "SF10001"))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("Shop and buyer filters run before the SQL limit")
+    void shouldFilterShopAndBuyerBeforeApplyingLimit() {
+        var rows = repository.findByShopAndBuyerId(100L, 800L, 0L, 2);
+
+        assertThat(rows).extracting(order -> order.id())
+                .containsExactly(1003L, 1006L);
+        assertThat(rows).allSatisfy(order -> {
+            assertThat(order.tenantId()).isEqualTo(100L);
+            assertThat(order.buyerId()).isEqualTo(800L);
+        });
+        assertThat(repository.findByShopAndBuyerId(100L, 800L, 1003L, 1))
+                .extracting(order -> order.id())
+                .containsExactly(1006L);
+    }
+
+    @Test
+    @DisplayName("Shop queries exclude other buyers and unmapped legacy ownership")
+    void shouldExcludeOtherBuyersAndUnmappedLegacyRowsWithinShop() {
+        var rows = repository.findByShopAndBuyerId(
+                100L, 800L, 0L, OrderQueryLimits.MAX_FETCH_SIZE);
+
+        assertThat(rows).extracting(order -> order.id())
+                .containsExactly(1003L, 1006L, 1008L);
+        assertThat(rows).extracting(order -> order.customerId())
+                .containsExactly(5101L, 5102L, 5103L);
+        assertThat(repository.findByShopAndBuyerId(100L, 900L, 0L, 10))
+                .extracting(order -> order.id())
+                .containsExactly(1004L);
+        assertThat(repository.findByShopAndBuyerId(100L, 801L, 0L, 10)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("Shop-scoped queries do not change account-wide order access")
+    void shouldKeepSameBuyerSeparatedAcrossShops() {
+        assertThat(repository.findByShopAndBuyerId(300L, 800L, 0L, 10))
+                .extracting(order -> order.id())
+                .containsExactly(1005L);
+        assertThat(repository.findByShopAndBuyerId(999L, 800L, 0L, 10)).isEmpty();
+        assertThat(repository.findByBuyerId(800L, 0L, 10))
+                .extracting(order -> order.id())
+                .containsExactly(1003L, 1005L, 1006L, 1008L);
+    }
+
+    @Test
+    @DisplayName("Real shop pages retain the lookahead row and finish without duplicates")
+    void shouldBuildScopedPagesAgainstRealMySqlWithoutDroppingLookahead() {
+        OrderQueryService service = new OrderQueryService(repository);
+        CustomerIdentity identity = new CustomerIdentity(800L);
+
+        var firstPage = service.listOwnedOrdersInShop(identity, 100L, 0L, 2);
+        assertThat(firstPage.items()).extracting(order -> order.id())
+                .containsExactly(1003L, 1006L);
+        assertThat(firstPage.nextAfterId()).isEqualTo(1006L);
+
+        var secondPage = service.listOwnedOrdersInShop(
+                identity, 100L, firstPage.nextAfterId(), 2);
+        assertThat(secondPage.items()).extracting(order -> order.id())
+                .containsExactly(1008L);
+        assertThat(secondPage.nextAfterId()).isNull();
+
+        var emptyPage = service.listOwnedOrdersInShop(identity, 100L, 1008L, 2);
+        assertThat(emptyPage.items()).isEmpty();
+        assertThat(emptyPage.nextAfterId()).isNull();
+    }
+
+    @Test
+    @DisplayName("Shop cursor bounds are exclusive and accept the maximum fetch size")
+    void shouldHonorShopCursorAndFetchBounds() {
+        assertThat(repository.findByShopAndBuyerId(
+                100L, 800L, 1006L, OrderQueryLimits.MAX_FETCH_SIZE))
+                .extracting(order -> order.id())
+                .containsExactly(1008L);
+        assertThat(repository.findByShopAndBuyerId(100L, 800L, 1008L, 1)).isEmpty();
+        assertThat(repository.findByShopAndBuyerId(
+                100L, 800L, Long.MAX_VALUE, OrderQueryLimits.MAX_FETCH_SIZE)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("Invalid shop, buyer and scoped pagination ranges are rejected")
+    void shouldRejectInvalidShopBuyerAndScopedLimits() {
+        assertThatThrownBy(() -> repository.findByShopAndBuyerId(0L, 800L, 0L, 10))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.findByShopAndBuyerId(-1L, 800L, 0L, 10))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.findByShopAndBuyerId(100L, 0L, 0L, 10))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.findByShopAndBuyerId(100L, -1L, 0L, 10))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.findByShopAndBuyerId(100L, 800L, -1L, 10))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.findByShopAndBuyerId(100L, 800L, 0L, 0))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.findByShopAndBuyerId(100L, 800L, 0L, -1))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.findByShopAndBuyerId(
+                100L, 800L, 0L, OrderQueryLimits.MAX_FETCH_SIZE + 1))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.findByShopAndBuyerId(
+                100L, 800L, 0L, Integer.MAX_VALUE))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("The scoped query account cannot update orders")
+    void shouldUseSelectOnlyReaderForShopQueries() throws SQLException {
+        try (Connection connection = DriverManager.getConnection(
+                MYSQL.getJdbcUrl(), QUERY_USERNAME, QUERY_PASSWORD
+        ); Statement statement = connection.createStatement()) {
+            assertThatThrownBy(() -> statement.executeUpdate(
+                    "UPDATE support_order SET status = status WHERE id = 1003"))
+                    .isInstanceOfSatisfying(SQLException.class,
+                            exception -> assertThat(exception.getErrorCode()).isEqualTo(1142));
+        }
     }
 }

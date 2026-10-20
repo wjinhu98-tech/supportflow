@@ -47,11 +47,36 @@ public class OrderQueryService {
      */
     public OrderPage listOwnedOrders(CustomerIdentity identity, long afterId, int size) {
         Objects.requireNonNull(identity, "identity must not be null");
+        validatePagination(afterId, size);
+        List<SupportOrder> rows = supportOrderRepository.findByBuyerId(
+                identity.buyerId(), afterId, size + OrderQueryLimits.LOOKAHEAD_ROWS);
+        return toPage(rows, size);
+    }
+
+    /**
+     * Lists only the authenticated buyer's orders in the requested shop.
+     * The shop identifies the requested scope; it never replaces buyer ownership.
+     */
+    public OrderPage listOwnedOrdersInShop(
+            CustomerIdentity identity, long shopId, long afterId, int size) {
+        Objects.requireNonNull(identity, "identity must not be null");
+        if (shopId <= 0) {
+            throw new IllegalArgumentException("shopId must be positive");
+        }
+        validatePagination(afterId, size);
+        List<SupportOrder> rows = supportOrderRepository.findByShopAndBuyerId(
+                shopId, identity.buyerId(), afterId,
+                size + OrderQueryLimits.LOOKAHEAD_ROWS);
+        return toPage(rows, size);
+    }
+
+    private static void validatePagination(long afterId, int size) {
         if (afterId < 0 || size < 1 || size > OrderQueryLimits.MAX_PAGE_SIZE) {
             throw new IllegalArgumentException("Invalid pagination range");
         }
-        List<SupportOrder> rows = supportOrderRepository.findByBuyerId(
-                identity.buyerId(), afterId, size + OrderQueryLimits.LOOKAHEAD_ROWS);
+    }
+
+    private static OrderPage toPage(List<SupportOrder> rows, int size) {
         boolean hasNext = rows.size() > size;
         List<SupportOrder> items = hasNext ? rows.subList(0, size) : rows;
         // 游标取实际返回的最后一行，预读行留给下一页，避免漏单。

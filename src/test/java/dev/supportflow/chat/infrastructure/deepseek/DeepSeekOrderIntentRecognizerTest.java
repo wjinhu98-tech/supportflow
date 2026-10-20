@@ -36,8 +36,8 @@ import static org.mockito.Mockito.when;
 class DeepSeekOrderIntentRecognizerTest {
 
     private static final String API_KEY = "test-only-not-a-real-api-key";
-    private static final String MESSAGE = "帮我看看商铺100的SF10001订单发货了吗？";
-    private static final String LOOKUP = "{\"intent\":\"ORDER_LOOKUP\",\"shopId\":100,\"orderNo\":\"SF10001\"}";
+    private static final String MESSAGE = "帮我看看SF10001订单发货了吗？";
+    private static final String LOOKUP = "{\"intent\":\"ORDER_LOOKUP\",\"orderNo\":\"SF10001\"}";
     private final ObjectMapper objectMapper = JsonMapper.builder().build();
     private HttpClient httpClient;
     private DeepSeekOrderIntentRecognizer recognizer;
@@ -52,7 +52,7 @@ class DeepSeekOrderIntentRecognizerTest {
     void shouldSendOfficialRequestAndRecognizeOnlyExplicitQueryParameters() {
         respond(200, envelope(LOOKUP));
 
-        assertThat(recognizer.recognize(MESSAGE)).isEqualTo(OrderIntent.lookup(100L, "SF10001"));
+        assertThat(recognizer.recognize(MESSAGE)).isEqualTo(OrderIntent.lookup("SF10001"));
 
         ArgumentCaptor<HttpRequest> requestCaptor = ArgumentCaptor.forClass(HttpRequest.class);
         verify(httpClient).sendAsync(requestCaptor.capture(), ArgumentMatchers.<HttpResponse.BodyHandler<byte[]>>any());
@@ -96,24 +96,18 @@ class DeepSeekOrderIntentRecognizerTest {
         assertThat(payload.get("messages").get(0).get("role").asString()).isEqualTo("system");
         assertThat(payload.get("messages").get(1).get("role").asString()).isEqualTo("user");
         assertThat(payload.get("messages").get(1).get("content").asString()).isEqualTo(MESSAGE);
-        assertThat(json).doesNotContain(API_KEY, "customerId", "buyerId", "199.90");
+        assertThat(json).doesNotContain(API_KEY, "shopId", "customerId", "buyerId", "199.90");
     }
 
     @Test
     void shouldRetainMissingParametersForServiceToRequestClarification() {
-        respond(200, envelope("{\"intent\":\"ORDER_LOOKUP\",\"shopId\":null,\"orderNo\":\"SF10001\"}"));
-        assertThat(recognizer.recognize("SF10001发货了吗？")).isEqualTo(OrderIntent.lookup(null, "SF10001"));
-
-        respond(200, envelope("{\"intent\":\"ORDER_LOOKUP\",\"shopId\":100,\"orderNo\":null}"));
-        assertThat(recognizer.recognize("查询商铺100的订单")).isEqualTo(OrderIntent.lookup(100L, null));
-
-        respond(200, envelope("{\"intent\":\"ORDER_LOOKUP\",\"shopId\":null,\"orderNo\":null}"));
-        assertThat(recognizer.recognize("查一下订单")).isEqualTo(OrderIntent.lookup(null, null));
+        respond(200, envelope("{\"intent\":\"ORDER_LOOKUP\",\"orderNo\":null}"));
+        assertThat(recognizer.recognize("查一下订单")).isEqualTo(OrderIntent.lookup(null));
     }
 
     @Test
     void shouldRecognizeOtherWithoutInventingOrderParameters() {
-        respond(200, envelope("{\"intent\":\"OTHER\",\"shopId\":null,\"orderNo\":null}"));
+        respond(200, envelope("{\"intent\":\"OTHER\",\"orderNo\":null}"));
         assertThat(recognizer.recognize("你好")).isEqualTo(OrderIntent.other());
     }
 
@@ -155,12 +149,12 @@ class DeepSeekOrderIntentRecognizerTest {
     void shouldRejectUnknownMissingOrAdditionalIntentFields() {
         for (String content : List.of(
                 "{}", "[]", "null", "not json", "```json\n" + LOOKUP + "\n```",
-                "{\"intent\":\"ORDER_LIST\",\"shopId\":null,\"orderNo\":null}",
-                "{\"intent\":\"ORDER_LOOKUP\",\"orderNo\":\"SF10001\"}",
-                "{\"intent\":true,\"shopId\":100,\"orderNo\":\"SF10001\"}",
-                "{\"intent\":\"ORDER_LOOKUP\",\"shopId\":100,\"orderNo\":\"SF10001\",\"buyerId\":201}",
-                "{\"intent\":\"OTHER\",\"shopId\":100,\"orderNo\":null}",
-                "{\"intent\":\"OTHER\",\"shopId\":null,\"orderNo\":\"SF10001\"}")) {
+                "{\"intent\":\"ORDER_LIST\",\"orderNo\":null}",
+                "{\"intent\":\"ORDER_LOOKUP\"}",
+                "{\"orderNo\":\"SF10001\"}",
+                "{\"intent\":true,\"orderNo\":\"SF10001\"}",
+                "{\"intent\":\"ORDER_LOOKUP\",\"orderNo\":\"SF10001\",\"unexpected\":null}",
+                "{\"intent\":\"OTHER\",\"orderNo\":\"SF10001\"}")) {
             respond(200, envelope(content));
             assertUnavailable(MESSAGE);
         }
@@ -169,7 +163,7 @@ class DeepSeekOrderIntentRecognizerTest {
     @Test
     void shouldRejectDuplicateKeysAndTrailingJsonRatherThanSilentlyChooseOne() {
         for (String content : List.of(LOOKUP + " {}",
-                "{\"intent\":\"OTHER\",\"intent\":\"ORDER_LOOKUP\",\"shopId\":100,\"orderNo\":\"SF10001\"}")) {
+                "{\"intent\":\"OTHER\",\"intent\":\"ORDER_LOOKUP\",\"orderNo\":\"SF10001\"}")) {
             respond(200, envelope(content));
             assertUnavailable(MESSAGE);
         }
@@ -180,40 +174,38 @@ class DeepSeekOrderIntentRecognizerTest {
     }
 
     @Test
-    void shouldRejectWrongShopIdTypeRangeOrOverflow() {
-        for (String shopId : List.of("\"100\"", "100.0", "true", "[]", "{}", "0", "-1", "9223372036854775808")) {
-            respond(200, envelope("{\"intent\":\"ORDER_LOOKUP\",\"shopId\":" + shopId + ",\"orderNo\":\"SF10001\"}"));
+    void shouldRejectModelSuppliedShopOrBuyerFields() {
+        for (String field : List.of("shopId", "buyerId", "tenantId", "customerId")) {
+            respond(200, envelope("{\"intent\":\"ORDER_LOOKUP\",\"orderNo\":\"SF10001\",\"" + field + "\":100}"));
             assertUnavailable(MESSAGE);
         }
+        respond(200, envelope("{\"intent\":\"OTHER\",\"orderNo\":null,\"shopId\":null}"));
+        assertUnavailable(MESSAGE);
     }
 
     @Test
     void shouldRejectWrongOrderNumberTypeAndInvalidDomainValues() {
         for (String orderNo : List.of("10001", "true", "[]", "{}", "\"\"", "\"SF 10001\"", "\"SF\\n10001\"")) {
-            respond(200, envelope("{\"intent\":\"ORDER_LOOKUP\",\"shopId\":100,\"orderNo\":" + orderNo + "}"));
+            respond(200, envelope("{\"intent\":\"ORDER_LOOKUP\",\"orderNo\":" + orderNo + "}"));
             assertUnavailable(MESSAGE + " SF 10001 SF\n10001");
         }
         String tooLong = "S".repeat(65);
-        respond(200, envelope(objectMapper.writeValueAsString(Map.of("intent", "ORDER_LOOKUP", "shopId", 100, "orderNo", tooLong))));
+        respond(200, envelope(objectMapper.writeValueAsString(Map.of("intent", "ORDER_LOOKUP", "orderNo", tooLong))));
         assertUnavailable(MESSAGE + " " + tooLong);
     }
 
     @Test
-    void shouldRejectInventedShopIdAndPartialNumberMatches() {
+    void shouldRecognizeOrderWithoutShopInUserMessage() {
         respond(200, envelope(LOOKUP));
-        assertUnavailable("帮我查询商铺101的SF10001订单");
-        assertUnavailable("帮我查询商铺1000的SF10001订单");
-        assertUnavailable("帮我查询SF10001订单，另一个编号是SF100");
-        assertUnavailable("帮我查询SF10001订单，金额100元");
-        assertUnavailable("帮我查询SF10001订单，商铺SF100");
+        assertThat(recognizer.recognize("帮我看看SF10001发货了吗"))
+                .isEqualTo(OrderIntent.lookup("SF10001"));
     }
 
     @Test
-    void shouldAcceptExplicitShopLabelsBeforeOrAfterNumber() {
+    void shouldRecognizeOriginalOrderNumberBesideChineseOrPunctuation() {
         respond(200, envelope(LOOKUP));
-        for (String message : List.of("商铺 ID：100的SF10001订单", "100号商铺的SF10001订单",
-                "租户编号是100，订单SF10001发货了吗", "shopId=100 order SF10001")) {
-            assertThat(recognizer.recognize(message)).isEqualTo(OrderIntent.lookup(100L, "SF10001"));
+        for (String message : List.of("订单SF10001发货了吗", "SF10001", "查询：SF10001，谢谢")) {
+            assertThat(recognizer.recognize(message)).isEqualTo(OrderIntent.lookup("SF10001"));
         }
     }
 

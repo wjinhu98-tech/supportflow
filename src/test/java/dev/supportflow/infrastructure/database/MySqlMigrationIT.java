@@ -9,6 +9,9 @@ import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.output.MigrateResult;
 
 import java.sql.*;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -30,13 +33,16 @@ class MySqlMigrationIT {
     @Test
     @DisplayName("V1存量订单升级后保留数据但不自动推断买家，重复迁移不执行")
     void shouldCreateOrderTableAndSkipAppliedMigrations() throws SQLException {
-        Flyway.configure()
+        MigrateResult initialMigration = Flyway.configure()
                 .dataSource(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword())
                 .locations("classpath:db/migration")
                 .target("1")
                 .cleanDisabled(true)
                 .load()
                 .migrate();
+
+        assertThat(initialMigration.success).isTrue();
+        assertThat(initialMigration.migrationsExecuted).isEqualTo(1);
 
         try (Connection connection = DriverManager.getConnection(
                 MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword()
@@ -49,6 +55,8 @@ class MySqlMigrationIT {
                     (300, 200, 'LEGACY', 'PAID', 20.00)
                     """);
         }
+
+        List<List<Object>> legacyOrders = readLegacyOrders();
 
         Flyway flyway = Flyway.configure()
                 .dataSource(
@@ -66,12 +74,14 @@ class MySqlMigrationIT {
         MigrateResult firstMigration = flyway.migrate();
 
         assertThat(firstMigration.success).isTrue();
-        assertThat(firstMigration.migrationsExecuted).isEqualTo(1);
+        assertThat(firstMigration.migrationsExecuted).isEqualTo(2);
 
         MigrateResult secondMigration = flyway.migrate();
 
         assertThat(secondMigration.success).isTrue();
         assertThat(secondMigration.migrationsExecuted).isZero();
+
+        assertThat(readLegacyOrders()).containsExactlyElementsOf(legacyOrders);
 
         try (
                 Connection connection = DriverManager.getConnection(
@@ -111,9 +121,65 @@ class MySqlMigrationIT {
                 assertThat(columns.getString(1)).isEqualTo("id");
                 assertThat(columns.next()).isFalse();
             }
+            try (ResultSet columns = statement.executeQuery("""
+                    SELECT COLUMN_NAME
+                    FROM information_schema.STATISTICS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = 'support_order'
+                      AND INDEX_NAME = 'idx_support_order_buyer_shop_id'
+                    ORDER BY SEQ_IN_INDEX
+                    """)) {
+                assertThat(columns.next()).isTrue();
+                assertThat(columns.getString(1)).isEqualTo("buyer_id");
+                assertThat(columns.next()).isTrue();
+                assertThat(columns.getString(1)).isEqualTo("tenant_id");
+                assertThat(columns.next()).isTrue();
+                assertThat(columns.getString(1)).isEqualTo("id");
+                assertThat(columns.next()).isFalse();
+            }
+            try (ResultSet history = statement.executeQuery("""
+                    SELECT version, success
+                    FROM flyway_schema_history
+                    ORDER BY installed_rank
+                    """)) {
+                for (String version : List.of("1", "2", "3")) {
+                    assertThat(history.next()).isTrue();
+                    assertThat(history.getString("version")).isEqualTo(version);
+                    assertThat(history.getBoolean("success")).isTrue();
+                }
+                assertThat(history.next()).isFalse();
+            }
             org.assertj.core.api.Assertions.assertThatThrownBy(() ->
                     statement.executeUpdate("UPDATE support_order SET buyer_id = 0")
             ).isInstanceOf(SQLException.class);
         }
+    }
+
+    private static List<List<Object>> readLegacyOrders() throws SQLException {
+        List<List<Object>> rows = new ArrayList<>();
+        try (Connection connection = DriverManager.getConnection(
+                MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword()
+        ); Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("""
+                     SELECT id, tenant_id, customer_id, order_no, status,
+                            total_amount, currency, created_at, updated_at
+                     FROM support_order
+                     ORDER BY id ASC
+                     """)) {
+            while (resultSet.next()) {
+                rows.add(List.of(
+                        resultSet.getLong("id"),
+                        resultSet.getLong("tenant_id"),
+                        resultSet.getLong("customer_id"),
+                        resultSet.getString("order_no"),
+                        resultSet.getString("status"),
+                        resultSet.getBigDecimal("total_amount"),
+                        resultSet.getString("currency"),
+                        resultSet.getObject("created_at", LocalDateTime.class),
+                        resultSet.getObject("updated_at", LocalDateTime.class)
+                ));
+            }
+        }
+        return List.copyOf(rows);
     }
 }

@@ -2,6 +2,7 @@ package dev.supportflow.chat.application;
 
 import dev.supportflow.chat.application.model.OrderIntent;
 import dev.supportflow.chat.application.model.OrderIntentType;
+import dev.supportflow.chat.application.model.ChatReply;
 import dev.supportflow.chat.application.port.OrderIntentRecognizer;
 import dev.supportflow.common.security.model.CustomerIdentity;
 import dev.supportflow.order.application.OrderQueryService;
@@ -14,8 +15,8 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * 普通消息继续回显，单笔及列表指令复用现有订单查询能力。
- * 自然语言由识别器提取查单参数；真实订单与买家身份始终由现有服务确定。
+ * 店铺由HTTP路径提供，身份由认证提供；模型只识别订单号。
+ * 缺订单号时返回当前店铺本人订单供前端选择，不要求用户输入商铺ID。
  */
 @Service
 public class ChatService {
@@ -29,54 +30,69 @@ public class ChatService {
                 orderIntentRecognizer, "orderIntentRecognizer must not be null");
     }
 
-    public String reply(CustomerIdentity identity, String message) {
+    public ChatReply reply(CustomerIdentity identity, long shopId, String message, String selectedOrderNo) {
         Objects.requireNonNull(identity, "identity must not be null");
+        Objects.requireNonNull(message, "message must not be null");
+        if (shopId <= 0) {
+            throw new IllegalArgumentException("shopId must be positive");
+        }
+        validateSelectedOrderNo(selectedOrderNo);
+        String normalized = message.strip();
+        if (selectedOrderNo != null
+                && (normalized.equals("咨询此订单") || normalized.equals("查询此订单"))) {
+            return replyWithOrder(identity, shopId, selectedOrderNo);
+        }
+        if (normalized.equals("查订单")) {
+            return replyWithOrderList(identity, shopId, 0L, true);
+        }
         Optional<OrderListCommand> listCommand = OrderListCommand.parse(message);
         if (listCommand.isPresent()) {
-            return replyWithOrderList(identity, listCommand.get().afterId());
+            return replyWithOrderList(identity, shopId, listCommand.get().afterId(), false);
         }
 
         Optional<OrderLookupCommand> command = OrderLookupCommand.parse(message);
         if (command.isEmpty()) {
-            return replyToNaturalLanguage(identity, message);
+            return replyToNaturalLanguage(identity, shopId, message, selectedOrderNo);
         }
 
         OrderLookupCommand lookup = command.get();
-        // 买家身份来自认证结果；消息只能指定商铺和订单号。
-        SupportOrder order = orderQueryService.getOwnedOrder(identity, lookup.shopId(), lookup.orderNo());
-        return describeOrder(order);
+        return replyWithOrder(identity, shopId, lookup.orderNo());
     }
 
-    private String replyToNaturalLanguage(CustomerIdentity identity, String message) {
+    private ChatReply replyToNaturalLanguage(
+            CustomerIdentity identity, long shopId, String message, String selectedOrderNo) {
         // 识别器只收到消息，不接收身份、权限或任何数据库中的订单详情。
         OrderIntent intent = orderIntentRecognizer.recognize(message);
         if (intent.type() == OrderIntentType.OTHER) {
-            return "收到你的问题：" + message;
+            return ChatReply.text("收到你的问题：" + message);
         }
-        if (intent.shopId() == null && intent.orderNo() == null) {
-            return "请提供商铺ID和订单号，例如：帮我查一下商铺100的SF10001订单。";
+        String orderNo = intent.orderNo() != null ? intent.orderNo() : selectedOrderNo;
+        if (orderNo == null) {
+            return replyWithOrderList(identity, shopId, 0L, true);
         }
-        if (intent.shopId() == null) {
-            return "请补充商铺ID，例如：帮我查一下商铺100的SF10001订单。";
-        }
-        if (intent.orderNo() == null) {
-            return "请补充订单号，例如：帮我查一下商铺100的SF10001订单。";
-        }
-        SupportOrder order = orderQueryService.getOwnedOrder(
-                identity, intent.shopId(), intent.orderNo());
-        return describeOrder(order);
+        return replyWithOrder(identity, shopId, orderNo);
     }
 
-    private String replyWithOrderList(CustomerIdentity identity, long afterId) {
-        // 复用带方法级授权的服务；每次翻页仍使用当前认证身份。
-        OrderPage page = orderQueryService.listOwnedOrders(
-                identity, afterId, OrderQueryLimits.DEFAULT_PAGE_SIZE);
+    private ChatReply replyWithOrder(CustomerIdentity identity, long shopId, String orderNo) {
+        SupportOrder order = orderQueryService.getOwnedOrder(identity, shopId, orderNo);
+        return ChatReply.details(describeOrder(order), order);
+    }
+
+    private ChatReply replyWithOrderList(CustomerIdentity identity, long shopId, long afterId, boolean prompt) {
+        // 每次查询和翻页均在SQL层同时限制当前店铺及认证买家。
+        OrderPage page = orderQueryService.listOwnedOrdersInShop(
+                identity, shopId, afterId, OrderQueryLimits.DEFAULT_PAGE_SIZE);
         if (page.items().isEmpty()) {
-            return afterId == 0L ? "暂无订单。" : "没有更多订单。";
+            return ChatReply.selection(
+                    afterId == 0L ? "你在当前店铺暂无订单。" : "当前店铺没有更多订单。",
+                    page.items(), null);
         }
 
-        StringBuilder reply = new StringBuilder("你的订单（本批 ")
-                .append(page.items().size()).append(" 笔）：");
+        StringBuilder reply = new StringBuilder();
+        if (prompt) {
+            reply.append("请选择当前店铺的一笔订单，或输入订单号。\n");
+        }
+        reply.append("当前店铺的订单（本批 ").append(page.items().size()).append(" 笔）：");
         for (int index = 0; index < page.items().size(); index++) {
             reply.append('\n').append(index + 1).append(". ")
                     .append(describeOrder(page.items().get(index)));
@@ -87,7 +103,16 @@ public class ChatService {
         } else {
             reply.append("\n没有更多订单。");
         }
-        return reply.toString();
+        return ChatReply.selection(reply.toString(), page.items(), page.nextAfterId());
+    }
+
+    private void validateSelectedOrderNo(String orderNo) {
+        if (orderNo != null && (orderNo.isBlank() || orderNo.length() > OrderQueryLimits.MAX_ORDER_NO_LENGTH
+                || orderNo.codePoints().anyMatch(codePoint ->
+                        Character.isWhitespace(codePoint) || Character.isSpaceChar(codePoint)
+                                || Character.isISOControl(codePoint)))) {
+            throw new InvalidChatCommandException("订单号不能为空、超过64个字符或包含空白、控制字符");
+        }
     }
 
     private String describeOrder(SupportOrder order) {

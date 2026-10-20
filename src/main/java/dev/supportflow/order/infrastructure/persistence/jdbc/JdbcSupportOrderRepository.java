@@ -51,6 +51,17 @@ public class JdbcSupportOrderRepository implements SupportOrderRepository {
             LIMIT :limit
             """;
 
+    private static final String FIND_BY_SHOP_AND_BUYER_ID_SQL = """
+            SELECT id, tenant_id, customer_id, buyer_id, order_no, status,
+                   total_amount, currency, created_at, updated_at
+            FROM support_order
+            WHERE buyer_id = :buyerId
+              AND tenant_id = :shopId
+              AND id > :afterId
+            ORDER BY id ASC
+            LIMIT :limit
+            """;
+
     private final JdbcClient jdbcClient;
 
     public JdbcSupportOrderRepository(JdbcClient jdbcClient) {
@@ -80,6 +91,22 @@ public class JdbcSupportOrderRepository implements SupportOrderRepository {
             throw new IllegalArgumentException("Invalid buyer or pagination range");
         }
         return jdbcClient.sql(FIND_BY_BUYER_ID_SQL)
+                .param("buyerId", buyerId)
+                .param("afterId", afterId)
+                .param("limit", limit)
+                .query(JdbcSupportOrderRepository::mapRow)
+                .list();
+    }
+
+    @Override
+    public List<SupportOrder> findByShopAndBuyerId(
+            long shopId, long buyerId, long afterId, int limit) {
+        if (shopId <= 0 || buyerId <= 0 || afterId < 0
+                || limit < 1 || limit > OrderQueryLimits.MAX_FETCH_SIZE) {
+            throw new IllegalArgumentException("Invalid shop, buyer or pagination range");
+        }
+        return jdbcClient.sql(FIND_BY_SHOP_AND_BUYER_ID_SQL)
+                .param("shopId", shopId)
                 .param("buyerId", buyerId)
                 .param("afterId", afterId)
                 .param("limit", limit)

@@ -27,7 +27,7 @@ class OrderListCommandTest {
     @Test
     @DisplayName("普通消息和单笔查单不会被识别为列表指令")
     void shouldIgnoreUnrelatedMessages() {
-        for (String message : new String[]{"你好", "查订单 100 SF10001", "查看我的订单", "下一页"}) {
+        for (String message : new String[]{"你好", "查订单 SF10001", "查看我的订单", "下一页", "我的订单发货了吗", "我的订单1"}) {
             assertThat(OrderListCommand.parse(message)).isEmpty();
         }
     }
@@ -36,7 +36,7 @@ class OrderListCommandTest {
     @DisplayName("非法游标与额外字段一律拒绝，不猜测或忽略用户输入")
     void shouldRejectMalformedCommands() {
         String[] commands = {
-                "我的订单1", "我的订单 -1", "我的订单 +1", "我的订单 1.5",
+                "我的订单 -1", "我的订单 +1", "我的订单 1.5",
                 "我的订单 abc", "我的订单 9223372036854775808",
                 "我的订单 0 buyerId=201", "我的订单 1 20", "我的订单 1 OR 1=1"
         };

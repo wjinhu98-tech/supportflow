@@ -26,7 +26,10 @@ record OrderListCommand(long afterId) {
     static Optional<OrderListCommand> parse(String message) {
         Objects.requireNonNull(message, "message must not be null");
         String normalized = message.strip();
-        if (!normalized.startsWith(PREFIX)) {
+        if (!normalized.startsWith(PREFIX)
+                || normalized.length() > PREFIX.length()
+                && !(Character.isWhitespace(normalized.codePointAt(PREFIX.length()))
+                || Character.isSpaceChar(normalized.codePointAt(PREFIX.length())))) {
             return Optional.empty();
         }
 

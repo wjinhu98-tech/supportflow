@@ -4,7 +4,7 @@ package dev.supportflow.chat.application;
 public final class InvalidChatCommandException extends RuntimeException {
 
     public InvalidChatCommandException() {
-        this("查单格式：查订单 <商铺ID> <订单号>，例如：查订单 100 SF10001");
+        this("查单格式：查订单 <订单号>，商铺由当前咨询页面确定");
     }
 
     public InvalidChatCommandException(String message) {
