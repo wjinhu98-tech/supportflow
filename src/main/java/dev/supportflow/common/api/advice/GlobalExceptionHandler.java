@@ -1,6 +1,7 @@
 package dev.supportflow.common.api.advice;
 
 import dev.supportflow.chat.application.InvalidChatCommandException;
+import dev.supportflow.chat.application.ModelUnavailableException;
 import dev.supportflow.common.api.error.ErrorCode;
 import dev.supportflow.common.api.response.ApiErrorResponse;
 import dev.supportflow.order.application.exception.OrderNotFoundException;
@@ -29,6 +30,13 @@ public class GlobalExceptionHandler {
 
     private static final Logger LOGGER =
             LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    @ExceptionHandler(ModelUnavailableException.class)
+    public ResponseEntity<ApiErrorResponse> handleModelUnavailable() {
+        ErrorCode code = ErrorCode.MODEL_UNAVAILABLE;
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(
+                new ApiErrorResponse(code, code.getDefaultMessage()));
+    }
 
     @ExceptionHandler(InvalidChatCommandException.class)
     public ResponseEntity<ApiErrorResponse> handleInvalidChatCommand(

@@ -19,6 +19,7 @@ spring:
     import:
       - "file:./.local/secrets.yml"
       - "file:./.local/day4-security-secrets.yml"
+      - "optional:file:./.local/deepseek-secrets.yml"
 
 supportflow:
   security:

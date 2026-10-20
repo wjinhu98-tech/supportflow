@@ -9,7 +9,7 @@ Authorization: Basic {{username}} {{password}}
     client.global.set("csrfToken", response.body.token);
 %}
 
-### 普通消息仍回显：200
+### 普通消息：识别为非查单后仍回显；DeepSeek开关关闭时直接回显
 POST {{baseUrl}}/api/v1/chat/messages
 Authorization: Basic {{username}} {{password}}
 X-CSRF-TOKEN: {{csrfToken}}
@@ -27,6 +27,27 @@ Content-Type: application/json
 
 {
   "message": "查订单 100 SF10001"
+}
+
+### 自然语言查单：先在.local/deepseek-secrets.yml填Key并启用，重启local应用
+### 订单属于本人则200；不存在或属于别人则404；模型故障则503
+POST {{baseUrl}}/api/v1/chat/messages
+Authorization: Basic {{username}} {{password}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{
+  "message": "帮我看看商铺100的SF10001订单发货了吗？"
+}
+
+### 自然语言缺少商铺：提示补充；随后重新发送包含商铺和订单号的完整消息
+POST {{baseUrl}}/api/v1/chat/messages
+Authorization: Basic {{username}} {{password}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{
+  "message": "帮我看看SF10001订单发货了吗？"
 }
 
 ### 查看当前买家的跨商铺订单：最多20笔，首次没有订单时回复“暂无订单。”

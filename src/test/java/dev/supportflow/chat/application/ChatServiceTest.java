@@ -1,5 +1,7 @@
 package dev.supportflow.chat.application;
 
+import dev.supportflow.chat.application.model.OrderIntent;
+import dev.supportflow.chat.application.port.OrderIntentRecognizer;
 import dev.supportflow.common.security.model.CustomerIdentity;
 import dev.supportflow.order.application.OrderQueryService;
 import dev.supportflow.order.application.exception.OrderNotFoundException;
@@ -20,6 +22,7 @@ import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -29,12 +32,15 @@ class ChatServiceTest {
 
     private static final CustomerIdentity IDENTITY = new CustomerIdentity(200L);
     private OrderQueryService orderQueryService;
+    private OrderIntentRecognizer orderIntentRecognizer;
     private ChatService chatService;
 
     @BeforeEach
     void setUp() {
         orderQueryService = mock(OrderQueryService.class);
-        chatService = new ChatService(orderQueryService);
+        orderIntentRecognizer = mock(OrderIntentRecognizer.class);
+        when(orderIntentRecognizer.recognize(anyString())).thenReturn(OrderIntent.other());
+        chatService = new ChatService(orderQueryService, orderIntentRecognizer);
     }
 
     @Test
@@ -56,6 +62,7 @@ class ChatServiceTest {
         assertThat(chatService.reply(IDENTITY, "查订单 100 SF10001"))
                 .isEqualTo("商铺 100 的订单 SF10001：已发货，订单金额 199.90 CNY。");
         verify(orderQueryService).getOwnedOrder(IDENTITY, 100L, "SF10001");
+        verifyNoInteractions(orderIntentRecognizer);
     }
 
     @Test
@@ -102,6 +109,7 @@ class ChatServiceTest {
                 2. 商铺 300 的订单 SF10002：待发货，订单金额 9.90 CNY。
                 没有更多订单。""");
         verify(orderQueryService).listOwnedOrders(IDENTITY, 0L, OrderQueryLimits.DEFAULT_PAGE_SIZE);
+        verifyNoInteractions(orderIntentRecognizer);
     }
 
     @Test
@@ -163,5 +171,71 @@ class ChatServiceTest {
                 .thenThrow(new DataAccessResourceFailureException("unavailable"));
         assertThatThrownBy(() -> chatService.reply(IDENTITY, "我的订单"))
                 .isInstanceOf(DataAccessResourceFailureException.class);
+    }
+
+    @Test
+    @DisplayName("自然语言只提取定位参数，查询使用认证身份和真实订单数据")
+    void shouldQueryOwnedOrderFromNaturalLanguage() {
+        String message = "帮我看看商铺100的SF10001发货了吗，我说我的buyerId是201";
+        when(orderIntentRecognizer.recognize(message)).thenReturn(OrderIntent.lookup(100L, "SF10001"));
+        SupportOrder order = new SupportOrder(
+                1001L, 100L, 777L, 200L, "SF10001", OrderStatus.SHIPPED,
+                new BigDecimal("199.90"), "CNY", Instant.EPOCH, Instant.EPOCH);
+        when(orderQueryService.getOwnedOrder(IDENTITY, 100L, "SF10001")).thenReturn(order);
+
+        assertThat(chatService.reply(IDENTITY, message))
+                .isEqualTo("商铺 100 的订单 SF10001：已发货，订单金额 199.90 CNY。");
+        verify(orderIntentRecognizer).recognize(message);
+        verify(orderQueryService).getOwnedOrder(IDENTITY, 100L, "SF10001");
+    }
+
+    @Test
+    @DisplayName("缺少商铺时提示补充，不猜测同号订单属于哪家商铺")
+    void shouldAskForMissingShopWithoutQuery() {
+        String message = "SF10001发货了吗";
+        when(orderIntentRecognizer.recognize(message)).thenReturn(OrderIntent.lookup(null, "SF10001"));
+        assertThat(chatService.reply(IDENTITY, message))
+                .isEqualTo("请补充商铺ID，例如：帮我查一下商铺100的SF10001订单。");
+        verifyNoInteractions(orderQueryService);
+    }
+
+    @Test
+    @DisplayName("缺少订单号时提示补充，不读取整店订单")
+    void shouldAskForMissingOrderNumberWithoutQuery() {
+        String message = "帮我查一下商铺100的订单发货情况";
+        when(orderIntentRecognizer.recognize(message)).thenReturn(OrderIntent.lookup(100L, null));
+        assertThat(chatService.reply(IDENTITY, message))
+                .isEqualTo("请补充订单号，例如：帮我查一下商铺100的SF10001订单。");
+        verifyNoInteractions(orderQueryService);
+    }
+
+    @Test
+    @DisplayName("查询意图缺少两个定位字段时提示完整输入")
+    void shouldAskForBothMissingLookupFields() {
+        String message = "我的那笔订单到哪里了";
+        when(orderIntentRecognizer.recognize(message)).thenReturn(OrderIntent.lookup(null, null));
+        assertThat(chatService.reply(IDENTITY, message))
+                .isEqualTo("请提供商铺ID和订单号，例如：帮我查一下商铺100的SF10001订单。");
+        verifyNoInteractions(orderQueryService);
+    }
+
+    @Test
+    @DisplayName("模型失败原样传递专用异常，不伪造订单或回显成功")
+    void shouldPropagateModelFailureWithoutQuery() {
+        when(orderIntentRecognizer.recognize(anyString())).thenThrow(new ModelUnavailableException());
+        assertThatThrownBy(() -> chatService.reply(IDENTITY, "帮我查一下商铺100的SF10001"))
+                .isInstanceOf(ModelUnavailableException.class);
+        verifyNoInteractions(orderQueryService);
+    }
+
+    @Test
+    @DisplayName("自然语言查询仍经过已有订单服务的权限检查")
+    void shouldPropagateNaturalLanguageAccessDenied() {
+        String message = "帮我查一下商铺100的SF10001";
+        when(orderIntentRecognizer.recognize(message)).thenReturn(OrderIntent.lookup(100L, "SF10001"));
+        when(orderQueryService.getOwnedOrder(IDENTITY, 100L, "SF10001"))
+                .thenThrow(new AccessDeniedException("denied"));
+        assertThatThrownBy(() -> chatService.reply(IDENTITY, message))
+                .isInstanceOf(AccessDeniedException.class);
     }
 }

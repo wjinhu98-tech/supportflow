@@ -9,3 +9,12 @@ spring:
   flyway:
     enabled: false
 
+supportflow:
+  ai:
+    deepseek:
+      enabled: false
+      api-key: "${DEEPSEEK_API_KEY:}"
+      model: deepseek-flash
+      connect-timeout: 3s
+      request-timeout: 15s
+
