@@ -19,6 +19,7 @@ import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -78,6 +79,60 @@ class DeepSeekToolPlannerTest {
         assertThat(input.get("message").asString()).isEqualTo(MESSAGE);
         assertThat(input.get("selectedOrderNo").isNull()).isTrue();
         assertThat(json).doesNotContain(API_KEY, "shopId", "buyerId", "tenantId", "customerId", "199.90");
+    }
+
+    @Test
+    void shouldAcceptOptionalZeroIndexForTheSingleAllowlistedCall() {
+        for (ToolName tool : ToolName.values()) {
+            Map<String, Object> call = new LinkedHashMap<>(toolCall(tool.code(), ARGUMENTS));
+            call.put("index", 0);
+            respond(200, envelopeForCall(call));
+            assertThat(planner.plan(tool, MESSAGE, null))
+                    .isEqualTo(new PlannedToolCall(tool, "SF10001"));
+        }
+    }
+
+    @Test
+    void shouldRejectInvalidOptionalCallIndexesWithoutNumericCoercionOrOverflow() {
+        String call = mapper.writeValueAsString(toolCall("get_logistics", ARGUMENTS));
+        String original = new String(envelope(ToolName.LOGISTICS_LOOKUP, ARGUMENTS), StandardCharsets.UTF_8);
+        for (String index : List.of("null", "\"0\"", "false", "0.0", "0e0", "-1", "1",
+                "4294967296", "18446744073709551616", "{}", "[]")) {
+            String indexed = call.substring(0, call.length() - 1) + ",\"index\":" + index + "}";
+            respond(200, original.replace(call, indexed).getBytes(StandardCharsets.UTF_8));
+            assertUnavailable(ToolName.LOGISTICS_LOOKUP, MESSAGE, null);
+        }
+    }
+
+    @Test
+    void shouldStillRejectUnknownCallMetadataWithOrWithoutOptionalIndex() {
+        for (boolean indexed : List.of(false, true)) {
+            Map<String, Object> call = new LinkedHashMap<>(toolCall("get_logistics", ARGUMENTS));
+            if (indexed) call.put("index", 0);
+            call.put("approved", true);
+            respond(200, envelopeForCall(call));
+            assertUnavailable(ToolName.LOGISTICS_LOOKUP, MESSAGE, null);
+        }
+    }
+
+    @Test
+    void shouldRequireAllCallFieldsAndKeepBusinessArgumentAndOwnershipGuardsWithIndex() {
+        for (String required : List.of("id", "type", "function")) {
+            Map<String, Object> call = new LinkedHashMap<>(toolCall("get_logistics", ARGUMENTS));
+            call.put("index", 0);
+            call.remove(required);
+            respond(200, envelopeForCall(call));
+            assertUnavailable(ToolName.LOGISTICS_LOOKUP, MESSAGE, null);
+        }
+        for (Map<String, Object> unsafe : List.of(
+                toolCall("request_after_sale", ARGUMENTS),
+                toolCall("get_logistics", "{\"orderNo\":\"SF10001\",\"approved\":true}"),
+                toolCall("get_logistics", "{\"orderNo\":\"SF99999\"}"))) {
+            Map<String, Object> call = new LinkedHashMap<>(unsafe);
+            call.put("index", 0);
+            respond(200, envelopeForCall(call));
+            assertUnavailable(ToolName.LOGISTICS_LOOKUP, MESSAGE, null);
+        }
     }
 
     @Test

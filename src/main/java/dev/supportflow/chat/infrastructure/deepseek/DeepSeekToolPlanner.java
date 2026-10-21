@@ -139,7 +139,12 @@ public final class DeepSeekToolPlanner implements ToolPlanner {
         JsonNode call = calls.get(0);
         JsonNode function = call.get("function");
         JsonNode id = call.get("id");
-        if (!call.isObject() || call.size() != 3 || !isText(call.get("type"), "function")
+        JsonNode index = call.get("index");
+        // Some non-streaming provider responses include the single call's zero-based index.
+        // Keep the three required fields and reject all other additional metadata.
+        if (!call.isObject() || call.size() != (index == null ? 3 : 4)
+                || (index != null && (!index.isIntegralNumber() || !index.canConvertToInt() || index.asInt() != 0))
+                || !isText(call.get("type"), "function")
                 || id == null || !id.isString() || id.asString().isBlank()
                 || function == null || !function.isObject() || function.size() != 2
                 || !isText(function.get("name"), permittedTool.code())) {
