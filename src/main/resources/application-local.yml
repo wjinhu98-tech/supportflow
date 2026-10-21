@@ -22,6 +22,9 @@ spring:
       - "optional:file:./.local/deepseek-secrets.yml"
 
 supportflow:
+  after-sale:
+    execution:
+      enabled: true
   security:
     local:
       accounts:

@@ -10,17 +10,17 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
-import dev.supportflow.chat.application.ChatService;
+import dev.supportflow.assistant.orchestration.ConversationOrchestrator;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
 
 @RestController
 public class ChatController {
 
-    private final ChatService chatService;
+    private final ConversationOrchestrator orchestrator;
 
-    public ChatController(ChatService chatService) {
-        this.chatService = chatService;
+    public ChatController(ConversationOrchestrator orchestrator) {
+        this.orchestrator = orchestrator;
     }
 
     @GetMapping("/api/v1/chat/welcome")
@@ -34,8 +34,8 @@ public class ChatController {
             @PathVariable("shopId") @Positive(message = "商铺ID必须为正整数") long shopId,
             @Valid @RequestBody ChatRequest request
     ) {
-        return ChatResponse.from(chatService.reply(
-                principal.getIdentity(), shopId, request.message(), request.orderNo()));
+        return ChatResponse.from(orchestrator.reply(
+                principal, shopId, request.message(), request.orderNo()));
     }
 
     /** 旧客户端得到明确迁移提示，不能再从无店铺入口执行跨店客服查询。 */

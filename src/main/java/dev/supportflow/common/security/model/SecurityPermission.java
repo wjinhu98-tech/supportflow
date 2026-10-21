@@ -7,7 +7,8 @@ import org.springframework.security.core.GrantedAuthority;
  */
 public enum SecurityPermission implements GrantedAuthority {
 
-    ORDER_READ("order:read");
+    ORDER_READ("order:read"),
+    AFTER_SALE_REVIEW("after-sale:review");
 
     private final String authority;
 

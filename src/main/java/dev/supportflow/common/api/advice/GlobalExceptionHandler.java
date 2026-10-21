@@ -28,6 +28,13 @@ import java.util.Objects;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    @ExceptionHandler(dev.supportflow.assistant.aftersale.AssistantBusinessException.class)
+    public ResponseEntity<ApiErrorResponse> handleAssistantBusiness(
+            dev.supportflow.assistant.aftersale.AssistantBusinessException exception) {
+        return ResponseEntity.status(exception.status()).body(
+                new ApiErrorResponse(exception.code(), exception.getMessage()));
+    }
+
     private static final Logger LOGGER =
             LoggerFactory.getLogger(GlobalExceptionHandler.class);
 

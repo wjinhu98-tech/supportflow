@@ -16,6 +16,20 @@ import java.net.http.HttpClient;
 @EnableConfigurationProperties(DeepSeekProperties.class)
 public class DeepSeekConfiguration {
 
+    @Bean
+    @ConditionalOnProperty(prefix = "supportflow.ai.deepseek", name = "enabled", havingValue = "true")
+    dev.supportflow.assistant.planning.ToolPlanner deepSeekToolPlanner(
+            @Qualifier("deepSeekHttpClient") HttpClient client,
+            ObjectMapper mapper, DeepSeekProperties properties) {
+        return new DeepSeekToolPlanner(client, mapper, properties);
+    }
+
+    @Bean
+    @ConditionalOnProperty(prefix = "supportflow.ai.deepseek", name = "enabled", havingValue = "false", matchIfMissing = true)
+    dev.supportflow.assistant.planning.ToolPlanner localToolPlanner() {
+        return new dev.supportflow.assistant.planning.RuleBasedToolPlanner();
+    }
+
     @Bean(destroyMethod = "close")
     @ConditionalOnProperty(prefix = "supportflow.ai.deepseek", name = "enabled", havingValue = "true")
     HttpClient deepSeekHttpClient(DeepSeekProperties properties) {

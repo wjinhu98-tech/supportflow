@@ -13,6 +13,9 @@ public enum ErrorCode {
     ACCESS_DENIED("ACCESS_DENIED", "无权执行此操作"),
     MODEL_UNAVAILABLE("MODEL_UNAVAILABLE", "智能查单暂时不可用，请稍后重试或使用固定查单指令"),
     REQUEST_REJECTED("REQUEST_REJECTED", "请求无法处理"),
+    REVIEW_NOT_FOUND("REVIEW_NOT_FOUND", "售后申请不存在"),
+    REVIEW_CONFLICT("REVIEW_CONFLICT", "售后申请已处理或状态已变化"),
+    BUSINESS_RULE_VIOLATION("BUSINESS_RULE_VIOLATION", "不符合当前业务处理条件"),
     INTERNAL_ERROR("INTERNAL_ERROR", "服务暂时不可用，请稍后重试");
 
     private final String code;

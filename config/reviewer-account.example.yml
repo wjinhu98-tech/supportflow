@@ -1,0 +1,14 @@
+# Documentation only: APPEND this account to the existing ignored local accounts list.
+# This file is not imported by the application. Replace all placeholders yourself.
+# Never use a buyer's identity for the reviewer or commit real credential hashes.
+supportflow:
+  security:
+    local:
+      accounts:
+        - username: support-reviewer
+          password-hash: "{bcrypt}<REPLACE_WITH_GENERATED_PASSWORD_HASH>"
+          identity:
+            buyer-id: 999
+          permissions:
+            - ORDER_READ
+            - AFTER_SALE_REVIEW

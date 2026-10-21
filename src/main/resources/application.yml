@@ -10,6 +10,9 @@ spring:
     enabled: false
 
 supportflow:
+  after-sale:
+    execution:
+      enabled: false
   ai:
     deepseek:
       enabled: false

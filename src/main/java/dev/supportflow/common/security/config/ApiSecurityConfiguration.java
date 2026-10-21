@@ -47,6 +47,14 @@ public class ApiSecurityConfiguration {
                                 SecurityPermission.ORDER_READ.getAuthority()
                         )
                         .requestMatchers(
+                                HttpMethod.GET, "/api/v1/shops/*/after-sales"
+                        ).hasAuthority(SecurityPermission.ORDER_READ.getAuthority())
+                        .requestMatchers(HttpMethod.GET, "/api/v1/reviews/after-sales", "/api/v1/reviews/after-sales/history")
+                        .hasAuthority(SecurityPermission.AFTER_SALE_REVIEW.getAuthority())
+                        .requestMatchers(HttpMethod.POST, "/api/v1/reviews/after-sales/*/decision",
+                                "/api/v1/reviews/after-sales/*/execution/retry")
+                        .hasAuthority(SecurityPermission.AFTER_SALE_REVIEW.getAuthority())
+                        .requestMatchers(
                                 HttpMethod.GET, "/api/v1/security/csrf"
                         ).authenticated()
                         .requestMatchers(
