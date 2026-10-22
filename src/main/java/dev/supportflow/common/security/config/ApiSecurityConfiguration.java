@@ -42,10 +42,13 @@ public class ApiSecurityConfiguration {
                         .requestMatchers(
                                 HttpMethod.GET,
                                 "/api/v1/orders",
-                                "/api/v1/shops/*/orders/*"
+                                "/api/v1/shops/*/orders/*",
+                                "/api/v1/shops/*/orders/*/after-sale-eligibility"
                         ).hasAuthority(
                                 SecurityPermission.ORDER_READ.getAuthority()
                         )
+                        .requestMatchers(HttpMethod.POST, "/api/v1/shops/*/orders/*/after-sales")
+                        .hasAuthority(SecurityPermission.ORDER_READ.getAuthority())
                         .requestMatchers(
                                 HttpMethod.GET, "/api/v1/shops/*/after-sales"
                         ).hasAuthority(SecurityPermission.ORDER_READ.getAuthority())

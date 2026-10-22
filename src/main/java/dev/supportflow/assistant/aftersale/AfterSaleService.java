@@ -26,12 +26,21 @@ public class AfterSaleService {
     private final AfterSaleRepository repository;
     private final OrderQueryService orders;
     private final AfterSaleExecutionProcessor executions;
+    private final AfterSalePolicy policy;
 
     public AfterSaleService(AfterSaleRepository repository, OrderQueryService orders,
-                            AfterSaleExecutionProcessor executions) {
+                            AfterSaleExecutionProcessor executions, AfterSalePolicy policy) {
         this.repository = repository;
         this.orders = orders;
         this.executions = executions;
+        this.policy = policy;
+    }
+
+    @Transactional(readOnly = true)
+    @PreAuthorize("hasAuthority('order:read')")
+    public AfterSaleEligibility eligibility(CustomerIdentity identity, long shopId, String orderNo) {
+        SupportOrder order = orders.getOwnedOrder(identity, shopId, orderNo);
+        return policy.evaluate(order, repository.now());
     }
 
     @Transactional
@@ -42,14 +51,25 @@ public class AfterSaleService {
                     "请填写1至500字的售后原因。");
         }
         SupportOrder order = orders.getOwnedOrder(principal.getIdentity(), shopId, orderNo);
-        requireEligible(order);
-        if (!repository.lockEligibleOrder(order)) throw conflict();
         // The learning module supports one case per owned order, not repeated refund execution.
         String key = fingerprint(order);
+        var existing = repository.findExistingByKey(key);
+        if (existing.isPresent()) return existing.get().ticket();
+        // Evaluate the current locked receipt data, not an earlier REPEATABLE READ snapshot.
+        SupportOrder current = repository.lockOwnedOrder(order).orElseThrow(AfterSaleService::conflict);
+        AfterSaleEligibility eligibility = policy.evaluate(current, repository.now());
+        if (!eligibility.canSubmit()) {
+            // A competing submission may have committed after our first RR snapshot.
+            // Only do this missing-key locking read on the rejection path, which never inserts.
+            var concurrentlyCreated = repository.findByKey(key);
+            if (concurrentlyCreated.isPresent()) return concurrentlyCreated.get().ticket();
+            throw new AssistantBusinessException(ErrorCode.BUSINESS_RULE_VIOLATION, HttpStatus.CONFLICT,
+                    eligibility.message());
+        }
         String id = UUID.randomUUID().toString();
         // UPSERT holds an exclusive key lock; unlike duplicate-INSERT shared-lock upgrades,
         // three or more simultaneous attempts serialize without creating a lock-upgrade cycle.
-        repository.insert(id, key, order, reason.strip());
+        repository.insert(id, key, current, reason.strip(), eligibility);
         StoredAfterSale stored = repository.findByKey(key).orElseThrow();
         if (id.equals(stored.ticket().id())) {
             repository.audit(id, principal.getUsername(), "SUBMITTED", "等待客服或管理员审核");
@@ -94,9 +114,15 @@ public class AfterSaleService {
             SupportOrder current = orders.getOwnedOrder(new CustomerIdentity(stored.buyerId()),
                     stored.ticket().shopId(), stored.ticket().orderNo());
             if (current.id() != stored.orderId()) throw conflict();
-            requireEligible(current);
-            if (!repository.lockEligibleOrder(current)) throw conflict();
-            approvedOrder = current;
+            SupportOrder locked = repository.lockOwnedOrder(current).orElseThrow(AfterSaleService::conflict);
+            if (locked.status() == OrderStatus.CREATED || locked.status() == OrderStatus.CANCELLED) {
+                throw conflict();
+            }
+            // A timely application does not expire while waiting for a human decision.
+            // Missing historical/receipt data requires the reviewer's explicit, mandatory review note.
+            AfterSaleEligibility snapshot = stored.ticket().eligibility();
+            if (snapshot != null && !snapshot.canSubmit()) throw conflict();
+            approvedOrder = locked;
         }
         AfterSaleStatus status = decision == ReviewDecision.APPROVE
                 ? AfterSaleStatus.APPROVED : AfterSaleStatus.REJECTED;
@@ -104,13 +130,6 @@ public class AfterSaleService {
         repository.audit(id.toString(), reviewer.getUsername(), status.name(), note.strip());
         if (approvedOrder != null) executions.enqueue(id.toString(), approvedOrder);
         return repository.findById(id.toString()).orElseThrow().ticket();
-    }
-
-    private static void requireEligible(SupportOrder order) {
-        if (order.status() == OrderStatus.CREATED || order.status() == OrderStatus.CANCELLED) {
-            throw new AssistantBusinessException(ErrorCode.BUSINESS_RULE_VIOLATION, HttpStatus.CONFLICT,
-                    "当前订单尚未付款或已取消，不能在本学习模块申请售后。");
-        }
     }
 
     private static AssistantBusinessException conflict() {

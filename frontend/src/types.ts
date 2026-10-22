@@ -10,7 +10,7 @@ export interface Order {
   updatedAt: string
 }
 
-export type ChatReplyType = 'TEXT' | 'ORDER_DETAILS' | 'ORDER_SELECTION'
+export type ChatReplyType = 'TEXT' | 'ORDER_DETAILS' | 'ORDER_SELECTION' | 'AFTER_SALE_FORM'
 
 export interface ChatResponse {
   reply: string
@@ -45,6 +45,19 @@ export interface AfterSaleTicket {
   createdAt: string
   updatedAt: string
   execution: AfterSaleExecution | null
+  eligibility: AfterSaleEligibility | null
+}
+
+export interface AfterSaleEligibility {
+  shopId: number
+  orderNo: string
+  status: 'ELIGIBLE' | 'REQUIRES_REVIEW' | 'EXPIRED' | 'INELIGIBLE'
+  canSubmit: boolean
+  message: string
+  receivedAt: string | null
+  deadlineAt: string | null
+  checkedAt: string
+  windowDays: number
 }
 
 export interface AfterSaleExecution {

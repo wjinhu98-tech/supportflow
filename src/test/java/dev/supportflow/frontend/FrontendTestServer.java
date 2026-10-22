@@ -188,6 +188,16 @@ public final class FrontendTestServer {
                 }
                 insert.executeBatch();
             }
+            // Explicitly simulated order-system receipt facts for isolated browser tests only.
+            // Never copy these dates into a developer's historical business orders.
+            statement.executeUpdate("""
+                    UPDATE support_order SET received_at=UTC_TIMESTAMP(3)-INTERVAL 2 DAY
+                    WHERE id=1002 AND tenant_id=100 AND buyer_id=200 AND order_no='SF10002'
+                    """);
+            statement.executeUpdate("""
+                    UPDATE support_order SET status='COMPLETED', received_at=UTC_TIMESTAMP(3)-INTERVAL 16 DAY
+                    WHERE id=1101 AND tenant_id=100 AND buyer_id=200 AND order_no='PAGE-001'
+                    """);
         }
     }
 }

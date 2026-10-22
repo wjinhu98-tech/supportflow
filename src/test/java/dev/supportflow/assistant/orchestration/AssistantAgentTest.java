@@ -9,6 +9,7 @@ import dev.supportflow.assistant.tool.OrderTool;
 import dev.supportflow.chat.application.ChatService;
 import dev.supportflow.chat.application.ModelUnavailableException;
 import dev.supportflow.chat.application.model.ChatReply;
+import dev.supportflow.chat.application.model.ChatReplyType;
 import dev.supportflow.common.security.model.CustomerIdentity;
 import dev.supportflow.common.security.model.CustomerPrincipal;
 import dev.supportflow.common.security.model.SecurityPermission;
@@ -66,9 +67,68 @@ class AssistantAgentTest {
     }
 
     @Test
-    void shouldProvideReadOnlyRefundGuidanceWithoutPlanningOrCreatingRequest() {
-        ChatReply reply = agent.execute(AssistantRoute.AFTER_SALE_GUIDANCE, principal, 100, "不要申请退款", "SF10001");
-        assertThat(reply.reply()).contains("申请售后", "人工审核", "不会直接退款");
+    void shouldNeverOpenFormOrPlanRequestForNegatedOrReadOnlyMessages() {
+        for (String message : List.of("不要申请退款", "我不退款", "如何申请退款", "退款是否到账")) {
+            ChatReply reply = agent.execute(AssistantRoute.AFTER_SALE_GUIDANCE, principal, 100, message, "SF10001");
+            assertThat(reply.type()).isEqualTo(ChatReplyType.TEXT);
+            assertThat(reply.orders()).isEmpty();
+            assertThat(reply.reply()).contains("没有提交新的退款申请").doesNotContain("Java", "SQL", "AI");
+        }
+        verifyNoInteractions(planner, orders, logistics, afterSale, legacy);
+    }
+
+    @Test
+    void shouldOpenSelectedOwnedOrderFormWithoutPlanningOrWriting() {
+        when(orders.lookup(identity, 100, "SF10001")).thenReturn(order);
+        ChatReply reply = agent.execute(AssistantRoute.AFTER_SALE_GUIDANCE, principal, 100, "将该订单退款", "SF10001");
+        assertThat(reply.type()).isEqualTo(ChatReplyType.AFTER_SALE_FORM);
+        assertThat(reply.orders()).containsExactly(order);
+        assertThat(reply.nextAfterId()).isNull();
+        assertThat(reply.reply()).contains("SF10001", "退款原因", "客服审核", "不会实际返款")
+                .doesNotContain("Java", "SQL", "AI", "Tool", "PENDING_REVIEW");
+        verify(orders).lookup(identity, 100, "SF10001");
+        verifyNoInteractions(planner, logistics, afterSale, legacy);
+    }
+
+    @Test
+    void shouldRequireOrderChoiceWhenMissingOrAmbiguousWithoutModelFallback() {
+        ChatReply missing = agent.execute(AssistantRoute.AFTER_SALE_GUIDANCE, principal, 100, "申请退款", null);
+        ChatReply ambiguous = agent.execute(AssistantRoute.AFTER_SALE_GUIDANCE, principal, 100,
+                "请将SF10001和SF10002退款", "SF10001");
+        for (ChatReply reply : List.of(missing, ambiguous)) {
+            assertThat(reply.type()).isEqualTo(ChatReplyType.AFTER_SALE_FORM);
+            assertThat(reply.orders()).isEmpty();
+            assertThat(reply.nextAfterId()).isNull();
+            assertThat(reply.reply()).contains("选择", "退款原因");
+        }
+        verifyNoInteractions(planner, orders, logistics, afterSale, legacy);
+    }
+
+    @Test
+    void shouldUseExplicitOrderInsteadOfStaleSelectedOrderAndCheckItsOwnership() {
+        when(orders.lookup(identity, 100, "SF10001")).thenReturn(order);
+        ChatReply reply = agent.execute(AssistantRoute.AFTER_SALE_GUIDANCE, principal, 100,
+                "请将SF10001退款", "SF10002");
+        assertThat(reply.orders()).containsExactly(order);
+        verify(orders).lookup(identity, 100, "SF10001");
+        verifyNoInteractions(planner, logistics, afterSale, legacy);
+    }
+
+    @Test
+    void shouldNotExposeRefundFormForOrderNotOwnedByCurrentBuyerInShop() {
+        IllegalStateException ownershipFailure = new IllegalStateException("not owned");
+        when(orders.lookup(identity, 101, "SF10001")).thenThrow(ownershipFailure);
+        assertThatThrownBy(() -> agent.execute(AssistantRoute.AFTER_SALE_GUIDANCE, principal, 101,
+                "申请退款", "SF10001")).isSameAs(ownershipFailure);
+        verifyNoInteractions(planner, logistics, afterSale, legacy);
+    }
+
+    @Test
+    void shouldAuthorizeBeforeLoadingAnyRefundOrder() {
+        CustomerPrincipal noPermissions = new CustomerPrincipal("other", "not-a-real-hash", identity, List.of());
+        assertThatThrownBy(() -> agent.execute(AssistantRoute.AFTER_SALE_GUIDANCE, noPermissions, 100,
+                "申请退款", "SF10001"))
+                .isInstanceOf(org.springframework.security.access.AccessDeniedException.class);
         verifyNoInteractions(planner, orders, logistics, afterSale, legacy);
     }
 
@@ -180,8 +240,10 @@ class AssistantAgentTest {
                 .thenReturn(new PlannedToolCall(ToolName.AFTER_SALE_REQUEST, "SF10001"));
         when(orders.lookup(identity, 100, "SF10001")).thenReturn(order);
 
-        assertThat(agent.execute(AssistantRoute.AFTER_SALE, principal, 100, message, null).reply())
-                .contains("请补充售后原因");
+        ChatReply reply = agent.execute(AssistantRoute.AFTER_SALE, principal, 100, message, null);
+        assertThat(reply.type()).isEqualTo(ChatReplyType.AFTER_SALE_FORM);
+        assertThat(reply.orders()).containsExactly(order);
+        assertThat(reply.reply()).contains("请补充退款原因");
         verifyNoInteractions(afterSale, logistics, legacy);
     }
 
@@ -192,7 +254,7 @@ class AssistantAgentTest {
         when(orders.lookup(identity, 100, "SF10001")).thenReturn(order);
 
         assertThat(agent.execute(AssistantRoute.AFTER_SALE, principal, 100, "申请售后", "SF10001").reply())
-                .contains("请补充售后原因");
+                .contains("请补充退款原因");
         verifyNoInteractions(afterSale, logistics, legacy);
     }
 

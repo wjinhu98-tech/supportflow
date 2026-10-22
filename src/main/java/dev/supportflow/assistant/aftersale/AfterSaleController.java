@@ -22,6 +22,23 @@ public class AfterSaleController {
 
     public AfterSaleController(AfterSaleService service) { this.service = service; }
 
+    @GetMapping("/api/v1/shops/{shopId}/orders/{orderNo}/after-sale-eligibility")
+    public AfterSaleEligibility eligibility(
+            @AuthenticationPrincipal(errorOnInvalidType = true) CustomerPrincipal principal,
+            @PathVariable @Positive long shopId,
+            @PathVariable @NotBlank @Size(max = 64) String orderNo) {
+        return service.eligibility(principal.getIdentity(), shopId, orderNo);
+    }
+
+    @PostMapping("/api/v1/shops/{shopId}/orders/{orderNo}/after-sales")
+    public AfterSaleTicket submit(
+            @AuthenticationPrincipal(errorOnInvalidType = true) CustomerPrincipal principal,
+            @PathVariable @Positive long shopId,
+            @PathVariable @NotBlank @Size(max = 64) String orderNo,
+            @Valid @RequestBody SubmissionRequest request) {
+        return service.submit(principal, shopId, orderNo, request.reason());
+    }
+
     @GetMapping("/api/v1/shops/{shopId}/after-sales")
     public List<AfterSaleTicket> mine(
             @AuthenticationPrincipal(errorOnInvalidType = true) CustomerPrincipal principal,
@@ -48,6 +65,8 @@ public class AfterSaleController {
             @PathVariable UUID id, @Valid @RequestBody DecisionRequest request) {
         return service.decide(principal, id, request.decision(), request.note());
     }
+
+    public record SubmissionRequest(@NotBlank @Size(max = 500) String reason) { }
 
     public record DecisionRequest(@NotNull ReviewDecision decision, @NotBlank @Size(max = 500) String note) { }
 }

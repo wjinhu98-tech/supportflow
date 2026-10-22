@@ -145,7 +145,7 @@ class AssistantWorkflowIT {
     void shouldAnswerAfterSaleProcessFromVersionedKnowledgeRatherThanWrite() throws Exception {
         JsonNode response = body(chat("buyer", 100L, "售后审批流程").andExpect(status().isOk()).andReturn());
         assertThat(response.get("type").asString()).isEqualTo("TEXT");
-        assertThat(response.get("reply").asString()).contains("来源", "@", "学习版");
+        assertThat(response.get("reply").asString()).contains("来源", "@", "演示环境");
     }
 
     @Test
@@ -188,7 +188,8 @@ class AssistantWorkflowIT {
         Fixture order = order(100L, 200L, OrderStatus.PAID);
         String first = apply(order, "商品破损");
         Map<String, String> ticket = storedTicket(order);
-        assertThat(first).contains(ticket.get("id"), "PENDING_REVIEW", "AI", "学习版");
+        assertThat(first).contains(ticket.get("id"), "审核")
+                .doesNotContain("Java", "SQL", "AI", "PENDING_REVIEW");
         assertThat(ticket.get("status")).isEqualTo("PENDING_REVIEW");
         assertThat(ticket.get("reason")).isEqualTo("商品破损");
         assertThat(countCases(order)).isEqualTo(1);
@@ -205,7 +206,7 @@ class AssistantWorkflowIT {
         Fixture order = order(100L, 200L, OrderStatus.PAID);
         String reply = body(chat("buyer", 100L, "申请售后 " + order.number())
                 .andExpect(status().isOk()).andReturn()).get("reply").asString();
-        assertThat(reply).contains("补充售后原因");
+        assertThat(reply).contains("原因").doesNotContain("Java", "SQL");
         assertThat(countCases(order)).isZero();
     }
 
@@ -420,6 +421,234 @@ class AssistantWorkflowIT {
                 cancellation.rollback();
                 if (!review.isDone()) review.get(30, TimeUnit.SECONDS);
             }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"申请退款", "将该订单退款", "我要退款"})
+    void shouldOpenRefundReasonFormWithoutCreatingAnApplication(String message) throws Exception {
+        Fixture order = order(100L, 200L, OrderStatus.PAID);
+        JsonNode response = body(mvc.perform(post("/api/v1/shops/100/chat/messages")
+                        .with(httpBasic("buyer", PASSWORD)).with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("message", message, "orderNo", order.number()))))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.type").value("AFTER_SALE_FORM"))
+                .andExpect(jsonPath("$.orders[0].orderNo").value(order.number())).andReturn());
+        assertThat(response.get("reply").asString()).contains("原因").doesNotContain("Java", "SQL", "AI", "Tool");
+        assertThat(countCases(order)).isZero();
+    }
+
+    @Test
+    void shouldRequireOrderSelectionWhenOpeningRefundWithoutAnOrder() throws Exception {
+        chat("buyer", 100L, "申请退款").andExpect(status().isOk())
+                .andExpect(jsonPath("$.type").value("AFTER_SALE_FORM"))
+                .andExpect(jsonPath("$.orders").isEmpty());
+    }
+
+    @Test
+    void shouldReportTrustedReceiptAndFifteenDayDeadlineWithoutWriting() throws Exception {
+        Fixture order = order(100L, 200L, OrderStatus.COMPLETED);
+        java.time.Instant receipt = java.time.Instant.now().minus(2, java.time.temporal.ChronoUnit.DAYS)
+                .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+        recordedReceipt(order, receipt);
+        JsonNode result = body(eligibility("buyer", order).andExpect(status().isOk()).andReturn());
+        assertThat(result.get("status").asString()).isEqualTo("ELIGIBLE");
+        assertThat(result.get("canSubmit").asBoolean()).isTrue();
+        assertThat(result.get("windowDays").asInt()).isEqualTo(15);
+        assertThat(java.time.Instant.parse(result.get("receivedAt").asString())).isEqualTo(receipt);
+        assertThat(java.time.Instant.parse(result.get("deadlineAt").asString())).isEqualTo(receipt.plus(15, java.time.temporal.ChronoUnit.DAYS));
+        assertThat(countCases(order)).isZero();
+    }
+
+    @Test
+    void shouldSubmitMissingReceiptForManualReviewWithAnImmutableSnapshot() throws Exception {
+        Fixture order = order(100L, 200L, OrderStatus.COMPLETED);
+        eligibility("buyer", order).andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("REQUIRES_REVIEW"))
+                .andExpect(jsonPath("$.canSubmit").value(true))
+                .andExpect(jsonPath("$.receivedAt").isEmpty()).andExpect(jsonPath("$.deadlineAt").isEmpty());
+        JsonNode created = body(refundForm("buyer", order, Map.of("reason", "  实物破损，请核实  "), true)
+                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("PENDING_REVIEW"))
+                .andExpect(jsonPath("$.eligibility.status").value("REQUIRES_REVIEW")).andReturn());
+        assertThat(created.get("reason").asString()).isEqualTo("实物破损，请核实");
+        assertThat(created.get("eligibility").get("checkedAt").isString()).isTrue();
+        assertPublicTicket(created);
+        String id = created.get("id").asString();
+        assertThat(countCases(order)).isEqualTo(1);
+        assertThat(countAudit(id)).isEqualTo(1);
+        JsonNode repeated = body(refundForm("buyer", order, Map.of("reason", "补充不同原因"), true)
+                .andExpect(status().isOk()).andReturn());
+        assertThat(repeated.get("id").asString()).isEqualTo(id);
+        assertThat(repeated.get("reason").asString()).isEqualTo("实物破损，请核实");
+        assertThat(repeated.get("eligibility")).isEqualTo(created.get("eligibility"));
+        assertThat(countAudit(id)).isEqualTo(1);
+    }
+
+    @Test
+    void shouldRejectExpiredApplicationsEvenWithForgedClientDatesOrTheLegacyChatCommand() throws Exception {
+        Fixture order = order(100L, 200L, OrderStatus.COMPLETED);
+        recordedReceipt(order, java.time.Instant.now().minus(16, java.time.temporal.ChronoUnit.DAYS));
+        eligibility("buyer", order).andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("EXPIRED"))
+                .andExpect(jsonPath("$.canSubmit").value(false));
+        refundForm("buyer", order, Map.of("reason", "商品破损", "receivedAt", "2999-01-01T00:00:00Z",
+                        "deadlineAt", "2999-02-01T00:00:00Z", "canSubmit", true), true)
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("BUSINESS_RULE_VIOLATION"));
+        chat("buyer", 100L, "申请售后 " + order.number() + " 商品破损")
+                .andExpect(status().isConflict());
+        assertThat(countCases(order)).isZero();
+    }
+
+    @Test
+    void shouldNotTreatAnAbnormalFutureReceiptAsVerifiedEligibility() throws Exception {
+        Fixture order = order(100L, 200L, OrderStatus.COMPLETED);
+        recordedReceipt(order, java.time.Instant.now().plus(1, java.time.temporal.ChronoUnit.DAYS));
+        eligibility("buyer", order).andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("REQUIRES_REVIEW"))
+                .andExpect(jsonPath("$.canSubmit").value(true));
+        assertThat(countCases(order)).isZero();
+    }
+
+    @Test
+    void shouldValidateRefundReasonsAndKeepAuthenticationOwnershipAndCsrfBoundaries() throws Exception {
+        Fixture order = order(100L, 200L, OrderStatus.PAID);
+        for (String reason : List.of("", "   ", "原".repeat(501))) {
+            refundForm("buyer", order, Map.of("reason", reason), true).andExpect(status().isBadRequest());
+        }
+        refundForm("buyer", order, Map.of("reason", "商品破损"), false).andExpect(status().isForbidden());
+        refundForm("other", order, Map.of("reason", "商品破损"), true).andExpect(status().isNotFound());
+        eligibility("other", order).andExpect(status().isNotFound());
+        mvc.perform(get("/api/v1/shops/101/orders/{orderNo}/after-sale-eligibility", order.number())
+                .with(httpBasic("buyer", PASSWORD))).andExpect(status().isNotFound());
+        mvc.perform(get("/api/v1/shops/100/orders/{orderNo}/after-sale-eligibility", order.number()))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/v1/shops/100/orders/{orderNo}/after-sales", order.number())
+                .with(csrf()).contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"商品破损\"}"))
+                .andExpect(status().isUnauthorized());
+        assertThat(countCases(order)).isZero();
+    }
+
+    @Test
+    void shouldHonorTimelySubmissionWhenTheReviewerActsAfterItsSavedDeadline() throws Exception {
+        Fixture order = order(100L, 200L, OrderStatus.COMPLETED);
+        recordedReceipt(order, java.time.Instant.now().minus(1, java.time.temporal.ChronoUnit.DAYS));
+        JsonNode original = body(refundForm("buyer", order, Map.of("reason", "商品破损"), true)
+                .andExpect(status().isOk()).andReturn());
+        String id = original.get("id").asString();
+        // Move the isolated fixture's ENTIRE timeline back consistently: application day10,
+        // deadline day5, review today. This represents a legitimately timely historical case.
+        try (Connection connection = admin(); Statement sql = connection.createStatement()) {
+            sql.executeUpdate("UPDATE support_order SET received_at=UTC_TIMESTAMP(3)-INTERVAL 20 DAY WHERE id=" + order.id());
+            try (PreparedStatement shift = connection.prepareStatement("""
+                    UPDATE support_after_sale SET
+                      eligibility_received_at=UTC_TIMESTAMP(3)-INTERVAL 20 DAY,
+                      eligibility_deadline_at=UTC_TIMESTAMP(3)-INTERVAL 5 DAY,
+                      eligibility_checked_at=UTC_TIMESTAMP(3)-INTERVAL 10 DAY,
+                      created_at=UTC_TIMESTAMP(3)-INTERVAL 10 DAY
+                    WHERE id=?
+                    """)) {
+                shift.setString(1, id);
+                assertThat(shift.executeUpdate()).isEqualTo(1);
+            }
+        }
+        eligibility("buyer", order).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("EXPIRED"));
+        JsonNode repeated = body(refundForm("buyer", order, Map.of("reason", "网络重试"), true)
+                .andExpect(status().isOk()).andReturn());
+        assertThat(repeated.get("id").asString()).isEqualTo(id);
+        assertThat(repeated.get("eligibility").get("status").asString()).isEqualTo("ELIGIBLE");
+        decide("reviewer", id, "APPROVE", true).andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("APPROVED"));
+        assertThat(countCases(order)).isEqualTo(1);
+    }
+
+    @Test
+    void shouldReturnConcurrentlyCommittedApplicationWhenItsSnapshotMissesItAndCurrentReceiptIsExpired()
+            throws Exception {
+        Fixture order = order(100L, 200L, OrderStatus.COMPLETED);
+        recordedReceipt(order, java.time.Instant.now().minus(1, java.time.temporal.ChronoUnit.DAYS));
+        String originalId = UUID.randomUUID().toString();
+        String originalReason = "Previously submitted reason";
+        try (Connection concurrent = admin();
+             PreparedStatement correctReceipt = concurrent.prepareStatement(
+                     "UPDATE support_order SET received_at=UTC_TIMESTAMP(3)-INTERVAL 16 DAY WHERE id=?")) {
+            concurrent.setAutoCommit(false);
+            correctReceipt.setLong(1, order.id());
+            assertThat(correctReceipt.executeUpdate()).isEqualTo(1);
+            CompletableFuture<MvcResult> retry = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return refundForm("buyer", order, Map.of("reason", "Retried submission reason"), true)
+                            .andReturn();
+                } catch (Exception failure) {
+                    throw new IllegalStateException("Isolated concurrent refund retry failed", failure);
+                }
+            });
+            try {
+                // The request has already read an RR snapshot with no case; its current order read is blocked.
+                assertThat(awaitOrderReadLockWait()).as("Retry must wait for the current order row lock").isTrue();
+                assertThat(retry).isNotDone();
+                // Publish a legitimately timely historical case after that snapshot, alongside the corrected
+                // receipt. Only a current read can now find this case before rejecting the expired order.
+                try (PreparedStatement insert = concurrent.prepareStatement("""
+                        INSERT INTO support_after_sale
+                          (id, request_key, buyer_id, tenant_id, order_id, order_no, reason, status,
+                           created_at, eligibility_status, eligibility_can_submit, eligibility_message,
+                           eligibility_received_at, eligibility_deadline_at, eligibility_checked_at,
+                           eligibility_window_days)
+                        VALUES (?, SHA2(?, 256), 200, ?, ?, ?, ?, 'PENDING_REVIEW',
+                                UTC_TIMESTAMP(3)-INTERVAL 2 DAY, 'ELIGIBLE', TRUE, 'Eligible at submission',
+                                UTC_TIMESTAMP(3)-INTERVAL 16 DAY, UTC_TIMESTAMP(3)-INTERVAL 1 DAY,
+                                UTC_TIMESTAMP(3)-INTERVAL 2 DAY, 15)
+                        """);
+                     PreparedStatement audit = concurrent.prepareStatement("""
+                        INSERT INTO support_after_sale_audit (request_id, actor, action, notes, created_at)
+                        VALUES (?, 'buyer', 'SUBMITTED', 'Original submission', UTC_TIMESTAMP(3)-INTERVAL 2 DAY)
+                        """)) {
+                    insert.setString(1, originalId);
+                    insert.setString(2, "200:" + order.shopId() + ":" + order.id());
+                    insert.setLong(3, order.shopId());
+                    insert.setLong(4, order.id());
+                    insert.setString(5, order.number());
+                    insert.setString(6, originalReason);
+                    assertThat(insert.executeUpdate()).isEqualTo(1);
+                    audit.setString(1, originalId);
+                    assertThat(audit.executeUpdate()).isEqualTo(1);
+                }
+                concurrent.commit();
+                MvcResult response = retry.get(30, TimeUnit.SECONDS);
+                assertThat(response.getResponse().getStatus()).isEqualTo(200);
+                JsonNode returned = body(response);
+                assertThat(returned.get("id").asString()).isEqualTo(originalId);
+                assertThat(returned.get("reason").asString()).isEqualTo(originalReason);
+                assertThat(returned.get("eligibility").get("status").asString()).isEqualTo("ELIGIBLE");
+                eligibility("buyer", order).andExpect(status().isOk())
+                        .andExpect(jsonPath("$.status").value("EXPIRED"));
+                assertThat(countCases(order)).isEqualTo(1);
+                assertThat(countAudit(originalId)).isEqualTo(1);
+            } finally {
+                concurrent.rollback();
+                if (!retry.isDone()) retry.get(30, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    private ResultActions eligibility(String username, Fixture order) throws Exception {
+        return mvc.perform(get("/api/v1/shops/{shopId}/orders/{orderNo}/after-sale-eligibility", order.shopId(), order.number())
+                .with(httpBasic(username, PASSWORD)));
+    }
+
+    private ResultActions refundForm(String username, Fixture order, Map<String, ?> values, boolean withCsrf) throws Exception {
+        var request = post("/api/v1/shops/{shopId}/orders/{orderNo}/after-sales", order.shopId(), order.number())
+                .with(httpBasic(username, PASSWORD)).contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(values));
+        return mvc.perform(withCsrf ? request.with(csrf()) : request);
+    }
+
+    private void recordedReceipt(Fixture order, java.time.Instant receivedAt) throws SQLException {
+        try (Connection connection = admin(); PreparedStatement update = connection.prepareStatement(
+                "UPDATE support_order SET received_at=? WHERE id=?")) {
+            update.setObject(1, java.time.LocalDateTime.ofInstant(receivedAt, java.time.ZoneOffset.UTC));
+            update.setLong(2, order.id());
+            assertThat(update.executeUpdate()).isEqualTo(1);
         }
     }
 

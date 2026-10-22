@@ -7,14 +7,21 @@ import java.time.Instant;
 public record AfterSaleTicket(
         String id, long shopId, String orderNo, String reason, AfterSaleStatus status,
         String reviewer, String reviewNote, Instant createdAt, Instant updatedAt,
-        AfterSaleExecution execution
+        AfterSaleExecution execution, AfterSaleEligibility eligibility
 ) {
     public AfterSaleTicket(String id, long shopId, String orderNo, String reason, AfterSaleStatus status,
                            String reviewer, String reviewNote, Instant createdAt, Instant updatedAt) {
-        this(id, shopId, orderNo, reason, status, reviewer, reviewNote, createdAt, updatedAt, null);
+        this(id, shopId, orderNo, reason, status, reviewer, reviewNote, createdAt, updatedAt, null, null);
+    }
+
+    public AfterSaleTicket(String id, long shopId, String orderNo, String reason, AfterSaleStatus status,
+                           String reviewer, String reviewNote, Instant createdAt, Instant updatedAt,
+                           AfterSaleExecution execution) {
+        this(id, shopId, orderNo, reason, status, reviewer, reviewNote, createdAt, updatedAt, execution, null);
     }
 
     AfterSaleTicket withExecution(AfterSaleExecution progress) {
-        return new AfterSaleTicket(id, shopId, orderNo, reason, status, reviewer, reviewNote, createdAt, updatedAt, progress);
+        return new AfterSaleTicket(id, shopId, orderNo, reason, status, reviewer, reviewNote,
+                createdAt, updatedAt, progress, eligibility);
     }
 }

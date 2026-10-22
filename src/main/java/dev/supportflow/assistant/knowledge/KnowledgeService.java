@@ -34,8 +34,8 @@ public class KnowledgeService {
     public String answer(String message) {
         List<KnowledgeMatch> matches = retrieve(message);
         if (matches.isEmpty()) return UNKNOWN;
-        StringBuilder answer = new StringBuilder("【本项目学习版知识说明】\n"
-                + "以下内容来自本地版本化文档，不代表外部企业政策，也不是实时订单查询结果。\n");
+        StringBuilder answer = new StringBuilder("【店铺服务说明】\n"
+                + "以下为当前演示环境的服务说明，不代表外部企业政策，也不是实时订单查询结果。\n");
         for (KnowledgeMatch match : matches) {
             answer.append('\n').append(match.title()).append('\n')
                     .append(extractPassages(message, match.content()))

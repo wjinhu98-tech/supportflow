@@ -4,5 +4,6 @@ package dev.supportflow.chat.application.model;
 public enum ChatReplyType {
     TEXT,
     ORDER_DETAILS,
-    ORDER_SELECTION
+    ORDER_SELECTION,
+    AFTER_SALE_FORM
 }

@@ -42,7 +42,7 @@ Vue 店铺客服页面
 1. 以买家账号进入店铺，例如 `?shopId=100`，连接后选订单。
 2. 「服务规则」或发送「售后审批规则」：展示知识来源和版本。
 3. 「查物流」：按已选订单读取本项目物流事件。
-4. 「申请售后」只预填命令，不自动提交。补充原因后发送，例如 `申请售后 商品破损`；未选订单可明确发送 `申请售后 SF10001 商品破损`。
+4. 「申请退款」「将该订单退款」打开退款原因表单；后端核实确认收货后15天的期限，买家确认提交后才创建待审核申请。历史订单缺少收货时间时转人工核实。旧命令 `申请售后 商品破损` 仍兼容相同的业务校验。详见[退款原因与期限规则](refund-reason-policy.md)。
 5. Java 检查订单属于当前买家和店铺，且不是 CREATED/CANCELLED，再创建 `PENDING_REVIEW`。没有订单号则返回候选；没有原因不会写入。
 6. 普通买家点击「人工审核」会被服务器拒绝，不能通过改前端按钮绕过。
 7. 断开并以独立的客服/管理员账号连接，打开「人工审核」，输入备注，人工选择「确认批准」或「拒绝」。不能审批与自己同 buyerId 的申请。
@@ -52,8 +52,8 @@ Vue 店铺客服页面
 
 功能代码使用隔离测试验证；旧账号需要明确追加新表权限。日常库另行导入的演示数据见 [本地测试数据说明](local-demo-data.md)。
 
-1. 保留原 `local` profile、数据源和 Flyway 迁移账号配置。由本地应用启动时让迁移账号按既有机制执行 **V4、V5**，不改旧版本迁移。
-2. V4 建业务表；V5 新增执行任务与模拟回执表。迁移本身不插入演示订单，不自动执行历史审批。
+1. 保留原 `local` profile、数据源和 Flyway 迁移账号配置。由本地应用启动时让迁移账号按既有机制执行待执行的迁移，不改旧版本迁移。
+2. V4 建业务表；V5 新增执行任务与模拟回执表；V6 新增可空的确认收货时间和申请资格快照。迁移不插入演示订单、不编造历史收货日期、不自动执行历史审批。
 3. 原 `supportflow_app` 历史只有 SELECT，售后写入会失败。数据库管理员核对目标环境后，手动执行 [最小增量授权 SQL](../config/assistant-runtime-grants.sql)。此脚本不是 Flyway 迁移，不会自动执行；只给售后表 INSERT/UPDATE、审计表 INSERT，不给订单写权限或 DELETE/DDL。
 4. 在原本被忽略的本地安全配置 `supportflow.security.local.accounts` 中**追加**一个独立客服账号。参考 [审核账号模板](../config/reviewer-account.example.yml)，替换用户名、独立 buyerId 和密码哈希，保留现有买家账号。
 5. 审核权限使用枚举 `AFTER_SALE_REVIEW`；完整审核账号还需 `ORDER_READ` 做审批前业务复核。本学习版此权限是明确的全平台待审队列权限，不是按店铺分配的客服权限；生产系统需要进一步建立员工组织/店铺授权。
@@ -84,7 +84,7 @@ Vue 店铺客服页面
 
 根目录 `mvn -o verify`：单元、安全/数据库/迁移/并发集成测试。前端 `npm.cmd run check`、`npm.cmd run build`、`npm.cmd run test:e2e`：类型、状态流、构建、模拟接口浏览器测试。
 
-真正的浏览器/Java/MySQL闭环使用 `FrontendTestServer`。它创建一次性 MySQL、执行 V1–V5、开启模拟执行 Worker、强制关闭 DeepSeek、不加载 `.local`，只监听 `127.0.0.1:18081`。启动方式见 [前端运行说明](../frontend/README.md)。公开测试账号为 `frontend-buyer`、`frontend-other`、`frontend-reviewer`，密码均为源码中的测试专用 `Frontend-Test-Only!`，只能用于该临时实例。不要将它们复制到本地真实配置。
+真正的浏览器/Java/MySQL闭环使用 `FrontendTestServer`。它创建一次性 MySQL、执行 V1–V6、开启模拟执行 Worker、强制关闭 DeepSeek、不加载 `.local`，只监听 `127.0.0.1:18081`。启动方式见 [前端运行说明](../frontend/README.md)。公开测试账号为 `frontend-buyer`、`frontend-other`、`frontend-reviewer`，密码均为源码中的测试专用 `Frontend-Test-Only!`，只能用于该临时实例。不要将它们复制到本地真实配置。
 
 DeepSeek function calling 的协议已由 mock HTTP 单测验证，没有为这轮验收消耗真实模型额度。[DeepSeek 官方工具调用文档](https://api-docs.deepseek.com/guides/tool_calls/)
 

@@ -74,7 +74,7 @@ class MySqlMigrationIT {
         MigrateResult firstMigration = flyway.migrate();
 
         assertThat(firstMigration.success).isTrue();
-        assertThat(firstMigration.migrationsExecuted).isEqualTo(4);
+        assertThat(firstMigration.migrationsExecuted).isEqualTo(5);
 
         MigrateResult secondMigration = flyway.migrate();
 
@@ -93,7 +93,8 @@ class MySqlMigrationIT {
                 ResultSet resultSet = statement.executeQuery(
                         """
                         SELECT COUNT(*) AS order_count,
-                               COUNT(buyer_id) AS mapped_buyer_count
+                               COUNT(buyer_id) AS mapped_buyer_count,
+                               COUNT(received_at) AS recorded_receipt_count
                         FROM support_order
                         """
                 )
@@ -101,6 +102,7 @@ class MySqlMigrationIT {
             assertThat(resultSet.next()).isTrue();
             assertThat(resultSet.getLong("order_count")).isEqualTo(2);
             assertThat(resultSet.getLong("mapped_buyer_count")).isZero();
+            assertThat(resultSet.getLong("recorded_receipt_count")).isZero();
             assertThat(resultSet.next()).isFalse();
         }
 
@@ -142,7 +144,7 @@ class MySqlMigrationIT {
                     FROM flyway_schema_history
                     ORDER BY installed_rank
                     """)) {
-                for (String version : List.of("1", "2", "3", "4", "5")) {
+                for (String version : List.of("1", "2", "3", "4", "5", "6")) {
                     assertThat(history.next()).isTrue();
                     assertThat(history.getString("version")).isEqualTo(version);
                     assertThat(history.getBoolean("success")).isTrue();

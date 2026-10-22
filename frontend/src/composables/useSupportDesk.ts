@@ -1,6 +1,6 @@
 import { onScopeDispose, ref } from 'vue'
 import { ApiClient, ApiError, validShopId } from '../api/client'
-import type { AfterSaleTicket, ChatMessage, Order } from '../types'
+import type { AfterSaleEligibility, AfterSaleTicket, ChatMessage, Order } from '../types'
 
 /** UI orchestrator: events -> API DTOs -> reactive state. No backend ownership decisions here. */
 export function useSupportDesk() {
@@ -28,11 +28,21 @@ export function useSupportDesk() {
   const ownedAfterSales = ref<AfterSaleTicket[]>([])
   const afterSalesLoading = ref(false)
   const afterSalesError = ref<string | null>(null)
+  const refundOpen = ref(false)
+  const refundOrder = ref<Order | null>(null)
+  const refundReason = ref('')
+  const refundEligibility = ref<AfterSaleEligibility | null>(null)
+  const refundLoading = ref(false)
+  const refundSubmitting = ref(false)
+  const refundError = ref<string | null>(null)
+  let refundRequest = new AbortController()
+  let refundVersion = 0
   let client: ApiClient | null = null
   let context = new AbortController()
   let messageId = 0
 
   function resetContext() {
+    closeRefundForm()
     context.abort()
     context = new AbortController()
     busy.value = false
@@ -184,6 +194,7 @@ export function useSupportDesk() {
       })
       if (response.type === 'ORDER_DETAILS' && response.orders[0])
         selectedOrder.value = response.orders[0]
+      if (response.type === 'AFTER_SALE_FORM') await openRefundForm(response.orders[0] ?? null)
     } catch (failure) {
       report(failure, signal)
     } finally {
@@ -203,7 +214,8 @@ export function useSupportDesk() {
   function clearConversation() {
     // An approval is a business write: clearing chat must not cancel its result
     // and leave the reviewer unsure whether the server accepted the decision.
-    if (connecting.value || reviewSubmitting.value) return
+    if (connecting.value || reviewSubmitting.value || refundSubmitting.value) return
+    closeRefundForm()
     // Abort old requests before removing their conversation, then preserve the current order list.
     context.abort()
     context = new AbortController()
@@ -219,6 +231,110 @@ export function useSupportDesk() {
   }
   function dismissError() {
     error.value = null
+  }
+
+  function closeRefundForm() {
+    refundRequest.abort()
+    refundRequest = new AbortController()
+    refundVersion++
+    refundOpen.value = false
+    refundOrder.value = null
+    refundReason.value = ''
+    refundEligibility.value = null
+    refundLoading.value = false
+    refundSubmitting.value = false
+    refundError.value = null
+  }
+
+  async function openRefundForm(order: Order | null = selectedOrder.value) {
+    if (!client || !connected.value || refundSubmitting.value) return
+    closeRefundForm()
+    refundOpen.value = true
+    if (order?.shopId === Number(shopId.value)) await chooseRefundOrder(order)
+    else if (!orders.value.length && !ordersBusy.value) await loadOrders()
+  }
+
+  async function chooseRefundOrder(order: Order) {
+    if (
+      !client ||
+      !connected.value ||
+      !refundOpen.value ||
+      refundSubmitting.value ||
+      order.shopId !== Number(shopId.value)
+    )
+      return
+    refundRequest.abort()
+    refundRequest = new AbortController()
+    const signal = AbortSignal.any([context.signal, refundRequest.signal])
+    const version = ++refundVersion
+    refundOrder.value = order
+    refundEligibility.value = null
+    refundReason.value = ''
+    refundError.value = null
+    refundLoading.value = true
+    try {
+      const result = await client.afterSaleEligibility(shopId.value, order.orderNo, signal)
+      if (!signal.aborted && version === refundVersion) refundEligibility.value = result
+    } catch (failure) {
+      if (!signal.aborted && version === refundVersion) {
+        refundError.value =
+          failure instanceof Error ? failure.message : '暂时无法核实售后期限，请稍后重试。'
+        if (failure instanceof ApiError && failure.status === 401) report(failure, signal)
+      }
+    } finally {
+      if (!signal.aborted && version === refundVersion) refundLoading.value = false
+    }
+  }
+
+  async function submitRefund() {
+    if (
+      !client ||
+      !connected.value ||
+      !refundOpen.value ||
+      refundLoading.value ||
+      refundSubmitting.value
+    )
+      return
+    const order = refundOrder.value
+    const eligibility = refundEligibility.value
+    if (!order || !eligibility?.canSubmit || order.shopId !== Number(shopId.value)) return
+    const reason = refundReason.value.trim()
+    if (!reason || reason.length > 500) {
+      refundError.value = '请填写 1–500 字的退款原因。'
+      return
+    }
+    const signal = AbortSignal.any([context.signal, refundRequest.signal])
+    const version = refundVersion
+    refundSubmitting.value = true
+    refundError.value = null
+    try {
+      const result = await client.applyAfterSale(shopId.value, order.orderNo, reason, signal)
+      if (signal.aborted || version !== refundVersion) return
+      ownedAfterSales.value = [
+        result,
+        ...ownedAfterSales.value.filter((ticket) => ticket.id !== result.id),
+      ].slice(0, 50)
+      messages.value.push({
+        id: ++messageId,
+        role: 'assistant',
+        createdAt: new Date().toISOString(),
+        text:
+          result.eligibility?.status === 'REQUIRES_REVIEW'
+            ? `订单 ${result.orderNo} 的退款申请已提交，客服会核实收货时间和售后期限，请在售后进度中查看处理结果。`
+            : `订单 ${result.orderNo} 的退款申请已提交，请在售后进度中查看审核结果。`,
+      })
+      closeRefundForm()
+    } catch (failure) {
+      if (!signal.aborted && version === refundVersion) {
+        refundError.value =
+          failure instanceof ApiError && [400, 403, 404, 409].includes(failure.status)
+            ? failure.message
+            : '提交结果暂时无法确认，请先查看售后进度，勿重复提交。'
+        if (failure instanceof ApiError && failure.status === 401) report(failure, signal)
+      }
+    } finally {
+      if (!signal.aborted && version === refundVersion) refundSubmitting.value = false
+    }
   }
 
   async function loadReviews(view: 'pending' | 'history' = reviewView.value) {
@@ -317,11 +433,23 @@ export function useSupportDesk() {
     }
   }
   onScopeDispose(() => {
+    closeRefundForm()
     context.abort()
     client = null
   })
 
   return {
+    refundOpen,
+    refundOrder,
+    refundReason,
+    refundEligibility,
+    refundLoading,
+    refundSubmitting,
+    refundError,
+    openRefundForm,
+    closeRefundForm,
+    chooseRefundOrder,
+    submitRefund,
     reviewTickets,
     reviewHistoryTickets,
     reviewView,

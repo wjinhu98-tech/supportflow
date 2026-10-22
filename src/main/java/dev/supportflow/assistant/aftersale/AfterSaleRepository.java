@@ -7,6 +7,8 @@ import org.springframework.stereotype.Repository;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -15,7 +17,9 @@ import java.util.Optional;
 @Repository
 public class AfterSaleRepository {
     private static final String COLUMNS = "id, tenant_id, order_id, buyer_id, order_no, reason, status, "
-            + "reviewer, review_note, created_at, updated_at, version";
+            + "reviewer, review_note, created_at, updated_at, version, eligibility_status, "
+            + "eligibility_can_submit, eligibility_message, eligibility_received_at, eligibility_deadline_at, "
+            + "eligibility_checked_at, eligibility_window_days";
     private final JdbcClient jdbc;
     private final AfterSaleExecutionRepository executions;
 
@@ -24,28 +28,54 @@ public class AfterSaleRepository {
         this.executions = executions;
     }
 
-    void insert(String id, String key, SupportOrder order, String reason) {
+    void insert(String id, String key, SupportOrder order, String reason, AfterSaleEligibility eligibility) {
             jdbc.sql("""
                     INSERT INTO support_after_sale
-                      (id, request_key, buyer_id, tenant_id, order_id, order_no, reason, status)
-                    VALUES (:id, :key, :buyer, :shop, :orderId, :orderNo, :reason, 'PENDING_REVIEW')
+                      (id, request_key, buyer_id, tenant_id, order_id, order_no, reason, status,
+                       eligibility_status, eligibility_can_submit, eligibility_message, eligibility_received_at,
+                       eligibility_deadline_at, eligibility_checked_at, eligibility_window_days)
+                    VALUES (:id, :key, :buyer, :shop, :orderId, :orderNo, :reason, 'PENDING_REVIEW',
+                            :eligibilityStatus, :canSubmit, :message, :receivedAt, :deadlineAt, :checkedAt, :windowDays)
                     ON DUPLICATE KEY UPDATE id=id
                     """)
                     .param("id", id).param("key", key).param("buyer", order.buyerId())
                     .param("shop", order.tenantId()).param("orderId", order.id())
-                    .param("orderNo", order.orderNo()).param("reason", reason).update();
+                    .param("orderNo", order.orderNo()).param("reason", reason)
+                    .param("eligibilityStatus", eligibility.status().name()).param("canSubmit", eligibility.canSubmit())
+                    .param("message", eligibility.message())
+                    .param("receivedAt", utc(eligibility.receivedAt()), Types.TIMESTAMP)
+                    .param("deadlineAt", utc(eligibility.deadlineAt()), Types.TIMESTAMP)
+                    .param("checkedAt", utc(eligibility.checkedAt()), Types.TIMESTAMP)
+                    .param("windowDays", eligibility.windowDays()).update();
     }
 
     /** A current shared read prevents order changes until the surrounding transaction commits. */
-    boolean lockEligibleOrder(SupportOrder order) {
+    Optional<SupportOrder> lockOwnedOrder(SupportOrder order) {
         return jdbc.sql("""
-                SELECT id FROM support_order
+                SELECT id, tenant_id, customer_id, buyer_id, order_no, status,
+                       total_amount, currency, created_at, updated_at, received_at FROM support_order
                 WHERE id=:id AND tenant_id=:shop AND buyer_id=:buyer AND order_no=:orderNo
-                  AND status IN ('PAID', 'SHIPPED', 'COMPLETED')
                 FOR SHARE
                 """)
                 .param("id", order.id()).param("shop", order.tenantId()).param("buyer", order.buyerId())
-                .param("orderNo", order.orderNo()).query(Long.class).optional().isPresent();
+                .param("orderNo", order.orderNo()).query((row, ignored) -> new SupportOrder(
+                        row.getLong("id"), row.getLong("tenant_id"), row.getLong("customer_id"),
+                        row.getLong("buyer_id"), row.getString("order_no"),
+                        dev.supportflow.order.domain.model.OrderStatus.fromCode(row.getString("status")),
+                        row.getBigDecimal("total_amount"), row.getString("currency"),
+                        instant(row, "created_at"), instant(row, "updated_at"), instant(row, "received_at")))
+                .optional();
+    }
+
+    /** Use the database UTC clock so a browser timestamp or a different JVM timezone cannot extend eligibility. */
+    Instant now() {
+        return jdbc.sql("SELECT UTC_TIMESTAMP(3)").query(LocalDateTime.class).single().toInstant(ZoneOffset.UTC);
+    }
+
+    /** No gap lock on a missing request key: racing new submissions still serialize at the existing UPSERT. */
+    Optional<StoredAfterSale> findExistingByKey(String key) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM support_after_sale WHERE request_key=:key")
+                .param("key", key).query(AfterSaleRepository::map).optional().map(this::enrich);
     }
 
     Optional<StoredAfterSale> findByKey(String key) {
@@ -112,7 +142,27 @@ public class AfterSaleRepository {
                 row.getString("reason"), AfterSaleStatus.valueOf(row.getString("status")),
                 row.getString("reviewer"), row.getString("review_note"),
                 row.getObject("created_at", LocalDateTime.class).toInstant(ZoneOffset.UTC),
-                row.getObject("updated_at", LocalDateTime.class).toInstant(ZoneOffset.UTC));
+                row.getObject("updated_at", LocalDateTime.class).toInstant(ZoneOffset.UTC),
+                null, eligibility(row));
         return new StoredAfterSale(view, row.getLong("buyer_id"), row.getLong("order_id"), row.getLong("version"));
+    }
+
+    private static AfterSaleEligibility eligibility(ResultSet row) throws SQLException {
+        String status = row.getString("eligibility_status");
+        if (status == null) return null;
+        return new AfterSaleEligibility(row.getLong("tenant_id"), row.getString("order_no"),
+                AfterSaleEligibilityStatus.valueOf(status), row.getBoolean("eligibility_can_submit"),
+                row.getString("eligibility_message"), instant(row, "eligibility_received_at"),
+                instant(row, "eligibility_deadline_at"), instant(row, "eligibility_checked_at"),
+                row.getInt("eligibility_window_days"));
+    }
+
+    private static Instant instant(ResultSet row, String column) throws SQLException {
+        LocalDateTime value = row.getObject(column, LocalDateTime.class);
+        return value == null ? null : value.toInstant(ZoneOffset.UTC);
+    }
+
+    private static LocalDateTime utc(Instant value) {
+        return value == null ? null : LocalDateTime.ofInstant(value, ZoneOffset.UTC);
     }
 }

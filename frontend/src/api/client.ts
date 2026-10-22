@@ -1,4 +1,5 @@
 import type {
+  AfterSaleEligibility,
   AfterSaleExecution,
   AfterSaleTicket,
   ChatResponse,
@@ -44,10 +45,11 @@ function parseChat(value: unknown, shopId: string): ChatResponse {
   if (
     !isRecord(value) ||
     typeof value.reply !== 'string' ||
-    !['TEXT', 'ORDER_DETAILS', 'ORDER_SELECTION'].includes(String(value.type)) ||
+    !['TEXT', 'ORDER_DETAILS', 'ORDER_SELECTION', 'AFTER_SALE_FORM'].includes(String(value.type)) ||
     !Array.isArray(value.orders) ||
     !value.orders.every(validOrder) ||
     value.orders.some((order) => order.shopId !== Number(shopId)) ||
+    (value.type === 'AFTER_SALE_FORM' && (value.orders.length > 1 || value.nextAfterId !== null)) ||
     !(
       value.nextAfterId === null ||
       (typeof value.nextAfterId === 'number' &&
@@ -64,6 +66,43 @@ const reviewIdPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-
 
 function nullableString(value: unknown): boolean {
   return value === null || typeof value === 'string'
+}
+
+function isTimestamp(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^\d{4}-\d\d-\d\dT/.test(value) &&
+    Number.isFinite(Date.parse(value))
+  )
+}
+
+function isEligibility(value: unknown): value is AfterSaleEligibility {
+  if (!isRecord(value)) return false
+  const hasDates = isTimestamp(value.receivedAt) && isTimestamp(value.deadlineAt)
+  return (
+    typeof value.shopId === 'number' &&
+    Number.isSafeInteger(value.shopId) &&
+    value.shopId > 0 &&
+    typeof value.orderNo === 'string' &&
+    value.orderNo.length > 0 &&
+    value.orderNo.length <= 64 &&
+    !/[\s\p{Cc}]/u.test(value.orderNo) &&
+    ['ELIGIBLE', 'REQUIRES_REVIEW', 'EXPIRED', 'INELIGIBLE'].includes(String(value.status)) &&
+    typeof value.canSubmit === 'boolean' &&
+    value.canSubmit === ['ELIGIBLE', 'REQUIRES_REVIEW'].includes(String(value.status)) &&
+    typeof value.message === 'string' &&
+    value.message.trim().length > 0 &&
+    isTimestamp(value.checkedAt) &&
+    typeof value.windowDays === 'number' &&
+    Number.isSafeInteger(value.windowDays) &&
+    value.windowDays > 0 &&
+    (value.receivedAt === null || isTimestamp(value.receivedAt)) &&
+    (value.deadlineAt === null || isTimestamp(value.deadlineAt)) &&
+    (!['ELIGIBLE', 'EXPIRED'].includes(String(value.status)) || hasDates) &&
+    (value.status !== 'REQUIRES_REVIEW' ||
+      hasDates ||
+      (value.receivedAt === null && value.deadlineAt === null))
+  )
 }
 
 function isExecution(value: unknown): value is AfterSaleExecution {
@@ -105,6 +144,11 @@ function isTicket(value: unknown): value is AfterSaleTicket {
     typeof value.updatedAt === 'string' &&
     (value.reviewer === null || typeof value.reviewer === 'string') &&
     (value.reviewNote === null || typeof value.reviewNote === 'string') &&
+    (value.eligibility === undefined ||
+      value.eligibility === null ||
+      (isEligibility(value.eligibility) &&
+        value.eligibility.shopId === value.shopId &&
+        value.eligibility.orderNo === value.orderNo)) &&
     (value.execution === undefined ||
       value.execution === null ||
       (value.status === 'APPROVED' && isExecution(value.execution)))
@@ -112,7 +156,7 @@ function isTicket(value: unknown): value is AfterSaleTicket {
 }
 
 function normalizeTicket(ticket: AfterSaleTicket): AfterSaleTicket {
-  return { ...ticket, execution: ticket.execution ?? null }
+  return { ...ticket, execution: ticket.execution ?? null, eligibility: ticket.eligibility ?? null }
 }
 
 function parseTickets(data: unknown, shopId?: string): AfterSaleTicket[] {
@@ -155,6 +199,60 @@ export class ApiClient {
 
   async authenticate(signal?: AbortSignal): Promise<void> {
     await this.getCsrf(signal)
+  }
+
+  async afterSaleEligibility(
+    shopId: string,
+    orderNo: string,
+    signal?: AbortSignal,
+  ): Promise<AfterSaleEligibility> {
+    this.validateOrderTarget(shopId, orderNo)
+    const data = await this.queued(() =>
+      this.request(
+        `/api/v1/shops/${shopId}/orders/${encodeURIComponent(orderNo)}/after-sale-eligibility`,
+        { method: 'GET' },
+        signal,
+      ),
+    )
+    if (!isEligibility(data) || data.shopId !== Number(shopId) || data.orderNo !== orderNo)
+      throw new ApiError('无法确认该订单的售后期限，请稍后重试。', 0, 'INVALID_RESPONSE')
+    return data
+  }
+
+  async applyAfterSale(
+    shopId: string,
+    orderNo: string,
+    reason: string,
+    signal?: AbortSignal,
+  ): Promise<AfterSaleTicket> {
+    this.validateOrderTarget(shopId, orderNo)
+    const normalized = reason.trim()
+    if (!normalized || normalized.length > 500) throw new ApiError('请填写 1–500 字的退款原因。')
+    return this.queued(async () => {
+      if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
+      const csrf = await this.getCsrf(signal)
+      const data = await this.request(
+        `/api/v1/shops/${shopId}/orders/${encodeURIComponent(orderNo)}/after-sales`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', [csrf.headerName]: csrf.token },
+          body: JSON.stringify({ reason: normalized }),
+        },
+        signal,
+      )
+      if (!isTicket(data) || data.shopId !== Number(shopId) || data.orderNo !== orderNo)
+        throw new ApiError(
+          '提交结果暂时无法确认，请先查看售后进度，勿重复提交。',
+          0,
+          'INVALID_RESPONSE',
+        )
+      return normalizeTicket(data)
+    })
+  }
+
+  private validateOrderTarget(shopId: string, orderNo: string) {
+    if (!validShopId(shopId) || !orderNo || orderNo.length > 64 || /[\s\p{Cc}]/u.test(orderNo))
+      throw new ApiError('请先选择当前店铺的有效订单。')
   }
 
   async pendingReviews(signal?: AbortSignal): Promise<AfterSaleTicket[]> {
@@ -331,9 +429,14 @@ export class ApiClient {
           isRecord(data) && typeof data.message === 'string' ? data.message : null
         const code = isRecord(data) && typeof data.code === 'string' ? data.code : 'HTTP_ERROR'
         throw new ApiError(
-          (response.status === 404 && code === 'REVIEW_NOT_FOUND'
-            ? '未找到该售后申请，请刷新审核列表后重试。'
-            : statusMessages[response.status]) ??
+          (response.status === 409 &&
+          code === 'BUSINESS_RULE_VIOLATION' &&
+          serverMessage &&
+          serverMessage.length <= 500
+            ? serverMessage
+            : response.status === 404 && code === 'REVIEW_NOT_FOUND'
+              ? '未找到该售后申请，请刷新审核列表后重试。'
+              : statusMessages[response.status]) ??
             (response.status === 400 && serverMessage
               ? serverMessage
               : '请求未能完成，请稍后重试。'),

@@ -1,6 +1,6 @@
 import { effectScope } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AfterSaleTicket, ChatResponse, Order } from '../types'
+import type { AfterSaleEligibility, AfterSaleTicket, ChatResponse, Order } from '../types'
 
 const mocks = vi.hoisted(() => ({
   authenticate: vi.fn(),
@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   reviewHistory: vi.fn(),
   retryExecution: vi.fn(),
   ownedAfterSales: vi.fn(),
+  afterSaleEligibility: vi.fn(),
+  applyAfterSale: vi.fn(),
 }))
 vi.mock('../api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api/client')>()
@@ -23,6 +25,8 @@ vi.mock('../api/client', async (importOriginal) => {
       reviewHistory = mocks.reviewHistory
       retryExecution = mocks.retryExecution
       ownedAfterSales = mocks.ownedAfterSales
+      afterSaleEligibility = mocks.afterSaleEligibility
+      applyAfterSale = mocks.applyAfterSale
     },
   }
 })
@@ -57,6 +61,18 @@ const ticket: AfterSaleTicket = {
   createdAt: '2026-10-20T00:00:00Z',
   updatedAt: '2026-10-20T00:00:00Z',
   execution: null,
+  eligibility: null,
+}
+const eligible: AfterSaleEligibility = {
+  shopId: 100,
+  orderNo: 'SF10001',
+  status: 'ELIGIBLE',
+  canSubmit: true,
+  message: '订单在售后期限内，请填写退款原因。',
+  receivedAt: '2026-10-20T00:00:00Z',
+  deadlineAt: '2026-11-04T00:00:00Z',
+  checkedAt: '2026-10-21T00:00:00Z',
+  windowDays: 15,
 }
 const reviewedTicket: AfterSaleTicket = {
   ...ticket,
@@ -90,12 +106,167 @@ beforeEach(() => {
   mocks.reviewHistory.mockReset().mockResolvedValue([reviewedTicket])
   mocks.retryExecution.mockReset()
   mocks.ownedAfterSales.mockReset().mockResolvedValue([reviewedTicket])
+  mocks.afterSaleEligibility.mockReset().mockResolvedValue(eligible)
+  mocks.applyAfterSale.mockReset().mockResolvedValue({ ...ticket, eligibility: eligible })
 })
 afterEach(() => {
   for (const scope of scopes.splice(0)) scope.stop()
 })
 
 describe('useSupportDesk', () => {
+  it('opens the server selected refund form and checks eligibility without submitting', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    mocks.chat.mockResolvedValueOnce({ ...textReply, type: 'AFTER_SALE_FORM', orders: [order] })
+    await desk.sendMessage('将该订单退款')
+    expect(desk.refundOpen.value).toBe(true)
+    expect(desk.refundOrder.value).toEqual(order)
+    expect(desk.refundEligibility.value).toEqual(eligible)
+    expect(mocks.afterSaleEligibility).toHaveBeenCalledWith(
+      '100',
+      order.orderNo,
+      expect.any(AbortSignal),
+    )
+    expect(mocks.applyAfterSale).not.toHaveBeenCalled()
+    desk.refundReason.value = '商品破损'
+    desk.closeRefundForm()
+    expect(desk.refundReason.value).toBe('')
+    expect(mocks.applyAfterSale).not.toHaveBeenCalled()
+  })
+
+  it('requires a new order choice when the server reports an ambiguous refund target', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    desk.selectedOrder.value = order
+    mocks.chat.mockResolvedValueOnce({ ...textReply, type: 'AFTER_SALE_FORM', orders: [] })
+    await desk.sendMessage('申请退款')
+    expect(desk.refundOrder.value).toBeNull()
+    expect(mocks.afterSaleEligibility).not.toHaveBeenCalled()
+    expect(mocks.applyAfterSale).not.toHaveBeenCalled()
+  })
+
+  it.each(['close', 'shop switch', 'logout'] as const)(
+    'ignores a late eligibility result after %s',
+    async (transition) => {
+      const desk = createDesk()
+      await desk.connect('buyer', 'test')
+      const pending = deferred<AfterSaleEligibility>()
+      mocks.afterSaleEligibility.mockReturnValueOnce(pending.promise)
+      const opening = desk.openRefundForm(order)
+      const signal = mocks.afterSaleEligibility.mock.calls[0]?.[2] as AbortSignal
+      if (transition === 'close') desk.closeRefundForm()
+      else if (transition === 'shop switch') await desk.changeShop('101')
+      else desk.disconnect()
+      pending.resolve(eligible)
+      await opening
+      expect(signal.aborted).toBe(true)
+      expect(desk.refundOpen.value).toBe(false)
+      expect(desk.refundEligibility.value).toBeNull()
+      expect(mocks.applyAfterSale).not.toHaveBeenCalled()
+    },
+  )
+
+  it('does not attach an old eligibility response to a newly chosen order', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const pending = deferred<AfterSaleEligibility>()
+    mocks.afterSaleEligibility.mockReturnValueOnce(pending.promise)
+    const first = desk.openRefundForm(order)
+    const other = { ...order, orderNo: 'SF10002' }
+    const otherEligibility = {
+      ...eligible,
+      orderNo: other.orderNo,
+      status: 'EXPIRED' as const,
+      canSubmit: false,
+    }
+    mocks.afterSaleEligibility.mockResolvedValueOnce(otherEligibility)
+    await desk.chooseRefundOrder(other)
+    pending.resolve(eligible)
+    await first
+    expect(desk.refundOrder.value).toEqual(other)
+    expect(desk.refundEligibility.value).toEqual(otherEligibility)
+  })
+
+  it.each(['EXPIRED', 'INELIGIBLE'] as const)(
+    'prevents a %s refund despite a filled reason',
+    async (status) => {
+      const desk = createDesk()
+      await desk.connect('buyer', 'test')
+      mocks.afterSaleEligibility.mockResolvedValueOnce({ ...eligible, status, canSubmit: false })
+      await desk.openRefundForm(order)
+      desk.refundReason.value = '商品破损'
+      await desk.submitRefund()
+      expect(mocks.applyAfterSale).not.toHaveBeenCalled()
+    },
+  )
+
+  it('submits a manually reviewable request only on confirmation, trims reason and prevents double clicks', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const manual: AfterSaleEligibility = {
+      ...eligible,
+      status: 'REQUIRES_REVIEW',
+      receivedAt: null,
+      deadlineAt: null,
+    }
+    mocks.afterSaleEligibility.mockResolvedValueOnce(manual)
+    await desk.openRefundForm(order)
+    desk.refundReason.value = '   '
+    await desk.submitRefund()
+    expect(mocks.applyAfterSale).not.toHaveBeenCalled()
+    desk.refundReason.value = '  商品破损  '
+    const pending = deferred<AfterSaleTicket>()
+    mocks.applyAfterSale.mockReturnValueOnce(pending.promise)
+    const submitting = desk.submitRefund()
+    await desk.submitRefund()
+    desk.clearConversation()
+    expect(desk.refundSubmitting.value).toBe(true)
+    expect(mocks.applyAfterSale).toHaveBeenCalledTimes(1)
+    expect(mocks.applyAfterSale).toHaveBeenCalledWith(
+      '100',
+      order.orderNo,
+      '商品破损',
+      expect.any(AbortSignal),
+    )
+    pending.resolve({ ...ticket, eligibility: manual })
+    await submitting
+    expect(desk.refundOpen.value).toBe(false)
+    expect(desk.ownedAfterSales.value).toHaveLength(1)
+    expect(desk.messages.value.at(-1)?.text).toContain('核实收货时间和售后期限')
+  })
+
+  it('preserves the reason and reports a server deadline conflict without replaying', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    await desk.openRefundForm(order)
+    desk.refundReason.value = '商品破损'
+    mocks.applyAfterSale.mockRejectedValueOnce(
+      new ApiError('已超过售后申请期限', 409, 'BUSINESS_RULE_VIOLATION'),
+    )
+    await desk.submitRefund()
+    expect(desk.refundError.value).toBe('已超过售后申请期限')
+    expect(desk.refundReason.value).toBe('商品破损')
+    expect(desk.refundOpen.value).toBe(true)
+    expect(mocks.applyAfterSale).toHaveBeenCalledTimes(1)
+    expect(desk.ownedAfterSales.value).toEqual([])
+  })
+
+  it('discards a late refund submission response after changing shop', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    await desk.openRefundForm(order)
+    desk.refundReason.value = '商品破损'
+    const pending = deferred<AfterSaleTicket>()
+    mocks.applyAfterSale.mockReturnValueOnce(pending.promise)
+    const submitting = desk.submitRefund()
+    await desk.changeShop('101')
+    pending.resolve({ ...ticket, eligibility: eligible })
+    await submitting
+    expect(desk.ownedAfterSales.value).toEqual([])
+    expect(desk.messages.value).toEqual([])
+    expect(desk.refundOpen.value).toBe(false)
+  })
+
   it('loads buyer progress from the current shop without requiring review access', async () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')

@@ -34,7 +34,8 @@ public class JdbcSupportOrderRepository implements SupportOrderRepository {
                    total_amount,
                    currency,
                    created_at,
-                   updated_at
+                   updated_at,
+                   received_at
             FROM support_order
             WHERE tenant_id = :tenantId
               AND buyer_id = :buyerId
@@ -43,7 +44,7 @@ public class JdbcSupportOrderRepository implements SupportOrderRepository {
 
     private static final String FIND_BY_BUYER_ID_SQL = """
             SELECT id, tenant_id, customer_id, buyer_id, order_no, status,
-                   total_amount, currency, created_at, updated_at
+                   total_amount, currency, created_at, updated_at, received_at
             FROM support_order
             WHERE buyer_id = :buyerId
               AND id > :afterId
@@ -53,7 +54,7 @@ public class JdbcSupportOrderRepository implements SupportOrderRepository {
 
     private static final String FIND_BY_SHOP_AND_BUYER_ID_SQL = """
             SELECT id, tenant_id, customer_id, buyer_id, order_no, status,
-                   total_amount, currency, created_at, updated_at
+                   total_amount, currency, created_at, updated_at, received_at
             FROM support_order
             WHERE buyer_id = :buyerId
               AND tenant_id = :shopId
@@ -131,11 +132,17 @@ public class JdbcSupportOrderRepository implements SupportOrderRepository {
                     resultSet.getBigDecimal("total_amount"),
                     resultSet.getString("currency"),
                     resultSet.getObject("created_at", LocalDateTime.class).toInstant(ZoneOffset.UTC),
-                    resultSet.getObject("updated_at", LocalDateTime.class).toInstant(ZoneOffset.UTC)
+                    resultSet.getObject("updated_at", LocalDateTime.class).toInstant(ZoneOffset.UTC),
+                    nullableInstant(resultSet, "received_at")
             );
         } catch (IllegalArgumentException | NullPointerException exception) {
             throw new DataRetrievalFailureException(
                     "Invalid persisted support order data", exception);
         }
+    }
+
+    private static java.time.Instant nullableInstant(ResultSet row, String column) throws SQLException {
+        LocalDateTime value = row.getObject(column, LocalDateTime.class);
+        return value == null ? null : value.toInstant(ZoneOffset.UTC);
     }
 }

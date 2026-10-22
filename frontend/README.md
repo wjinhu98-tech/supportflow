@@ -6,7 +6,7 @@ Vue 3 + TypeScript + Vite 的店铺客服工作台，支持订单咨询、知识
 
 环境：Node.js 22.12+（本次使用 24.15）、npm。**首次启用本轮售后功能，先看[迁移、最小写权限与审核账号](../docs/assistant-architecture.md#首次在你的本地业务库启用前)**。旧应用账号只有 SELECT，不能直接完成售后写入；本轮没有替你修改日常业务库或真实账号。
 
-用 IDEA 启动根项目 `SupportFlowApplication`，保持已有 `local` profile 与数据源/迁移账号配置。后端端口默认为 8080；启动时按原有 Flyway 配置执行尚未应用的迁移（模拟退款新增 V5）。启用执行任务前，需要按架构说明补齐应用账号对执行记录和模拟渠道记录的最小权限。
+用 IDEA 启动根项目 `SupportFlowApplication`，保持已有 `local` profile 与数据源/迁移账号配置。后端端口默认为 8080；启动时按原有 Flyway 配置执行尚未应用的迁移（模拟退款使用 V5，收货时间与售后期限核验记录使用 V6）。启用执行任务前，需要按架构说明补齐应用账号对执行记录和模拟渠道记录的最小权限。
 
 在 PowerShell 中另开终端：
 
@@ -34,7 +34,9 @@ API_PROXY_TARGET=http://127.0.0.1:8080
 - 选择订单并咨询；后续消息携带所选 `orderNo`，切店或取消选择后移除。
 - 自然语言提问、明确查单指令、回复中的可选订单卡片、订单详情。
 - 「服务规则」返回版本化文档及来源；「查物流」返回本项目实际录入的物流事件，无事件不会编造轨迹。
-- 「申请售后」只预填消息，补原因发送后创建待审核申请；「我的售后」读取持久化结果。
+- 「申请退款」或发送「将该订单退款」会打开退款表单。选择本人订单后，后台核验售后期限；原因分为「个人原因」「商铺原因」及「其他」，前两类选择具体原因，其他需填写说明。点击确认后才创建待审核申请，打开、选择、填写、取消均不会提交。
+- 售后申请期限为确认收货后 15 天；缺少或异常收货时间转客服人工核实。过期订单禁止新提交，浏览器不计算或伪造收货时间；后端提交时再次核验。已在期限内提交的申请不会因为等待审核而失效。
+- 「我的售后」读取持久化结果；旧指令「申请售后 <原因>」仍可使用，并经过相同的后台校验。
 - 独立客服/管理员在「人工审核」中批准或拒绝，强制备注、权限校验、禁止自审和重复审批。
 - 买家点击顶部「售后进度」，读取本人当前店铺的申请、审批意见、模拟处理金额、进度及凭证；点击「刷新进度」读取最新结果。
 - 管理员在「人工审核 → 处理进度」中查看最近 50 条审批记录及执行结果；仅对后端标记可重试的失败任务提供「重试模拟退款」，点击后显式提交一次。
@@ -50,10 +52,11 @@ API_PROXY_TARGET=http://127.0.0.1:8080
 2. 浏览器保存后端的 HttpOnly 会话 Cookie；API 层只在内存中保存 Basic 凭证。当前后端认证可能轮换 CSRF token，因此每次 POST 前重新获取，不长期缓存。
 3. 加载订单通过 `POST /api/v1/shops/{shopId}/chat/messages` 发送 `{"message":"我的订单"}`，继续翻页发送 `我的订单 <原样游标>`。
 4. 咨询通过同一路径发送 `{"message":"咨询此订单","orderNo":"SF10001"}`，同时发送认证头、CSRF 请求头及同源 Cookie。
-5. 页面按响应的 `TEXT / ORDER_DETAILS / ORDER_SELECTION` 展示文本或订单卡片。买家身份和订单归属始终由后端验证，前端不传 `buyerId/customerId`。
+5. 页面按响应的 `TEXT / ORDER_DETAILS / ORDER_SELECTION / AFTER_SALE_FORM` 展示文本、订单卡片或退款原因表单。表单指令最多携带一笔已验证归属的订单；空列表时必须先选订单。买家身份和订单归属始终由后端验证，前端不传 `buyerId/customerId`。
 6. 审核页 GET `/api/v1/reviews/after-sales` 读取最多50条待审，POST `/api/v1/reviews/after-sales/{uuid}/decision` 提交人工决定，同样保留 Basic、Cookie 与新 CSRF；不会自动重试决定。
 7. 买家进度读取 GET `/api/v1/shops/{shopId}/after-sales`；管理员进度读取 GET `/api/v1/reviews/after-sales/history`。金额来自后端公开 DTO，前端不能修改退款金额。
 8. 管理员手动重试使用 POST `/api/v1/reviews/after-sales/{uuid}/execution/retry`，不提交金额，保留权限与 CSRF 校验，并与聊天、审核读写共用请求队列。浏览器不会自动重放该请求。
+9. 退款表单通过 GET `/api/v1/shops/{shopId}/orders/{orderNo}/after-sale-eligibility` 读取期限核验，确认时 POST 同一订单的 `/after-sales`，请求体仅包含 `reason`。同样使用新 CSRF；确认前不会创建申请，失败也不会自动重放。切店、关闭或断开后，旧检查结果不会覆盖新表单。
 
 所有请求使用同源 `/api`，开发代理保留 Cookie、认证与 CSRF，不关闭安全过滤器，不添加通配 CORS。API 层串行执行「获取新 Token → POST」请求对，避免订单列表和聊天并发造成会话轮换竞态。403 可能是权限不足，也可能是 CSRF 失效；前端不会盲目自动重放 POST。401 会清空账号、订单、选中项和聊天显示。
 
@@ -93,7 +96,7 @@ npm.cmd run test:e2e   # 真实浏览器 + 独立 HTTP mock，仅公开假数据
 
 浏览器测试默认使用本机 Microsoft Edge，不读取你的浏览器资料或登录态。其他环境可设置 `$env:PLAYWRIGHT_CHANNEL='chromium'` 并先安装 Playwright Chromium。测试会独占 5173 和 mock 18080；请先停止手动启动的 Vite。mock 只由测试命令启动，不是正常开发模式的后备数据。
 
-真实 Java 后端浏览器验证使用 `src/test/java/dev/supportflow/frontend/FrontendTestServer.java`：它只加载测试配置，在一次性 Testcontainers MySQL 中执行 V1–V5 并创建公开假买家/审核账号；强制关闭 DeepSeek。普通应用运行不会加载这个类。测试覆盖买家申请、权限拦截、独立管理员批准/拒绝、管理员和买家查看同一模拟执行凭证，以及知识与跨店物流隔离。
+真实 Java 后端浏览器验证使用 `src/test/java/dev/supportflow/frontend/FrontendTestServer.java`：它只加载测试配置，在一次性 Testcontainers MySQL 中执行 V1–V6 并创建公开假买家/审核账号；强制关闭 DeepSeek。普通应用运行不会加载这个类。测试覆盖退款原因表单（期限内、过期、缺少收货时间、确认前不创建）、权限拦截、独立管理员批准/拒绝、管理员和买家查看同一模拟执行凭证，以及知识与跨店物流隔离。`SF10002` 为期限内订单，`PAGE-001` 为过期订单，`SF10001` 缺少收货时间；这些测试日期只写入临时测试容器。
 
 从仓库根目录先执行 `mvn -o verify`（首次依赖未缓存可去掉 `-o`），生成测试类和报告。然后在同一根目录打开单独的 PowerShell 终端：
 

@@ -19,8 +19,17 @@ public record SupportOrder(
         BigDecimal totalAmount,
         String currency,
         Instant createdAt,
-        Instant updatedAt
+        Instant updatedAt,
+        Instant receivedAt
 ) {
+
+    /** Historical fixtures and orders without a trusted receipt event keep this value unknown. */
+    public SupportOrder(long id, long tenantId, long customerId, long buyerId, String orderNo,
+                        OrderStatus status, BigDecimal totalAmount, String currency,
+                        Instant createdAt, Instant updatedAt) {
+        this(id, tenantId, customerId, buyerId, orderNo, status, totalAmount, currency,
+                createdAt, updatedAt, null);
+    }
 
     public SupportOrder {
         if (buyerId <= 0) {

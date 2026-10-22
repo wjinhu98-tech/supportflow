@@ -25,11 +25,23 @@ import {
 import OrderCard from './components/OrderCard.vue'
 import ReviewPanel from './components/ReviewPanel.vue'
 import AfterSalesPanel from './components/AfterSalesPanel.vue'
+import RefundDialog from './components/RefundDialog.vue'
 import { formatAmount, formatDate, formatTime } from './components/format'
 import { useSupportDesk } from './composables/useSupportDesk'
 import type { Order } from './types'
 
 const {
+  refundOpen,
+  refundOrder,
+  refundReason,
+  refundEligibility,
+  refundLoading,
+  refundSubmitting,
+  refundError,
+  openRefundForm,
+  closeRefundForm,
+  chooseRefundOrder,
+  submitRefund,
   reviewTickets,
   reviewHistoryTickets,
   reviewView,
@@ -198,11 +210,6 @@ function focusConversation() {
 
 function prefillShippingQuestion() {
   messageDraft.value = '我的订单发货了吗？'
-  messageInput.value?.focus()
-}
-
-function prefillAfterSale() {
-  messageDraft.value = '申请售后 '
   messageInput.value?.focus()
 }
 
@@ -866,9 +873,9 @@ watch(
                 v-if="selectedOrder"
                 type="button"
                 :disabled="!connected || busy"
-                @click="prefillAfterSale"
+                @click="openRefundForm()"
               >
-                申请售后
+                申请退款
               </button>
               <span>试试这样问</span>
               <button
@@ -1340,6 +1347,22 @@ watch(
       </div>
     </dialog>
   </div>
+  <RefundDialog
+    v-if="refundOpen && connected"
+    v-model:reason="refundReason"
+    :orders="orders"
+    :order="refundOrder"
+    :eligibility="refundEligibility"
+    :loading="refundLoading"
+    :submitting="refundSubmitting"
+    :error="refundError"
+    :more="nextAfterId !== null"
+    :orders-loading="ordersBusy"
+    @close="closeRefundForm"
+    @choose="chooseRefundOrder"
+    @submit="submitRefund"
+    @more="loadOrders(true)"
+  />
   <ReviewPanel
     v-if="showReviews && connected"
     :tickets="reviewTickets"

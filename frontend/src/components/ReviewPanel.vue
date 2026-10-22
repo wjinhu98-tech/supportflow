@@ -270,6 +270,19 @@ onBeforeUnmount(() => {
             >
               <h3 :id="`review-reason-${ticket.id}`">申请原因</h3>
               <p>{{ ticket.reason }}</p>
+              <p>
+                {{
+                  ticket.eligibility?.status === 'ELIGIBLE'
+                    ? '提交申请时在售后期限内；请按申请时的核验记录审核。'
+                    : '收货时间与售后期限需人工核实，请在审核意见中记录核实结果。'
+                }}
+              </p>
+              <p v-if="ticket.eligibility?.checkedAt">
+                申请时核验时间：{{ formatDate(ticket.eligibility.checkedAt, true) }}
+              </p>
+              <p v-if="ticket.eligibility?.status === 'ELIGIBLE' && ticket.eligibility.deadlineAt">
+                申请截止：{{ formatDate(ticket.eligibility.deadlineAt, true) }}
+              </p>
             </section>
 
             <form

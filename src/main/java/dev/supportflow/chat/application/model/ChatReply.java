@@ -21,6 +21,7 @@ public record ChatReply(
         }
         if (type == ChatReplyType.TEXT && (!orders.isEmpty() || nextAfterId != null)
                 || type == ChatReplyType.ORDER_DETAILS && (orders.size() != 1 || nextAfterId != null)
+                || type == ChatReplyType.AFTER_SALE_FORM && (orders.size() > 1 || nextAfterId != null)
                 || orders.isEmpty() && nextAfterId != null) {
             throw new IllegalArgumentException("Invalid chat result");
         }
@@ -36,5 +37,9 @@ public record ChatReply(
 
     public static ChatReply selection(String reply, List<SupportOrder> orders, Long nextAfterId) {
         return new ChatReply(reply, ChatReplyType.ORDER_SELECTION, orders, nextAfterId);
+    }
+
+    public static ChatReply refundForm(String reply, SupportOrder order) {
+        return new ChatReply(reply, ChatReplyType.AFTER_SALE_FORM, order == null ? List.of() : List.of(order), null);
     }
 }

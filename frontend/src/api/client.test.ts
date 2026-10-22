@@ -24,6 +24,7 @@ const ticket = {
   createdAt: '2026-10-01T00:00:00Z',
   updatedAt: '2026-10-01T00:00:00Z',
   execution: null,
+  eligibility: null,
 }
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), {
@@ -44,8 +45,157 @@ const execution = {
   retryable: true,
 }
 const executionTicket = { ...ticket, status: 'APPROVED', execution }
+const eligibility = {
+  shopId: 100,
+  orderNo: 'SF10001',
+  status: 'ELIGIBLE',
+  canSubmit: true,
+  message: '订单在售后期限内，请填写退款原因。',
+  receivedAt: '2026-10-20T00:00:00Z',
+  deadlineAt: '2026-11-04T00:00:00Z',
+  checkedAt: '2026-10-21T00:00:00Z',
+  windowDays: 15,
+}
 
 describe('ApiClient', () => {
+  it('reads eligibility without submitting anything', async () => {
+    const request = fetchMock().mockResolvedValue(json(eligibility))
+    await expect(
+      new ApiClient('buyer', 'test', request).afterSaleEligibility('100', 'SF10001'),
+    ).resolves.toEqual(eligibility)
+    expect(request).toHaveBeenCalledOnce()
+    expect(request).toHaveBeenCalledWith(
+      '/api/v1/shops/100/orders/SF10001/after-sale-eligibility',
+      expect.objectContaining({ method: 'GET' }),
+    )
+  })
+
+  it.each([
+    { ...eligibility, shopId: 101 },
+    { ...eligibility, orderNo: 'SF20001' },
+    { ...eligibility, status: 'EXPIRED', canSubmit: true },
+    { ...eligibility, receivedAt: null },
+    { ...eligibility, checkedAt: 'unknown' },
+  ])('rejects malformed or wrong-target eligibility: %s', async (value) => {
+    const request = fetchMock().mockResolvedValue(json(value))
+    await expect(
+      new ApiClient('buyer', 'test', request).afterSaleEligibility('100', 'SF10001'),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+  })
+
+  it.each([
+    { ...eligibility, status: 'REQUIRES_REVIEW', receivedAt: null, deadlineAt: null },
+    {
+      ...eligibility,
+      status: 'REQUIRES_REVIEW',
+      receivedAt: '2026-10-22T00:00:00Z',
+      deadlineAt: '2026-11-06T00:00:00Z',
+    },
+  ])('accepts missing or abnormal receipt timestamps for manual review: %s', async (value) => {
+    const request = fetchMock().mockResolvedValue(json(value))
+    await expect(
+      new ApiClient('buyer', 'test', request).afterSaleEligibility('100', 'SF10001'),
+    ).resolves.toEqual(value)
+  })
+
+  it('sends only the confirmed reason with fresh CSRF for every refund attempt', async () => {
+    const result = { ...ticket, eligibility }
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json(result))
+      .mockResolvedValueOnce(json({ ...csrf, token: 'new-token' }))
+      .mockResolvedValueOnce(json(result))
+    const api = new ApiClient('buyer', 'test', request)
+    await expect(api.applyAfterSale('100', 'SF10001', '  商品破损  ')).resolves.toEqual(result)
+    await api.applyAfterSale('100', 'SF10001', '商品破损')
+    expect(request.mock.calls.map((call) => call[0])).toEqual([
+      '/api/v1/security/csrf',
+      '/api/v1/shops/100/orders/SF10001/after-sales',
+      '/api/v1/security/csrf',
+      '/api/v1/shops/100/orders/SF10001/after-sales',
+    ])
+    expect(JSON.parse(String(request.mock.calls[1]?.[1]?.body))).toEqual({ reason: '商品破损' })
+    expect(request.mock.calls[3]?.[1]?.headers).toMatchObject({ 'X-CSRF-TOKEN': 'new-token' })
+  })
+
+  it.each(['', '   ', '长'.repeat(501)])(
+    'rejects invalid refund reason before network access: %s',
+    async (reason) => {
+      const request = fetchMock()
+      await expect(
+        new ApiClient('buyer', 'test', request).applyAfterSale('100', 'SF10001', reason),
+      ).rejects.toBeInstanceOf(ApiError)
+      expect(request).not.toHaveBeenCalled()
+    },
+  )
+
+  it('shows a safe deadline explanation without replaying the refund POST', async () => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(
+        json({ code: 'BUSINESS_RULE_VIOLATION', message: '已超过确认收货后15天的售后期限。' }, 409),
+      )
+    await expect(
+      new ApiClient('buyer', 'test', request).applyAfterSale('100', 'SF10001', '商品破损'),
+    ).rejects.toMatchObject({ status: 409, message: '已超过确认收货后15天的售后期限。' })
+    expect(request).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects a mismatched refund submission result', async () => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json({ ...ticket, orderNo: 'SF20001' }))
+    await expect(
+      new ApiClient('buyer', 'test', request).applyAfterSale('100', 'SF10001', '商品破损'),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+  })
+
+  it('does not submit a refund cancelled while queued', async () => {
+    let finish!: (value: Response) => void
+    const request = fetchMock().mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve
+      }),
+    )
+    const api = new ApiClient('buyer', 'test', request)
+    const read = api.afterSaleEligibility('100', 'SF10001')
+    const controller = new AbortController()
+    const refund = api.applyAfterSale('100', 'SF10001', '商品破损', controller.signal)
+    controller.abort()
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1))
+    finish(json(eligibility))
+    await read
+    await expect(refund).rejects.toMatchObject({ name: 'AbortError' })
+    expect(request).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([{ orders: [] }, { orders: [order] }])(
+    'accepts a refund form with zero or one owned order',
+    async ({ orders }) => {
+      const response = {
+        reply: '请填写退款原因',
+        type: 'AFTER_SALE_FORM',
+        orders,
+        nextAfterId: null,
+      }
+      const request = fetchMock()
+        .mockResolvedValueOnce(json(csrf))
+        .mockResolvedValueOnce(json(response))
+      await expect(
+        new ApiClient('buyer', 'test', request).chat('100', '申请退款'),
+      ).resolves.toEqual(response)
+    },
+  )
+
+  it('rejects an ambiguous multi-order refund form', async () => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json({ ...reply, type: 'AFTER_SALE_FORM', orders: [order, order] }))
+    await expect(
+      new ApiClient('buyer', 'test', request).chat('100', '申请退款'),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+  })
+
   it('invokes the transport without binding it to the client instance', async () => {
     let receiver: unknown = 'not-called'
     const request: typeof fetch = async function (this: unknown) {

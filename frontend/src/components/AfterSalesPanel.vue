@@ -124,6 +124,20 @@ onBeforeUnmount(() => {
                 <dt>申请原因</dt>
                 <dd>{{ ticket.reason }}</dd>
               </div>
+              <div>
+                <dt>期限核实</dt>
+                <dd>
+                  {{
+                    ticket.eligibility?.status === 'ELIGIBLE'
+                      ? '提交申请时在售后期限内'
+                      : '收货时间与售后期限需由客服人工核实'
+                  }}
+                </dd>
+              </div>
+              <div v-if="ticket.eligibility?.checkedAt">
+                <dt>申请时核验时间</dt>
+                <dd>{{ formatDate(ticket.eligibility.checkedAt, true) }}</dd>
+              </div>
               <div v-if="ticket.reviewNote">
                 <dt>审核意见</dt>
                 <dd>{{ ticket.reviewNote }}</dd>

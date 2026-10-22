@@ -17,19 +17,30 @@ class KnowledgeServiceTest {
         assertThat(documents).hasSize(5);
         assertThat(documents).extracting(KnowledgeDocument::sourceId).doesNotHaveDuplicates();
         assertThat(documents).allSatisfy(document -> {
-            assertThat(document.version()).isEqualTo(
-                    List.of("project-scope", "after-sale-review").contains(document.sourceId())
-                            ? "2026-10-21-v2" : "2026-10-20-v1");
+            assertThat(document.version()).isEqualTo(switch (document.sourceId()) {
+                case "project-scope" -> "2026-10-21-v2";
+                case "after-sale-review" -> "2026-10-21-v3";
+                default -> "2026-10-20-v1";
+            });
             assertThat(document.title()).doesNotContain("\uFFFD");
-            assertThat(document.content()).contains("本项目");
+            assertThat(document.content()).isNotBlank();
         });
     }
 
     @Test
     void shouldCiteSourceAndVersionForAfterSaleReview() {
         String answer = service.answer("退款申请需要谁审批？");
-        assertThat(answer).contains("after-sale-review@2026-10-21-v2", "AFTER_SALE_REVIEW",
-                "PENDING_REVIEW", "APPROVED", "REJECTED", "禁止申请人本人审批", "不执行真实退款");
+        assertThat(answer).contains("after-sale-review@2026-10-21-v3", "客服", "人工", "不执行真实退款")
+                .doesNotContain("Java", "SQL", "request_key", "PENDING_REVIEW", "AFTER_SALE_REVIEW");
+    }
+
+    @Test
+    void shouldExplainReceiptWindowWithoutInventingMissingTimesOrRefundArrivalPromises() {
+        String answer = service.answer("确认收货后的售后申请期限是多少天？");
+        assertThat(answer).contains("15天", "截止", "不承诺退款到账或期限")
+                .doesNotContain("Java", "SQL", "保证到账");
+        assertThat(service.answer("售后缺少确认收货时间怎么办？"))
+                .contains("不会猜测收货日期", "客服人工核实");
     }
 
     @Test
