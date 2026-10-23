@@ -112,6 +112,14 @@ const server = http.createServer(async (request, response) => {
   if (!authenticated)
     return failure(response, 401, 'UNAUTHENTICATED', '账号或密码不正确，请重新连接。')
 
+  if (url.pathname === '/api/v1/security/me' && request.method === 'GET') {
+    record.accepted = true
+    return respond(response, 200, {
+      username: request.headers.authorization === slowAuthorization ? 'slow-buyer' : MOCK_USERNAME,
+      accountType: 'BUYER',
+    })
+  }
+
   if (url.pathname === '/api/v1/security/csrf' && request.method === 'GET') {
     if (request.headers.authorization === slowAuthorization) {
       await new Promise((resolve) => setTimeout(resolve, 1500))

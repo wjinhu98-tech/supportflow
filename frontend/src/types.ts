@@ -111,3 +111,16 @@ export interface AfterSaleExecution {
   lastError: string | null
   retryable: boolean
 }
+
+/** Server-authenticated account type; never inferred from names or UI routes. */
+export interface CurrentAccount {
+  username: string
+  accountType: 'BUYER' | 'MERCHANT_STAFF'
+}
+
+export interface MerchantShop {
+  id: number
+  name: string
+  merchantId: number
+  merchantName: string
+}

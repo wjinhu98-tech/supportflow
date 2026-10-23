@@ -14,7 +14,6 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
-import java.util.UUID;
 
 @RestController
 public class AfterSaleController {
@@ -44,26 +43,6 @@ public class AfterSaleController {
             @AuthenticationPrincipal(errorOnInvalidType = true) CustomerPrincipal principal,
             @PathVariable @Positive long shopId) {
         return service.listOwned(principal.getIdentity(), shopId);
-    }
-
-    @GetMapping("/api/v1/reviews/after-sales")
-    public List<AfterSaleTicket> pending() { return service.pending(); }
-
-    @GetMapping("/api/v1/reviews/after-sales/history")
-    public List<AfterSaleTicket> history() { return service.reviewedHistory(); }
-
-    @PostMapping("/api/v1/reviews/after-sales/{id}/execution/retry")
-    public AfterSaleTicket retryExecution(
-            @AuthenticationPrincipal(errorOnInvalidType = true) CustomerPrincipal principal,
-            @PathVariable UUID id) {
-        return service.retryExecution(principal, id);
-    }
-
-    @PostMapping("/api/v1/reviews/after-sales/{id}/decision")
-    public AfterSaleTicket decide(
-            @AuthenticationPrincipal(errorOnInvalidType = true) CustomerPrincipal principal,
-            @PathVariable UUID id, @Valid @RequestBody DecisionRequest request) {
-        return service.decide(principal, id, request.decision(), request.note());
     }
 
     public record SubmissionRequest(@NotBlank @Size(max = 500) String reason) { }

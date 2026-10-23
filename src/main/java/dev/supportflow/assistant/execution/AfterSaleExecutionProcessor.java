@@ -3,7 +3,7 @@ package dev.supportflow.assistant.execution;
 import dev.supportflow.assistant.aftersale.AssistantBusinessException;
 import dev.supportflow.common.api.error.ErrorCode;
 import dev.supportflow.common.security.model.CustomerPrincipal;
-import dev.supportflow.common.security.model.SecurityPermission;
+import dev.supportflow.merchant.MerchantAccessService;
 import dev.supportflow.order.domain.model.SupportOrder;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.AccessDeniedException;
@@ -23,10 +23,13 @@ public class AfterSaleExecutionProcessor {
     private static final int LEASE_SECONDS = 30;
     private final AfterSaleExecutionRepository repository;
     private final RefundGateway refunds;
+    private final MerchantAccessService merchantAccess;
 
-    public AfterSaleExecutionProcessor(AfterSaleExecutionRepository repository, RefundGateway refunds) {
+    public AfterSaleExecutionProcessor(AfterSaleExecutionRepository repository, RefundGateway refunds,
+                                       MerchantAccessService merchantAccess) {
         this.repository = repository;
         this.refunds = refunds;
+        this.merchantAccess = merchantAccess;
     }
 
     @Transactional(propagation = Propagation.MANDATORY)
@@ -94,14 +97,17 @@ public class AfterSaleExecutionProcessor {
 
     @Transactional
     public void retry(CustomerPrincipal principal, UUID requestId) {
-        boolean permitted = principal.getAuthorities().stream().anyMatch(authority ->
-                SecurityPermission.AFTER_SALE_REVIEW.getAuthority().equals(authority.getAuthority()));
-        if (!permitted) throw new AccessDeniedException("Execution retry requires review permission");
+        throw new AccessDeniedException("Explicit merchant shop authorization is required");
+    }
+
+    @Transactional
+    public void retry(CustomerPrincipal principal, long shopId, UUID requestId) {
+        var access = merchantAccess.lockShop(principal, shopId);
         // Check requester before locking the task to keep the worker's task -> case lock order.
-        if (repository.isRequester(requestId.toString(), principal.getIdentity().buyerId())) {
+        if (repository.isRequester(requestId.toString(), principal.getIdentity().buyerId(), shopId)) {
             throw new AccessDeniedException("Requester cannot retry their own case");
         }
-        StoredExecution task = repository.lock(requestId.toString()).orElseThrow(() ->
+        StoredExecution task = repository.lock(requestId.toString(), shopId).orElseThrow(() ->
                 new AssistantBusinessException(ErrorCode.REVIEW_NOT_FOUND, HttpStatus.NOT_FOUND, "未找到该售后处理任务"));
         if (task.status() != ExecutionStatus.FAILED || task.attemptCount() >= task.maxAttempts()
                 || !ExecutionFailureCode.TRANSIENT_FAILURE.name().equals(task.lastErrorCode())) {
@@ -112,7 +118,8 @@ public class AfterSaleExecutionProcessor {
             throw new AssistantBusinessException(ErrorCode.REVIEW_CONFLICT, HttpStatus.CONFLICT, "只有已批准的申请可以重试");
         }
         repository.retry(task, repository.now());
-        repository.audit(task.requestId(), principal.getUsername(), "EXECUTION_RETRY", "管理员请求提前重试，保留累计尝试次数");
+        repository.audit(task.requestId(), principal.getUsername(), "EXECUTION_RETRY",
+                "店铺客服请求提前重试，保留累计尝试次数", access.staffId());
     }
 
     private static boolean owns(StoredExecution task, ExecutionClaim claim, LocalDateTime now) {

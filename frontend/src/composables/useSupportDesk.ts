@@ -35,12 +35,6 @@ export function useSupportDesk() {
     validShopId(initialShop) ? null : '链接中的店铺 ID 无效，已回到店铺 100。',
   )
   const loginError = ref<string | null>(null)
-  const reviewTickets = ref<AfterSaleTicket[]>([])
-  const reviewHistoryTickets = ref<AfterSaleTicket[]>([])
-  const reviewView = ref<'pending' | 'history'>('pending')
-  const reviewLoading = ref(false)
-  const reviewSubmitting = ref(false)
-  const reviewError = ref<string | null>(null)
   const ownedAfterSales = ref<AfterSaleTicket[]>([])
   const afterSalesLoading = ref(false)
   const afterSalesError = ref<string | null>(null)
@@ -93,12 +87,6 @@ export function useSupportDesk() {
     selectedOrder.value = null
     messages.value = []
     error.value = null
-    reviewTickets.value = []
-    reviewHistoryTickets.value = []
-    reviewView.value = 'pending'
-    reviewLoading.value = false
-    reviewSubmitting.value = false
-    reviewError.value = null
     ownedAfterSales.value = []
     afterSalesLoading.value = false
     afterSalesError.value = null
@@ -132,8 +120,13 @@ export function useSupportDesk() {
       const candidate = new ApiClient(account.trim(), password)
       await candidate.authenticate(signal)
       if (signal.aborted) return false
+      const identity = await candidate.currentAccount(signal)
+      if (signal.aborted) return false
+      if (identity.accountType !== 'BUYER') {
+        throw new ApiError('这是商家员工账号，请使用商家管理端登录。', 0, 'WRONG_ACCOUNT_TYPE')
+      }
       client = candidate
-      username.value = account.trim()
+      username.value = identity.username
       connected.value = true
       connecting.value = false
       await loadOrders()
@@ -224,7 +217,7 @@ export function useSupportDesk() {
   }
 
   function businessWriteInProgress() {
-    return reviewSubmitting.value || refundSubmitting.value || receiptSubmitting.value
+    return refundSubmitting.value || receiptSubmitting.value
   }
 
   async function loadConversations(loadMore = false) {
@@ -389,15 +382,8 @@ export function useSupportDesk() {
     selectedOrder.value = null
   }
   function clearConversation() {
-    // An approval is a business write: clearing chat must not cancel its result
-    // and leave the reviewer unsure whether the server accepted the decision.
-    if (
-      connecting.value ||
-      reviewSubmitting.value ||
-      refundSubmitting.value ||
-      receiptSubmitting.value
-    )
-      return
+    // A pending refund or receipt confirmation must not lose its result.
+    if (connecting.value || refundSubmitting.value || receiptSubmitting.value) return
     resetReceiptConfirmation()
     closeRefundForm()
     detailRequest.abort()
@@ -416,8 +402,6 @@ export function useSupportDesk() {
     context = new AbortController()
     busy.value = false
     ordersBusy.value = false
-    reviewLoading.value = false
-    reviewError.value = null
     afterSalesLoading.value = false
     afterSalesError.value = null
     messages.value = []
@@ -667,83 +651,6 @@ export function useSupportDesk() {
     }
   }
 
-  async function loadReviews(view: 'pending' | 'history' = reviewView.value) {
-    if (!client || !connected.value || reviewLoading.value || reviewSubmitting.value) return
-    const signal = context.signal
-    reviewView.value = view
-    reviewLoading.value = true
-    reviewError.value = null
-    try {
-      const tickets =
-        view === 'pending'
-          ? await client.pendingReviews(signal)
-          : await client.reviewHistory(signal)
-      if (!signal.aborted) {
-        if (view === 'pending') reviewTickets.value = tickets
-        else reviewHistoryTickets.value = tickets
-      }
-    } catch (failure) {
-      if (!signal.aborted) {
-        reviewError.value = failure instanceof Error ? failure.message : '读取审核队列失败。'
-        if (failure instanceof ApiError && failure.status === 401) report(failure, signal)
-      }
-    } finally {
-      if (!signal.aborted) reviewLoading.value = false
-    }
-  }
-
-  async function submitReview(payload: {
-    id: string
-    decision: 'APPROVE' | 'REJECT'
-    note: string
-  }) {
-    if (!client || !connected.value || reviewSubmitting.value) return
-    const signal = context.signal
-    reviewSubmitting.value = true
-    reviewError.value = null
-    try {
-      const result = await client.decideReview(payload.id, payload.decision, payload.note, signal)
-      if (!signal.aborted) {
-        reviewTickets.value = reviewTickets.value.filter((ticket) => ticket.id !== payload.id)
-        reviewHistoryTickets.value = [
-          result,
-          ...reviewHistoryTickets.value.filter((ticket) => ticket.id !== result.id),
-        ].slice(0, 50)
-      }
-    } catch (failure) {
-      if (!signal.aborted) {
-        reviewError.value = failure instanceof Error ? failure.message : '提交审核失败。'
-        if (failure instanceof ApiError && failure.status === 401) report(failure, signal)
-      }
-    } finally {
-      if (!signal.aborted) reviewSubmitting.value = false
-    }
-  }
-
-  async function retryExecution(id: string) {
-    if (!client || !connected.value || reviewSubmitting.value || reviewLoading.value) return
-    const ticket = reviewHistoryTickets.value.find((item) => item.id === id)
-    if (!ticket?.execution?.retryable || ticket.execution.status !== 'FAILED') return
-    const signal = context.signal
-    reviewSubmitting.value = true
-    reviewError.value = null
-    try {
-      const result = await client.retryExecution(id, signal)
-      if (!signal.aborted)
-        reviewHistoryTickets.value = reviewHistoryTickets.value.map((item) =>
-          item.id === id ? result : item,
-        )
-    } catch (failure) {
-      if (!signal.aborted) {
-        reviewError.value =
-          failure instanceof Error ? failure.message : '提交重试失败，请刷新后核对处理进度。'
-        if (failure instanceof ApiError && failure.status === 401) report(failure, signal)
-      }
-    } finally {
-      if (!signal.aborted) reviewSubmitting.value = false
-    }
-  }
-
   async function loadOwnedAfterSales() {
     if (!client || !connected.value || afterSalesLoading.value) return
     const signal = context.signal
@@ -804,15 +711,6 @@ export function useSupportDesk() {
     closeRefundForm,
     chooseRefundOrder,
     submitRefund,
-    reviewTickets,
-    reviewHistoryTickets,
-    reviewView,
-    reviewLoading,
-    reviewSubmitting,
-    reviewError,
-    loadReviews,
-    submitReview,
-    retryExecution,
     ownedAfterSales,
     afterSalesLoading,
     afterSalesError,

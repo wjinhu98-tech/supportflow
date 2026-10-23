@@ -82,8 +82,8 @@ public final class LocalAfterSaleSetup {
             }
             // Only report non-secret account metadata; never print hashes or private YAML contents.
             for (var account : accounts().accounts()) {
-                System.out.printf("LOCAL_ACCOUNT=%s BUYER_ID=%s PERMISSIONS=%s%n",
-                        account.username(), account.identity().buyerId(), account.permissions());
+                System.out.printf("LOCAL_ACCOUNT=%s TYPE=%s BUYER_ID=%s PERMISSIONS=%s%n",
+                        account.username(), account.accountType(), account.identity().buyerId(), account.permissions());
             }
             boolean adminConfigured = (System.getenv("SUPPORTFLOW_ADMIN_PASSWORD") != null)
                     || secrets.containsKey("SUPPORTFLOW_ADMIN_PASSWORD") || secrets.containsKey("MYSQL_ROOT_PASSWORD");
@@ -191,6 +191,7 @@ public final class LocalAfterSaleSetup {
         for (var account : existing) {
             config.append("        - username: ").append(quoted(account.username())).append('\n')
                     .append("          password-hash: ").append(quoted(account.passwordHash())).append('\n')
+                    .append("          account-type: ").append(account.accountType().name()).append('\n')
                     .append("          identity:\n            buyer-id: ").append(account.identity().buyerId()).append('\n')
                     .append("          permissions:\n");
             for (var permission : account.permissions()) config.append("            - ").append(permission.name()).append('\n');
@@ -247,6 +248,7 @@ public final class LocalAfterSaleSetup {
         for (var account : existing) {
             contents.append("        - username: ").append(quoted(account.username())).append('\n')
                     .append("          password-hash: ").append(quoted(account.passwordHash())).append('\n')
+                    .append("          account-type: ").append(account.accountType().name()).append('\n')
                     .append("          identity:\n            buyer-id: ").append(account.identity().buyerId()).append('\n')
                     .append("          permissions:\n");
             for (var authority : account.permissions()) contents.append("            - ").append(authority.name()).append('\n');

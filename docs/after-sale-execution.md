@@ -37,13 +37,13 @@
 ## HTTP 与界面
 
 - 买家：`GET /api/v1/shops/{shopId}/after-sales`，仅当前买家和店铺，最近50条。
-- 管理员待审批：`GET /api/v1/reviews/after-sales`，保留原协议。
-- 管理员审批/处理记录：`GET /api/v1/reviews/after-sales/history`，最近50条。
-- 提前重试：`POST /api/v1/reviews/after-sales/{id}/execution/retry`，无须请求体；需要审核权限和 CSRF，禁止申请人本人操作。
+- 商家待审批：`GET /api/v1/merchant/shops/{shopId}/after-sales`，仅当前授权店铺。
+- 商家审批/处理记录：`GET /api/v1/merchant/shops/{shopId}/after-sales/history`，最近50条。
+- 提前重试：`POST /api/v1/merchant/shops/{shopId}/after-sales/{id}/execution/retry`，无须请求体；需要员工身份、数据库店铺授权、审核权限和CSRF，禁止申请人本人操作。旧全平台 `/api/v1/reviews/**` 已关闭。
 
 `AfterSaleTicket.execution` 为公开进度对象，包含状态、金额、币种、尝试次数、下次执行时间、完成时间、模拟凭证和安全失败说明；不暴露内部订单/买家 ID 或领取 token。
 
-前端顶部“售后进度”查看买家记录；“人工审核 → 处理进度”查看管理员记录并显式重试。失败的 POST 不会自动重放。聊天支持“我的售后”“查看售后进度”“我的售后处理到哪了”。各入口读同一份持久化结果。
+用户端顶部“售后进度”查看买家记录；独立 `/merchant` 管理端按授权店铺查看待审/处理进度并显式重试。失败的POST不会自动重放。聊天支持“我的售后”“查看售后进度”“我的售后处理到哪了”。各入口读同一份持久化结果。
 
 ## 在本机启用
 

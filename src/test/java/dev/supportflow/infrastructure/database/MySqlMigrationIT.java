@@ -74,7 +74,7 @@ class MySqlMigrationIT {
         MigrateResult firstMigration = flyway.migrate();
 
         assertThat(firstMigration.success).isTrue();
-        assertThat(firstMigration.migrationsExecuted).isEqualTo(7);
+        assertThat(firstMigration.migrationsExecuted).isEqualTo(8);
 
         MigrateResult secondMigration = flyway.migrate();
 
@@ -82,6 +82,18 @@ class MySqlMigrationIT {
         assertThat(secondMigration.migrationsExecuted).isZero();
 
         assertThat(readLegacyOrders()).containsExactlyElementsOf(legacyOrders);
+
+        try (Connection connection = DriverManager.getConnection(
+                MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword());
+             Statement statement = connection.createStatement()) {
+            for (String table : List.of("support_merchant", "support_merchant_shop",
+                    "support_merchant_staff", "support_merchant_staff_shop_grant")) {
+                try (ResultSet rows = statement.executeQuery("SELECT COUNT(*) FROM " + table)) {
+                    assertThat(rows.next()).isTrue();
+                    assertThat(rows.getLong(1)).as("Migration must not assign authorization: " + table).isZero();
+                }
+            }
+        }
 
         try (Connection connection = DriverManager.getConnection(
                 MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword());
@@ -152,7 +164,7 @@ class MySqlMigrationIT {
                     FROM flyway_schema_history
                     ORDER BY installed_rank
                     """)) {
-                for (String version : List.of("1", "2", "3", "4", "5", "6", "7", "8")) {
+                for (String version : List.of("1", "2", "3", "4", "5", "6", "7", "8", "9")) {
                     assertThat(history.next()).isTrue();
                     assertThat(history.getString("version")).isEqualTo(version);
                     assertThat(history.getBoolean("success")).isTrue();

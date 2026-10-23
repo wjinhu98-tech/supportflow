@@ -2,6 +2,7 @@ package dev.supportflow.assistant;
 
 import dev.supportflow.SupportFlowApplication;
 import dev.supportflow.order.domain.model.OrderStatus;
+import dev.supportflow.testsupport.MerchantFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -113,6 +114,9 @@ class AssistantWorkflowIT {
         registry.add(prefix + "password-hash", () -> HASH);
         registry.add(prefix + "identity.buyer-id", () -> buyerId);
         registry.add(prefix + "permissions", () -> permissions);
+        if (permissions.contains("AFTER_SALE_REVIEW")) {
+            registry.add(prefix + "account-type", () -> "MERCHANT_STAFF");
+        }
     }
 
     private static synchronized void prepareDatabase() throws SQLException {
@@ -132,6 +136,8 @@ class AssistantWorkflowIT {
             grant.execute("GRANT SELECT, INSERT ON supportflow_assistant_test.support_after_sale_audit TO 'assistant_runtime'@'%'");
             grant.execute("GRANT SELECT, INSERT, UPDATE ON supportflow_assistant_test.support_after_sale_execution TO 'assistant_runtime'@'%'");
             grant.execute("GRANT SELECT, INSERT ON supportflow_assistant_test.support_simulated_refund TO 'assistant_runtime'@'%'");
+            MerchantFixtures.grantRuntimeRead(connection, "supportflow_assistant_test", "assistant_runtime");
+            MerchantFixtures.standardReviewers(connection);
         }
         prepared = true;
     }
@@ -225,7 +231,7 @@ class AssistantWorkflowIT {
         Fixture order = order(100L, 200L, OrderStatus.PAID);
         apply(order, "商品破损");
         String id = storedTicket(order).get("id");
-        mvc.perform(get("/api/v1/reviews/after-sales").with(httpBasic("buyer", PASSWORD)))
+        mvc.perform(get("/api/v1/merchant/shops/100/after-sales").with(httpBasic("buyer", PASSWORD)))
                 .andExpect(status().isForbidden());
         decide("buyer", id, "APPROVE", true).andExpect(status().isForbidden());
         assertThat(storedTicket(order).get("status")).isEqualTo("PENDING_REVIEW");
@@ -258,7 +264,7 @@ class AssistantWorkflowIT {
         Fixture order = order(100L, 200L, OrderStatus.PAID);
         apply(order, "商品破损");
         String id = storedTicket(order).get("id");
-        JsonNode pending = body(mvc.perform(get("/api/v1/reviews/after-sales")
+        JsonNode pending = body(mvc.perform(get("/api/v1/merchant/shops/100/after-sales")
                 .with(httpBasic("reviewer", PASSWORD))).andExpect(status().isOk()).andReturn());
         assertThat(findTicket(pending, id).isMissingNode()).isFalse();
         String finalStatus = decision.equals("APPROVE") ? "APPROVED" : "REJECTED";
@@ -705,7 +711,7 @@ class AssistantWorkflowIT {
     }
 
     private ResultActions decide(String username, String id, String decision, boolean withCsrf) throws Exception {
-        var request = post("/api/v1/reviews/after-sales/{id}/decision", id)
+        var request = post("/api/v1/merchant/shops/100/after-sales/{id}/decision", id)
                 .with(httpBasic(username, PASSWORD)).contentType(MediaType.APPLICATION_JSON)
                 .content(json.writeValueAsString(Map.of("decision", decision, "note", "人工核对完成")));
         return mvc.perform(withCsrf ? request.with(csrf()) : request);

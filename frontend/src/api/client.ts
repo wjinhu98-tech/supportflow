@@ -9,6 +9,8 @@ import type {
   ConversationMessagePage,
   StoredChatMessage,
   CsrfResponse,
+  CurrentAccount,
+  MerchantShop,
   Order,
   ReceiptConfirmation,
 } from '../types'
@@ -260,6 +262,55 @@ export class ApiClient {
     await this.getCsrf(signal)
   }
 
+  async currentAccount(signal?: AbortSignal): Promise<CurrentAccount> {
+    const data = await this.queued(() =>
+      this.request('/api/v1/security/me', { method: 'GET' }, signal),
+    )
+    if (
+      !isRecord(data) ||
+      typeof data.username !== 'string' ||
+      !data.username.trim() ||
+      !['BUYER', 'MERCHANT_STAFF'].includes(String(data.accountType))
+    )
+      throw new ApiError('无法确认账号身份，请重新登录。', 0, 'INVALID_RESPONSE')
+    return { username: data.username, accountType: data.accountType } as CurrentAccount
+  }
+
+  async merchantShops(signal?: AbortSignal): Promise<MerchantShop[]> {
+    const data = await this.queued(() =>
+      this.request('/api/v1/merchant/shops', { method: 'GET' }, signal),
+    )
+    if (
+      !Array.isArray(data) ||
+      data.length > 500 ||
+      !data.every(
+        (shop) =>
+          isRecord(shop) &&
+          typeof shop.id === 'number' &&
+          validShopId(String(shop.id)) &&
+          typeof shop.merchantId === 'number' &&
+          validShopId(String(shop.merchantId)) &&
+          typeof shop.name === 'string' &&
+          shop.name.trim().length > 0 &&
+          typeof shop.merchantName === 'string' &&
+          shop.merchantName.trim().length > 0,
+      ) ||
+      new Set(data.map((shop) => shop.id)).size !== data.length
+    )
+      throw new ApiError('无法读取已授权店铺，请重新登录或联系管理员。', 0, 'INVALID_RESPONSE')
+    return data.map((shop) => ({
+      id: shop.id,
+      name: shop.name,
+      merchantId: shop.merchantId,
+      merchantName: shop.merchantName,
+    }))
+  }
+
+  private merchantReviewPath(shopId: string): string {
+    if (!validShopId(shopId)) throw new ApiError('请选择已授权的有效店铺。')
+    return `/api/v1/merchant/shops/${shopId}/after-sales`
+  }
+
   async conversations(
     shopId: string,
     beforeId: string | null = null,
@@ -448,25 +499,25 @@ export class ApiClient {
       throw new ApiError('请先选择当前店铺的有效订单。')
   }
 
-  async pendingReviews(signal?: AbortSignal): Promise<AfterSaleTicket[]> {
+  async pendingReviews(shopId: string, signal?: AbortSignal): Promise<AfterSaleTicket[]> {
     const data = await this.queued(() =>
-      this.request('/api/v1/reviews/after-sales', { method: 'GET' }, signal),
+      this.request(this.merchantReviewPath(shopId), { method: 'GET' }, signal),
     )
     if (
       !Array.isArray(data) ||
       !data.every(isTicket) ||
-      data.some((ticket) => ticket.status !== 'PENDING_REVIEW')
+      data.some((ticket) => ticket.status !== 'PENDING_REVIEW' || ticket.shopId !== Number(shopId))
     ) {
       throw new ApiError('审核列表格式不正确。', 0, 'INVALID_RESPONSE')
     }
     return data.map(normalizeTicket)
   }
 
-  async reviewHistory(signal?: AbortSignal): Promise<AfterSaleTicket[]> {
+  async reviewHistory(shopId: string, signal?: AbortSignal): Promise<AfterSaleTicket[]> {
     const data = await this.queued(() =>
-      this.request('/api/v1/reviews/after-sales/history', { method: 'GET' }, signal),
+      this.request(this.merchantReviewPath(shopId) + '/history', { method: 'GET' }, signal),
     )
-    return parseTickets(data)
+    return parseTickets(data, shopId)
   }
 
   async ownedAfterSales(shopId: string, signal?: AbortSignal): Promise<AfterSaleTicket[]> {
@@ -477,20 +528,27 @@ export class ApiClient {
     return parseTickets(data, shopId)
   }
 
-  async retryExecution(id: string, signal?: AbortSignal): Promise<AfterSaleTicket> {
+  async retryExecution(shopId: string, id: string, signal?: AbortSignal): Promise<AfterSaleTicket> {
+    const path = this.merchantReviewPath(shopId)
     if (!reviewIdPattern.test(id)) throw new ApiError('售后单号格式不正确。')
     return this.queued(async () => {
       if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
       const csrf = await this.getCsrf(signal)
       const data = await this.request(
-        `/api/v1/reviews/after-sales/${id}/execution/retry`,
+        `${path}/${id}/execution/retry`,
         {
           method: 'POST',
           headers: { [csrf.headerName]: csrf.token },
         },
         signal,
       )
-      if (!isTicket(data) || data.id !== id || data.status !== 'APPROVED' || !data.execution) {
+      if (
+        !isTicket(data) ||
+        data.shopId !== Number(shopId) ||
+        data.id !== id ||
+        data.status !== 'APPROVED' ||
+        !data.execution
+      ) {
         throw new ApiError('重试结果格式不正确，请刷新处理进度后核对。', 0, 'INVALID_RESPONSE')
       }
       return normalizeTicket(data)
@@ -498,11 +556,13 @@ export class ApiClient {
   }
 
   async decideReview(
+    shopId: string,
     id: string,
     decision: 'APPROVE' | 'REJECT',
     note: string,
     signal?: AbortSignal,
   ): Promise<AfterSaleTicket> {
+    const path = this.merchantReviewPath(shopId)
     if (
       !reviewIdPattern.test(id) ||
       !['APPROVE', 'REJECT'].includes(decision) ||
@@ -515,7 +575,7 @@ export class ApiClient {
       if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
       const csrf = await this.getCsrf(signal)
       const data = await this.request(
-        `/api/v1/reviews/after-sales/${id}/decision`,
+        `${path}/${id}/decision`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', [csrf.headerName]: csrf.token },
@@ -526,6 +586,7 @@ export class ApiClient {
       if (
         !isTicket(data) ||
         data.id !== id ||
+        data.shopId !== Number(shopId) ||
         data.status !== (decision === 'APPROVE' ? 'APPROVED' : 'REJECTED')
       ) {
         throw new ApiError('审核结果格式不正确。', 0, 'INVALID_RESPONSE')

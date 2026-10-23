@@ -685,11 +685,11 @@ describe('ApiClient', () => {
 
   it('loads pending reviews with authentication and the same cookie policy', async () => {
     const request = fetchMock().mockResolvedValue(json([ticket]))
-    await expect(new ApiClient('reviewer', 'test', request).pendingReviews()).resolves.toEqual([
-      ticket,
-    ])
+    await expect(new ApiClient('reviewer', 'test', request).pendingReviews('100')).resolves.toEqual(
+      [ticket],
+    )
     expect(request).toHaveBeenCalledWith(
-      '/api/v1/reviews/after-sales',
+      '/api/v1/merchant/shops/100/after-sales',
       expect.objectContaining({
         method: 'GET',
         credentials: 'same-origin',
@@ -704,8 +704,12 @@ describe('ApiClient', () => {
       .mockResolvedValueOnce(json(csrf))
       .mockResolvedValueOnce(json(result))
     const api = new ApiClient('reviewer', 'test', request)
-    await expect(api.decideReview(ticket.id, 'APPROVE', '  核实通过  ')).resolves.toEqual(result)
-    expect(request.mock.calls[1]?.[0]).toBe(`/api/v1/reviews/after-sales/${ticket.id}/decision`)
+    await expect(api.decideReview('100', ticket.id, 'APPROVE', '  核实通过  ')).resolves.toEqual(
+      result,
+    )
+    expect(request.mock.calls[1]?.[0]).toBe(
+      `/api/v1/merchant/shops/100/after-sales/${ticket.id}/decision`,
+    )
     const options = request.mock.calls[1]?.[1]
     expect(options?.method).toBe('POST')
     expect(options?.headers).toMatchObject({ 'X-CSRF-TOKEN': csrf.token })
@@ -725,15 +729,15 @@ describe('ApiClient', () => {
     const api = new ApiClient('reviewer', 'test', request)
     await Promise.all([
       api.chat('100', '我的订单'),
-      api.pendingReviews(),
-      api.decideReview(ticket.id, 'REJECT', '请补充凭证'),
+      api.pendingReviews('100'),
+      api.decideReview('100', ticket.id, 'REJECT', '请补充凭证'),
     ])
     expect(paths).toEqual([
       '/api/v1/security/csrf',
       '/api/v1/shops/100/chat/messages',
-      '/api/v1/reviews/after-sales',
+      '/api/v1/merchant/shops/100/after-sales',
       '/api/v1/security/csrf',
-      `/api/v1/reviews/after-sales/${ticket.id}/decision`,
+      `/api/v1/merchant/shops/100/after-sales/${ticket.id}/decision`,
     ])
   })
 
@@ -744,11 +748,11 @@ describe('ApiClient', () => {
       .mockResolvedValueOnce(json(csrf))
       .mockResolvedValueOnce(json({ code: 'REVIEW_CONFLICT' }, 409))
     const api = new ApiClient('reviewer', 'test', request)
-    await expect(api.decideReview(ticket.id, 'APPROVE', '核实通过')).rejects.toMatchObject({
+    await expect(api.decideReview('100', ticket.id, 'APPROVE', '核实通过')).rejects.toMatchObject({
       status: 403,
     })
     expect(request).toHaveBeenCalledTimes(2)
-    await expect(api.decideReview(ticket.id, 'APPROVE', '核实通过')).rejects.toMatchObject({
+    await expect(api.decideReview('100', ticket.id, 'APPROVE', '核实通过')).rejects.toMatchObject({
       status: 409,
     })
     expect(request).toHaveBeenCalledTimes(4)
@@ -761,7 +765,7 @@ describe('ApiClient', () => {
   ])('rejects invalid review inputs before network access: %s', async ({ id, note }) => {
     const request = fetchMock()
     await expect(
-      new ApiClient('reviewer', 'test', request).decideReview(id, 'APPROVE', note),
+      new ApiClient('reviewer', 'test', request).decideReview('100', id, 'APPROVE', note),
     ).rejects.toBeInstanceOf(ApiError)
     expect(request).not.toHaveBeenCalled()
   })
@@ -773,11 +777,11 @@ describe('ApiClient', () => {
     { ...ticket, status: 'APPROVED' },
   ])('rejects a malformed or non-pending review queue item: %s', async (item) => {
     const request = fetchMock().mockResolvedValue(json([item]))
-    await expect(new ApiClient('reviewer', 'test', request).pendingReviews()).rejects.toMatchObject(
-      {
-        code: 'INVALID_RESPONSE',
-      },
-    )
+    await expect(
+      new ApiClient('reviewer', 'test', request).pendingReviews('100'),
+    ).rejects.toMatchObject({
+      code: 'INVALID_RESPONSE',
+    })
   })
 
   it.each([
@@ -788,7 +792,12 @@ describe('ApiClient', () => {
       .mockResolvedValueOnce(json(csrf))
       .mockResolvedValueOnce(json(result))
     await expect(
-      new ApiClient('reviewer', 'test', request).decideReview(ticket.id, 'APPROVE', '核实通过'),
+      new ApiClient('reviewer', 'test', request).decideReview(
+        '100',
+        ticket.id,
+        'APPROVE',
+        '核实通过',
+      ),
     ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
   })
 
@@ -804,11 +813,11 @@ describe('ApiClient', () => {
 
   it('loads global review history separately from the pending queue', async () => {
     const request = fetchMock().mockResolvedValue(json([ticket, executionTicket]))
-    await expect(new ApiClient('reviewer', 'test', request).reviewHistory()).resolves.toEqual([
+    await expect(new ApiClient('reviewer', 'test', request).reviewHistory('100')).resolves.toEqual([
       ticket,
       executionTicket,
     ])
-    expect(request.mock.calls[0]?.[0]).toBe('/api/v1/reviews/after-sales/history')
+    expect(request.mock.calls[0]?.[0]).toBe('/api/v1/merchant/shops/100/after-sales/history')
   })
 
   it('normalizes a legacy ticket without execution to null', async () => {
@@ -841,10 +850,10 @@ describe('ApiClient', () => {
       .mockResolvedValueOnce(json(csrf))
       .mockResolvedValueOnce(json(result))
     await expect(
-      new ApiClient('reviewer', 'test', request).retryExecution(ticket.id),
+      new ApiClient('reviewer', 'test', request).retryExecution('100', ticket.id),
     ).resolves.toEqual(result)
     expect(request.mock.calls[1]?.[0]).toBe(
-      `/api/v1/reviews/after-sales/${ticket.id}/execution/retry`,
+      `/api/v1/merchant/shops/100/after-sales/${ticket.id}/execution/retry`,
     )
     expect(request.mock.calls[1]?.[1]).toMatchObject({
       method: 'POST',
@@ -858,7 +867,7 @@ describe('ApiClient', () => {
       .mockResolvedValueOnce(json(csrf))
       .mockResolvedValueOnce(json({ code: 'REVIEW_CONFLICT' }, 409))
     await expect(
-      new ApiClient('reviewer', 'test', request).retryExecution(ticket.id),
+      new ApiClient('reviewer', 'test', request).retryExecution('100', ticket.id),
     ).rejects.toMatchObject({ status: 409 })
     expect(request).toHaveBeenCalledTimes(2)
   })
@@ -875,14 +884,14 @@ describe('ApiClient', () => {
     })
     const api = new ApiClient('reviewer', 'test', request)
     await Promise.all([
-      api.retryExecution(ticket.id),
-      api.reviewHistory(),
+      api.retryExecution('100', ticket.id),
+      api.reviewHistory('100'),
       api.chat('100', '我的订单'),
     ])
     expect(paths).toEqual([
       '/api/v1/security/csrf',
-      `/api/v1/reviews/after-sales/${ticket.id}/execution/retry`,
-      '/api/v1/reviews/after-sales/history',
+      `/api/v1/merchant/shops/100/after-sales/${ticket.id}/execution/retry`,
+      '/api/v1/merchant/shops/100/after-sales/history',
       '/api/v1/security/csrf',
       '/api/v1/shops/100/chat/messages',
     ])
@@ -896,9 +905,9 @@ describe('ApiClient', () => {
       }),
     )
     const api = new ApiClient('reviewer', 'test', request)
-    const read = api.reviewHistory()
+    const read = api.reviewHistory('100')
     const controller = new AbortController()
-    const retry = api.retryExecution(ticket.id, controller.signal)
+    const retry = api.retryExecution('100', ticket.id, controller.signal)
     controller.abort()
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1))
     finish(json([executionTicket]))
@@ -912,7 +921,12 @@ describe('ApiClient', () => {
       .mockResolvedValueOnce(json(csrf))
       .mockResolvedValueOnce(json({ code: 'REVIEW_NOT_FOUND' }, 404))
     await expect(
-      new ApiClient('reviewer', 'test', request).decideReview(ticket.id, 'APPROVE', '核实通过'),
+      new ApiClient('reviewer', 'test', request).decideReview(
+        '100',
+        ticket.id,
+        'APPROVE',
+        '核实通过',
+      ),
     ).rejects.toMatchObject({ status: 404, message: '未找到该售后申请，请刷新审核列表后重试。' })
   })
 
@@ -925,8 +939,8 @@ describe('ApiClient', () => {
     )
     const api = new ApiClient('reviewer', 'test', request)
     const controller = new AbortController()
-    const read = api.pendingReviews()
-    const decision = api.decideReview(ticket.id, 'APPROVE', '核实通过', controller.signal)
+    const read = api.pendingReviews('100')
+    const decision = api.decideReview('100', ticket.id, 'APPROVE', '核实通过', controller.signal)
     controller.abort()
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1))
     finishRead(json([ticket]))

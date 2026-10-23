@@ -6,6 +6,7 @@ import dev.supportflow.assistant.execution.AfterSaleExecutionWorker;
 import dev.supportflow.assistant.execution.ExecutionClaim;
 import dev.supportflow.assistant.execution.ExecutionFailureCode;
 import dev.supportflow.assistant.execution.SimulatedRefundGateway;
+import dev.supportflow.testsupport.MerchantFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -116,6 +117,9 @@ class AfterSaleExecutionIT {
         registry.add(prefix + "password-hash", () -> HASH);
         registry.add(prefix + "identity.buyer-id", () -> buyerId);
         registry.add(prefix + "permissions", () -> permissions);
+        if (permissions.contains("AFTER_SALE_REVIEW")) {
+            registry.add(prefix + "account-type", () -> "MERCHANT_STAFF");
+        }
     }
 
     private static synchronized void prepareDatabase() throws SQLException {
@@ -134,6 +138,8 @@ class AfterSaleExecutionIT {
             grant.execute("GRANT SELECT, INSERT ON supportflow_execution_test.support_after_sale_audit TO 'execution_runtime'@'%'");
             grant.execute("GRANT SELECT, INSERT, UPDATE ON supportflow_execution_test.support_after_sale_execution TO 'execution_runtime'@'%'");
             grant.execute("GRANT SELECT, INSERT ON supportflow_execution_test.support_simulated_refund TO 'execution_runtime'@'%'");
+            MerchantFixtures.grantRuntimeRead(connection, DATABASE, RUNTIME);
+            MerchantFixtures.standardReviewers(connection);
         }
         prepared = true;
     }
@@ -363,7 +369,7 @@ class AfterSaleExecutionIT {
         Fixture approved = approve(order(100L, 200L, "199.90"));
         transientFailure();
         assertThat(worker.runOnce()).isTrue();
-        mvc.perform(post("/api/v1/reviews/after-sales/{id}/execution/retry", approved.requestId()).with(csrf()))
+        mvc.perform(post("/api/v1/merchant/shops/100/after-sales/{id}/execution/retry", approved.requestId()).with(csrf()))
                 .andExpect(status().isUnauthorized());
         retry("buyer", approved, true).andExpect(status().isForbidden());
         retry("reviewer", approved, false).andExpect(status().isForbidden());
@@ -373,6 +379,8 @@ class AfterSaleExecutionIT {
         retry("reviewer", approved, true).andExpect(status().isOk());
         assertThat(task(approved).status()).isEqualTo("PENDING");
         assertThat(task(approved).attempts()).isEqualTo(1);
+        assertThat(count("SELECT COUNT(*) FROM support_after_sale_audit WHERE request_id=? AND action='EXECUTION_RETRY' AND staff_id=999",
+                approved.requestId())).isEqualTo(1);
         retry("reviewer", approved, true).andExpect(status().isConflict());
         reset(gatewaySpy());
         assertThat(worker.runOnce()).isTrue();
@@ -451,9 +459,9 @@ class AfterSaleExecutionIT {
         }
         assertThat(find(tickets("other", 100L), mine.requestId()).isMissingNode()).isTrue();
         assertThat(find(tickets("buyer", 101L), mine.requestId()).isMissingNode()).isTrue();
-        mvc.perform(get("/api/v1/reviews/after-sales/history").with(httpBasic("buyer", PASSWORD)))
+        mvc.perform(get("/api/v1/merchant/shops/100/after-sales/history").with(httpBasic("buyer", PASSWORD)))
                 .andExpect(status().isForbidden());
-        JsonNode history = body(mvc.perform(get("/api/v1/reviews/after-sales/history")
+        JsonNode history = body(mvc.perform(get("/api/v1/merchant/shops/100/after-sales/history")
                 .with(httpBasic("reviewer", PASSWORD))).andExpect(status().isOk()).andReturn());
         assertThat(find(history, mine.requestId()).path("execution").path("status").asString())
                 .isEqualTo("SUCCEEDED");
@@ -524,14 +532,14 @@ class AfterSaleExecutionIT {
     }
 
     private ResultActions decide(String username, Fixture request, String decision, boolean withCsrf) throws Exception {
-        var builder = post("/api/v1/reviews/after-sales/{id}/decision", request.requestId())
+        var builder = post("/api/v1/merchant/shops/{shopId}/after-sales/{id}/decision", request.shopId(), request.requestId())
                 .with(httpBasic(username, PASSWORD)).contentType(MediaType.APPLICATION_JSON)
                 .content(json.writeValueAsString(Map.of("decision", decision, "note", "Checked in isolated test")));
         return mvc.perform(withCsrf ? builder.with(csrf()) : builder);
     }
 
     private ResultActions retry(String username, Fixture request, boolean withCsrf) throws Exception {
-        var builder = post("/api/v1/reviews/after-sales/{id}/execution/retry", request.requestId())
+        var builder = post("/api/v1/merchant/shops/{shopId}/after-sales/{id}/execution/retry", request.shopId(), request.requestId())
                 .with(httpBasic(username, PASSWORD));
         return mvc.perform(withCsrf ? builder.with(csrf()) : builder);
     }

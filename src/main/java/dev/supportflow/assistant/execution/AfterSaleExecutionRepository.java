@@ -6,6 +6,7 @@ import org.springframework.stereotype.Repository;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.Collection;
@@ -67,6 +68,11 @@ public class AfterSaleExecutionRepository {
                 .param("id", id).query((row, ignored) -> stored(row)).optional();
     }
 
+    Optional<StoredExecution> lock(String id, long shopId) {
+        return jdbc.sql("SELECT * FROM support_after_sale_execution WHERE request_id=:id AND tenant_id=:shop FOR UPDATE")
+                .param("id", id).param("shop", shopId).query((row, ignored) -> stored(row)).optional();
+    }
+
     void claim(String id, String token, LocalDateTime leaseUntil) {
         int changed = jdbc.sql("""
                 UPDATE support_after_sale_execution SET status='PROCESSING', attempt_count=attempt_count+1,
@@ -114,9 +120,10 @@ public class AfterSaleExecutionRepository {
                 .param("available", availableAt).update();
     }
 
-    boolean isRequester(String id, long buyerId) {
-        return jdbc.sql("SELECT id FROM support_after_sale WHERE id=:id AND buyer_id=:buyer")
-                .param("id", id).param("buyer", buyerId).query(String.class).optional().isPresent();
+    boolean isRequester(String id, long buyerId, long shopId) {
+        return jdbc.sql("SELECT id FROM support_after_sale WHERE id=:id AND buyer_id=:buyer AND tenant_id=:shop")
+                .param("id", id).param("buyer", buyerId).param("shop", shopId)
+                .query(String.class).optional().isPresent();
     }
 
     void retry(StoredExecution task, LocalDateTime now) {
@@ -128,10 +135,15 @@ public class AfterSaleExecutionRepository {
     }
 
     void audit(String id, String actor, String action, String note) {
+        audit(id, actor, action, note, null);
+    }
+
+    void audit(String id, String actor, String action, String note, Long staffId) {
         jdbc.sql("""
-                INSERT INTO support_after_sale_audit (request_id, actor, action, notes)
-                VALUES (:id, :actor, :action, :note)
-                """).param("id", id).param("actor", actor).param("action", action).param("note", note).update();
+                INSERT INTO support_after_sale_audit (request_id, actor, action, notes, staff_id)
+                VALUES (:id, :actor, :action, :note, :staffId)
+                """).param("id", id).param("actor", actor).param("action", action).param("note", note)
+                .param("staffId", staffId, Types.BIGINT).update();
     }
 
     private static StoredExecution stored(ResultSet row) throws SQLException {

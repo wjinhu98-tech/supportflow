@@ -69,7 +69,8 @@ public final class LocalCustomerUserDetailsService
                 account.username(),
                 account.passwordHash(),
                 account.identity(),
-                account.permissions()
+                account.permissions(),
+                account.accountType()
         );
     }
 }

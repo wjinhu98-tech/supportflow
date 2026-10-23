@@ -3,7 +3,7 @@ import { connect, send, switchShop } from './helpers'
 import type { AfterSaleEligibility, AfterSaleTicket, ReceiptConfirmation } from '../src/types'
 
 const password = 'Frontend-Test-Only!'
-const reviewPath = '/api/v1/reviews/after-sales'
+const reviewPath = '/api/v1/merchant/shops/100/after-sales'
 const buyerHeaders = {
   Authorization: `Basic ${Buffer.from(`frontend-buyer:${password}`).toString('base64')}`,
 }
@@ -77,22 +77,85 @@ async function selectFreshAfterSaleOrder(page: Page) {
   return orderNo!
 }
 
-async function openReviewQueue(page: Page, expectedStatus = 200) {
-  const responsePromise = page.waitForResponse(
-    (response) =>
-      response.request().method() === 'GET' && new URL(response.url()).pathname === reviewPath,
-  )
-  await page.getByRole('button', { name: '人工审核', exact: true }).click()
-  const response = await responsePromise
-  expect(response.status()).toBe(expectedStatus)
+async function connectMerchant(page: Page, account = 'frontend-reviewer') {
+  await page.goto('/merchant')
+  await page.getByTestId('merchant-username').fill(account)
+  await page.getByTestId('merchant-password').fill(password)
+  await page.getByTestId('merchant-connect').click()
+  await expect(page.getByTestId('merchant-workspace')).toBeVisible()
   await expect(page.getByTestId('review-panel')).toBeVisible()
-  return response
 }
 
 // Only runs when E2E_BACKEND_URL points at the isolated Testcontainers launcher.
 // These deliberately public test-only accounts must never be copied to local secrets.
 test.beforeEach(async ({ page }) => {
   await page.goto('/?shopId=100')
+})
+
+test('customer and merchant entry points enforce role and database shop grants', async ({
+  page,
+}, testInfo) => {
+  await expect(page.getByRole('button', { name: '人工审核', exact: true })).toHaveCount(0)
+  await page.goto('/merchant')
+  await page.getByTestId('merchant-username').fill('frontend-buyer')
+  await page.getByTestId('merchant-password').fill(password)
+  await page.getByTestId('merchant-connect').click()
+  await expect(page.getByRole('alert')).toContainText(/买家|商家|客服/)
+  await expect(page.getByTestId('merchant-workspace')).toHaveCount(0)
+  await connectMerchant(page)
+  const shops = page.getByTestId('merchant-shop-select')
+  await expect(shops).toHaveValue('100')
+  await expect(shops.locator('option[value="101"]')).toHaveCount(0)
+  const headers = {
+    Authorization: `Basic ${Buffer.from(`frontend-reviewer:${password}`).toString('base64')}`,
+  }
+  for (const path of [
+    '/api/v1/reviews/after-sales',
+    '/api/v1/orders',
+    '/api/v1/shops/100/chat/conversations',
+    '/api/v1/merchant/shops/101/after-sales',
+  ]) {
+    const response = await page.request.get(path, { headers })
+    expect(response.status(), path).toBe(403)
+  }
+  await page.screenshot({
+    path: testInfo.outputPath('merchant-workspace-desktop.png'),
+    fullPage: true,
+  })
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(
+    true,
+  )
+  await page.screenshot({
+    path: testInfo.outputPath('merchant-workspace-mobile.png'),
+    fullPage: true,
+  })
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.getByTestId('merchant-disconnect').click()
+  await connectMerchant(page, 'frontend-reviewer-other')
+  await expect(page.getByTestId('merchant-shop-select')).toHaveValue('101')
+  await expect(page.getByTestId('merchant-shop-select').locator('option[value="100"]')).toHaveCount(
+    0,
+  )
+})
+
+test('unassigned staff receive no default shop and staff cannot sign into the customer workspace', async ({
+  page,
+}) => {
+  await page.goto('/merchant')
+  await page.getByTestId('merchant-username').fill('frontend-unassigned')
+  await page.getByTestId('merchant-password').fill(password)
+  await page.getByTestId('merchant-connect').click()
+  await expect(page.getByTestId('merchant-workspace')).toBeVisible()
+  await expect(page.getByTestId('review-panel')).toHaveCount(0)
+  await expect(page.getByText(/未.*授权|没有.*店铺|暂无.*店铺|尚未.*授权/).first()).toBeVisible()
+  await page.goto('/?shopId=100')
+  await page.getByRole('button', { name: '连接账号', exact: true }).first().click()
+  await page.getByTestId('username-input').fill('frontend-reviewer')
+  await page.getByTestId('password-input').fill(password)
+  await page.getByTestId('connect-button').click()
+  await expect(page.getByRole('alert').last()).toContainText(/买家|商家|客服/)
+  await expect(page.getByTestId('disconnect-button')).toHaveCount(0)
 })
 
 test('conversation history survives reconnect without reopening refund forms or replaying writes', async ({
@@ -509,16 +572,13 @@ for (const decision of ['APPROVE', 'REJECT'] as const) {
     expect((await ownedTickets(page)).find((ticket) => ticket.id === ticketId)?.status).toBe(
       'PENDING_REVIEW',
     )
-    await openReviewQueue(page, 403)
-    await expect(page.getByTestId('review-panel').getByRole('alert')).toContainText('无权访问')
-    await expect(page.getByTestId('review-card')).toHaveCount(0)
-    await expect(page.getByTestId('approve-review')).toHaveCount(0)
-    await page.keyboard.press('Escape')
+    await expect(page.getByRole('button', { name: '人工审核', exact: true })).toHaveCount(0)
+    const denied = await page.request.get(reviewPath, { headers: buyerHeaders })
+    expect(denied.status()).toBe(403)
     await expect(page.getByTestId('review-panel')).toHaveCount(0)
 
     await page.getByTestId('disconnect-button').click()
-    await connect(page, 'frontend-reviewer', password)
-    await openReviewQueue(page)
+    await connectMerchant(page)
     const card = page.getByTestId('review-card').filter({ hasText: ticketId! })
     await expect(card).toHaveCount(1)
     await expect(card).toContainText(orderNo)
@@ -552,9 +612,8 @@ for (const decision of ['APPROVE', 'REJECT'] as const) {
       reviewNote: note,
     })
     await expect(card).toHaveCount(0)
-    await page.keyboard.press('Escape')
-    await page.getByTestId('disconnect-button').click()
-
+    await page.getByTestId('merchant-disconnect').click()
+    await page.goto('/?shopId=100')
     await connect(page, 'frontend-buyer', password)
     const afterReview = await chat(page, '我的售后')
     expect(afterReview.reply).toContain(orderNo)
@@ -583,8 +642,7 @@ test('real approved request executes a durable simulated refund and both progres
   const ticketId = (await ownedTickets(page)).find((ticket) => ticket.orderNo === orderNo)?.id
   expect(ticketId).toBeTruthy()
   await page.getByTestId('disconnect-button').click()
-  await connect(page, 'frontend-reviewer', password)
-  await openReviewQueue(page)
+  await connectMerchant(page)
   const pendingCard = page.getByTestId('review-card').filter({ hasText: ticketId! })
   await expect(pendingCard).toHaveCount(1)
   if ((await pendingCard.getAttribute('open')) === null)
@@ -628,10 +686,8 @@ test('real approved request executes a durable simulated refund and both progres
     path: testInfo.outputPath('reviewer-execution-progress.png'),
     fullPage: true,
   })
-  await page.keyboard.press('Escape')
-  await expect(page.getByTestId('review-panel')).toHaveCount(0)
-
-  await page.getByTestId('disconnect-button').click()
+  await page.getByTestId('merchant-disconnect').click()
+  await page.goto('/?shopId=100')
   await connect(page, 'frontend-buyer', password)
   const naturalProgress = await chat(page, '我的售后处理到哪了')
   expect(naturalProgress.reply).toContain('演示处理完成')

@@ -89,6 +89,12 @@ public class AfterSaleRepository {
                 .param("id", id).query(AfterSaleRepository::map).optional().map(this::enrich);
     }
 
+    Optional<StoredAfterSale> findById(String id, long shopId) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM support_after_sale WHERE id=:id AND tenant_id=:shop")
+                .param("id", id).param("shop", shopId)
+                .query(AfterSaleRepository::map).optional().map(this::enrich);
+    }
+
     List<AfterSaleTicket> listOwned(long shopId, long buyerId) {
         return enrich(jdbc.sql("SELECT " + COLUMNS + " FROM support_after_sale "
                         + "WHERE tenant_id=:shop AND buyer_id=:buyer ORDER BY created_at DESC, id DESC LIMIT 50")
@@ -96,16 +102,16 @@ public class AfterSaleRepository {
                 .query(AfterSaleRepository::map).list().stream().map(StoredAfterSale::ticket).toList());
     }
 
-    List<AfterSaleTicket> pending() {
+    List<AfterSaleTicket> pending(long shopId) {
         return enrich(jdbc.sql("SELECT " + COLUMNS + " FROM support_after_sale "
-                        + "WHERE status='PENDING_REVIEW' ORDER BY created_at, id LIMIT 50")
-                .query(AfterSaleRepository::map).list().stream().map(StoredAfterSale::ticket).toList());
+                        + "WHERE tenant_id=:shop AND status='PENDING_REVIEW' ORDER BY created_at, id LIMIT 50")
+                .param("shop", shopId).query(AfterSaleRepository::map).list().stream().map(StoredAfterSale::ticket).toList());
     }
 
-    List<AfterSaleTicket> reviewedHistory() {
+    List<AfterSaleTicket> reviewedHistory(long shopId) {
         return enrich(jdbc.sql("SELECT " + COLUMNS + " FROM support_after_sale "
-                        + "ORDER BY updated_at DESC, id DESC LIMIT 50")
-                .query(AfterSaleRepository::map).list().stream().map(StoredAfterSale::ticket).toList());
+                        + "WHERE tenant_id=:shop ORDER BY updated_at DESC, id DESC LIMIT 50")
+                .param("shop", shopId).query(AfterSaleRepository::map).list().stream().map(StoredAfterSale::ticket).toList());
     }
 
     private StoredAfterSale enrich(StoredAfterSale row) {
@@ -129,11 +135,16 @@ public class AfterSaleRepository {
     }
 
     void audit(String id, String actor, String action, String notes) {
+        audit(id, actor, action, notes, null);
+    }
+
+    void audit(String id, String actor, String action, String notes, Long staffId) {
         jdbc.sql("""
-                        INSERT INTO support_after_sale_audit (request_id, actor, action, notes)
-                        VALUES (:id, :actor, :action, :notes)
+                        INSERT INTO support_after_sale_audit (request_id, actor, action, notes, staff_id)
+                        VALUES (:id, :actor, :action, :notes, :staffId)
                         """)
-                .param("id", id).param("actor", actor).param("action", action).param("notes", notes).update();
+                .param("id", id).param("actor", actor).param("action", action).param("notes", notes)
+                .param("staffId", staffId, Types.BIGINT).update();
     }
 
     private static StoredAfterSale map(ResultSet row, int ignored) throws SQLException {

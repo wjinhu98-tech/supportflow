@@ -18,12 +18,23 @@ public final class CustomerPrincipal extends User {
     private static final long serialVersionUID = 1L;
 
     private final CustomerIdentity identity;
+    private final AccountType accountType;
 
     public CustomerPrincipal(
             String username,
             String passwordHash,
             CustomerIdentity identity,
             Collection<SecurityPermission> permissions
+    ) {
+        this(username, passwordHash, identity, permissions, AccountType.BUYER);
+    }
+
+    public CustomerPrincipal(
+            String username,
+            String passwordHash,
+            CustomerIdentity identity,
+            Collection<SecurityPermission> permissions,
+            AccountType accountType
     ) {
         super(
                 requireText(username, "username"),
@@ -35,10 +46,15 @@ public final class CustomerPrincipal extends User {
                 identity,
                 "identity must not be null"
         );
+        this.accountType = Objects.requireNonNull(accountType, "accountType must not be null");
     }
 
     public CustomerIdentity getIdentity() {
         return identity;
+    }
+
+    public AccountType getAccountType() {
+        return accountType;
     }
 
     private static String requireText(

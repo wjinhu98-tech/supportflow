@@ -4,6 +4,7 @@ import dev.supportflow.common.api.error.ErrorCode;
 import dev.supportflow.assistant.execution.AfterSaleExecutionProcessor;
 import dev.supportflow.common.security.model.CustomerIdentity;
 import dev.supportflow.common.security.model.CustomerPrincipal;
+import dev.supportflow.merchant.MerchantAccessService;
 import dev.supportflow.order.application.OrderQueryService;
 import dev.supportflow.order.domain.model.OrderStatus;
 import dev.supportflow.order.domain.model.SupportOrder;
@@ -27,13 +28,16 @@ public class AfterSaleService {
     private final OrderQueryService orders;
     private final AfterSaleExecutionProcessor executions;
     private final AfterSalePolicy policy;
+    private final MerchantAccessService merchantAccess;
 
     public AfterSaleService(AfterSaleRepository repository, OrderQueryService orders,
-                            AfterSaleExecutionProcessor executions, AfterSalePolicy policy) {
+                            AfterSaleExecutionProcessor executions, AfterSalePolicy policy,
+                            MerchantAccessService merchantAccess) {
         this.repository = repository;
         this.orders = orders;
         this.executions = executions;
         this.policy = policy;
+        this.merchantAccess = merchantAccess;
     }
 
     @Transactional(readOnly = true)
@@ -82,29 +86,46 @@ public class AfterSaleService {
         return repository.listOwned(shopId, identity.buyerId());
     }
 
-    /** This is an explicitly global platform-review permission in the learning module. */
-    @PreAuthorize("hasAuthority('after-sale:review')")
-    public List<AfterSaleTicket> pending() { return repository.pending(); }
+    /** Old global entry points remain fail-closed for callers upgrading from earlier versions. */
+    public List<AfterSaleTicket> pending() { throw scopeRequired(); }
 
-    @PreAuthorize("hasAuthority('after-sale:review')")
-    public List<AfterSaleTicket> reviewedHistory() { return repository.reviewedHistory(); }
+    public List<AfterSaleTicket> reviewedHistory() { throw scopeRequired(); }
 
-    @Transactional
-    @PreAuthorize("hasAuthority('after-sale:review')")
-    public AfterSaleTicket retryExecution(CustomerPrincipal reviewer, UUID id) {
-        executions.retry(reviewer, id);
-        return repository.findById(id.toString()).orElseThrow().ticket();
+    public AfterSaleTicket retryExecution(CustomerPrincipal reviewer, UUID id) { throw scopeRequired(); }
+
+    public AfterSaleTicket decide(CustomerPrincipal reviewer, UUID id, ReviewDecision decision, String note) {
+        throw scopeRequired();
+    }
+
+    public List<AfterSaleTicket> pending(CustomerPrincipal reviewer, long shopId) {
+        merchantAccess.requireShop(reviewer, shopId);
+        return repository.pending(shopId);
+    }
+
+    public List<AfterSaleTicket> reviewedHistory(CustomerPrincipal reviewer, long shopId) {
+        merchantAccess.requireShop(reviewer, shopId);
+        return repository.reviewedHistory(shopId);
     }
 
     @Transactional
     @PreAuthorize("hasAuthority('after-sale:review')")
-    public AfterSaleTicket decide(CustomerPrincipal reviewer, UUID id, ReviewDecision decision, String note) {
+    public AfterSaleTicket retryExecution(CustomerPrincipal reviewer, long shopId, UUID id) {
+        merchantAccess.lockShop(reviewer, shopId);
+        repository.findById(id.toString(), shopId).orElseThrow(AfterSaleService::notFound);
+        executions.retry(reviewer, shopId, id);
+        return repository.findById(id.toString(), shopId).orElseThrow(AfterSaleService::notFound).ticket();
+    }
+
+    @Transactional
+    @PreAuthorize("hasAuthority('after-sale:review')")
+    public AfterSaleTicket decide(CustomerPrincipal reviewer, long shopId, UUID id,
+                                 ReviewDecision decision, String note) {
+        var access = merchantAccess.lockShop(reviewer, shopId);
         if (decision == null || note == null || note.isBlank() || note.length() > 500) {
             throw new AssistantBusinessException(ErrorCode.INVALID_ARGUMENT, HttpStatus.BAD_REQUEST,
                     "必须提供审批决定和1至500字的审核意见。");
         }
-        StoredAfterSale stored = repository.findById(id.toString()).orElseThrow(() ->
-                new AssistantBusinessException(ErrorCode.REVIEW_NOT_FOUND, HttpStatus.NOT_FOUND, "售后申请不存在"));
+        StoredAfterSale stored = repository.findById(id.toString(), shopId).orElseThrow(AfterSaleService::notFound);
         if (reviewer.getIdentity().buyerId() == stored.buyerId()) {
             throw new AccessDeniedException("Requester cannot review their own case");
         }
@@ -127,9 +148,17 @@ public class AfterSaleService {
         AfterSaleStatus status = decision == ReviewDecision.APPROVE
                 ? AfterSaleStatus.APPROVED : AfterSaleStatus.REJECTED;
         if (!repository.decide(stored, status, reviewer.getUsername(), note.strip())) throw conflict();
-        repository.audit(id.toString(), reviewer.getUsername(), status.name(), note.strip());
+        repository.audit(id.toString(), reviewer.getUsername(), status.name(), note.strip(), access.staffId());
         if (approvedOrder != null) executions.enqueue(id.toString(), approvedOrder);
-        return repository.findById(id.toString()).orElseThrow().ticket();
+        return repository.findById(id.toString(), shopId).orElseThrow(AfterSaleService::notFound).ticket();
+    }
+
+    private static AccessDeniedException scopeRequired() {
+        return new AccessDeniedException("Explicit merchant shop authorization is required");
+    }
+
+    private static AssistantBusinessException notFound() {
+        return new AssistantBusinessException(ErrorCode.REVIEW_NOT_FOUND, HttpStatus.NOT_FOUND, "售后申请不存在");
     }
 
     private static AssistantBusinessException conflict() {

@@ -20,6 +20,9 @@ const props = defineProps<{
   loading: boolean
   submitting: boolean
   error: string | null
+  embedded?: boolean
+  shopName?: string
+  writeBlocked?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -35,11 +38,11 @@ const validationErrors = reactive<Record<string, string>>({})
 const visibleTickets = computed(() =>
   (props.view === 'pending' ? props.tickets : props.historyTickets).slice(0, 50),
 )
-const disabled = computed(() => props.loading || props.submitting)
+const disabled = computed(() => props.loading || props.submitting || props.writeBlocked)
 let closing = false
 
 function requestClose() {
-  if (closing || props.submitting) return
+  if (props.embedded || closing || props.submitting) return
   closing = true
   dialog.value?.close()
   emit('close')
@@ -71,17 +74,21 @@ function statusLabel(status: AfterSaleTicket['status']) {
   return { PENDING_REVIEW: '待人工审核', APPROVED: '已批准', REJECTED: '已拒绝' }[status]
 }
 
-onMounted(() => dialog.value?.showModal())
+onMounted(() => {
+  if (!props.embedded) dialog.value?.showModal()
+})
 onBeforeUnmount(() => {
   closing = true
-  dialog.value?.close()
+  if (!props.embedded) dialog.value?.close()
 })
 </script>
 
 <template>
-  <dialog
+  <component
+    :is="embedded ? 'section' : 'dialog'"
     ref="dialog"
     class="review-dialog"
+    :class="{ 'review-embedded': embedded }"
     data-testid="review-panel"
     aria-labelledby="review-title"
     aria-describedby="review-scope"
@@ -103,6 +110,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <button
+        v-if="!embedded"
         type="button"
         class="review-close"
         aria-label="关闭人工审批"
@@ -126,9 +134,9 @@ onBeforeUnmount(() => {
           aria-hidden="true"
         />
         <p>
-          <strong>全平台管理员队列，不限当前店铺。</strong>
+          <strong>{{ shopName || '当前授权店铺' }} · 店铺售后工作台</strong>
           <br />
-          需要 AFTER_SALE_REVIEW 权限；订单归属、审批权限和禁止申请人自审，均由 Java 服务端验证。
+          仅展示当前店铺的售后申请。每次查询和操作都会重新核验店铺授权，禁止申请人审核自己的申请。
         </p>
       </div>
 
@@ -141,7 +149,7 @@ onBeforeUnmount(() => {
           type="button"
           data-testid="review-tab-pending"
           :aria-pressed="view === 'pending'"
-          :disabled="disabled"
+          :disabled="loading || submitting"
           @click="emit('refresh', 'pending')"
         >
           待审批
@@ -150,7 +158,7 @@ onBeforeUnmount(() => {
           type="button"
           data-testid="review-tab-history"
           :aria-pressed="view === 'history'"
-          :disabled="disabled"
+          :disabled="loading || submitting"
           @click="emit('refresh', 'history')"
         >
           处理进度
@@ -165,7 +173,7 @@ onBeforeUnmount(() => {
           type="button"
           class="review-refresh"
           data-testid="refresh-reviews"
-          :disabled="disabled"
+          :disabled="loading || submitting"
           @click="emit('refresh', view)"
         >
           <LoaderCircle
@@ -400,7 +408,7 @@ onBeforeUnmount(() => {
       />
       <p>批准后创建持久化任务并执行学习版模拟退款；模拟处理结果不代表真实资金到账。</p>
     </footer>
-  </dialog>
+  </component>
 </template>
 
 <style scoped>
@@ -417,7 +425,15 @@ onBeforeUnmount(() => {
   font-size: 14px;
   overflow: hidden;
 }
-.review-dialog[open] {
+.review-embedded {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: none;
+  max-height: none;
+  box-shadow: 0 8px 32px #2817320a;
+}
+.review-dialog[open],
+.review-embedded {
   display: flex;
   flex-direction: column;
 }

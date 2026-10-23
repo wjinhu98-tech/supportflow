@@ -12,6 +12,7 @@ const orderNo = "SFDEMO2026102107";
 const reason =
   "LOCAL_ACCEPTANCE_20261021: demo damaged item; simulated refund only";
 const shop = "/api/v1/shops/100";
+const reviews = "/api/v1/merchant/shops/100/after-sales";
 
 function privateLogin(relative) {
   const text = readFileSync(path.join(root, relative), "utf8");
@@ -130,17 +131,29 @@ async function verifyReadonlyUi(
         return route.abort();
       });
       const page = await context.newPage();
-      await page.goto("http://127.0.0.1:5173/?shopId=100");
-      await page.locator(".connect-top-button").click();
-      await page.getByTestId("username-input").fill(credentials.username);
-      await page.getByTestId("password-input").fill(credentials.password);
-      await page.getByTestId("connect-button").click();
-      await expect(page.getByTestId("disconnect-button")).toBeVisible();
-      await expect(page.getByTestId("connect-form")).not.toBeVisible();
-      await page
-        .getByTestId(reviewer ? "open-reviews" : "open-after-sales")
-        .click();
-      if (reviewer) await page.getByTestId("review-tab-history").click();
+      if (reviewer) {
+        await page.goto("http://127.0.0.1:5173/merchant");
+        await page.getByTestId("merchant-username").fill(credentials.username);
+        await page.getByTestId("merchant-password").fill(credentials.password);
+        await page.getByTestId("merchant-connect").click();
+        await expect(page.getByTestId("merchant-disconnect")).toBeVisible();
+        await expect(page.getByTestId("merchant-workspace")).toBeVisible();
+        await expect(page.getByTestId("merchant-login")).not.toBeVisible();
+        await page.getByTestId("merchant-shop-select").selectOption("100");
+        await expect(page.getByTestId("merchant-shop-select")).toHaveValue(
+          "100",
+        );
+        await page.getByTestId("review-tab-history").click();
+      } else {
+        await page.goto("http://127.0.0.1:5173/?shopId=100");
+        await page.locator(".connect-top-button").click();
+        await page.getByTestId("username-input").fill(credentials.username);
+        await page.getByTestId("password-input").fill(credentials.password);
+        await page.getByTestId("connect-button").click();
+        await expect(page.getByTestId("disconnect-button")).toBeVisible();
+        await expect(page.getByTestId("connect-form")).not.toBeVisible();
+        await page.getByTestId("open-after-sales").click();
+      }
       const card = page
         .getByTestId(reviewer ? "review-card" : "after-sale-card")
         .filter({ hasText: id });
@@ -230,8 +243,23 @@ async function main() {
     "Unexpected demonstration amount",
   );
   assert.equal(original.currency, "CNY");
-  await buyer("GET", "/api/v1/reviews/after-sales", undefined, 403);
-  await reviewer("GET", "/api/v1/reviews/after-sales");
+  assert.equal(
+    (await buyer("GET", "/api/v1/security/me")).accountType,
+    "BUYER",
+  );
+  assert.equal(
+    (await reviewer("GET", "/api/v1/security/me")).accountType,
+    "MERCHANT_STAFF",
+    "The demo reviewer must be a merchant staff account",
+  );
+  assert(
+    (await reviewer("GET", "/api/v1/merchant/shops")).some(
+      (value) => value.id === 100,
+    ),
+    "The demo reviewer must already be authorized for shop 100",
+  );
+  await buyer("GET", reviews, undefined, 403);
+  await reviewer("GET", reviews);
   console.log(
     "AUTHENTICATION=PASS BUYER_REVIEW_FORBIDDEN=403 INDEPENDENT_REVIEWER=PASS",
   );
@@ -252,14 +280,27 @@ async function main() {
       "Existing demo has a terminal review decision",
     );
   }
-  const message = {
-    message: `\u7533\u8bf7\u552e\u540e ${orderNo} ${reason}`,
-    orderNo,
-  };
+  const applicationPath = `${shop}/orders/${encodeURIComponent(orderNo)}/after-sales`;
+  const application = { reason };
   if (!ticket) {
-    await buyer("POST", `${shop}/chat/messages`, message);
+    const eligibility = await buyer(
+      "GET",
+      `${shop}/orders/${encodeURIComponent(orderNo)}/after-sale-eligibility`,
+    );
+    assert.equal(eligibility.shopId, 100, "Unexpected eligibility shop");
+    assert.equal(eligibility.orderNo, orderNo, "Unexpected eligibility order");
+    assert(
+      eligibility.canSubmit === true &&
+        ["ELIGIBLE", "REQUIRES_REVIEW"].includes(eligibility.status),
+      "The demo is outside the current after-sale rules; no application was submitted",
+    );
+    // Missing historical receipt times follow canSubmit/manual review; never invent a date.
+    await buyer("POST", applicationPath, application);
     ticket = find(await buyer("GET", `${shop}/after-sales`));
-    assert(ticket, "The chat did not create a demonstration application");
+    assert(
+      ticket,
+      "The explicit form did not create a demonstration application",
+    );
     assert.equal(ticket.status, "PENDING_REVIEW");
     assert.equal(ticket.execution, null);
   }
@@ -270,7 +311,12 @@ async function main() {
     reason,
     "Only approve the explicit local acceptance application",
   );
-  await buyer("POST", `${shop}/chat/messages`, message);
+  const duplicate = await buyer("POST", applicationPath, application);
+  assert.equal(
+    duplicate.id,
+    id,
+    "Duplicate form submission must preserve its ID",
+  );
   assert.equal(
     find(await buyer("GET", `${shop}/after-sales`))?.id,
     id,
@@ -280,16 +326,11 @@ async function main() {
     decision: "APPROVE",
     note: "LOCAL_ACCEPTANCE_20261021: approved local simulation only",
   };
-  await buyer(
-    "POST",
-    `/api/v1/reviews/after-sales/${id}/decision`,
-    decision,
-    403,
-  );
+  await buyer("POST", `${reviews}/${id}/decision`, decision, 403);
   if (ticket.status === "PENDING_REVIEW") {
     const approved = await reviewer(
       "POST",
-      `/api/v1/reviews/after-sales/${id}/decision`,
+      `${reviews}/${id}/decision`,
       decision,
     );
     assert.equal(approved.status, "APPROVED");
@@ -313,25 +354,24 @@ async function main() {
     `WORKFLOW=SUCCEEDED ORDER=${orderNo} CASE=${id} AMOUNT=26.80 CNY REFERENCE=${reference}`,
   );
 
-  await reviewer(
+  await reviewer("POST", `${reviews}/${id}/decision`, decision, 409);
+  await reviewer("POST", `${reviews}/${id}/execution/retry`, undefined, 409);
+  const duplicateAfterApproval = await buyer(
     "POST",
-    `/api/v1/reviews/after-sales/${id}/decision`,
-    decision,
-    409,
+    applicationPath,
+    application,
   );
-  await reviewer(
-    "POST",
-    `/api/v1/reviews/after-sales/${id}/execution/retry`,
-    undefined,
-    409,
+  assert.equal(
+    duplicateAfterApproval.id,
+    id,
+    "An approved demo must not create another case",
   );
-  await buyer("POST", `${shop}/chat/messages`, message);
   const again = find(await buyer("GET", `${shop}/after-sales`));
   assert.equal(again.id, id);
   assert.equal(again.execution.reference, reference);
-  const reviewed = (
-    await reviewer("GET", "/api/v1/reviews/after-sales/history")
-  ).find((value) => value.id === id);
+  const reviewed = (await reviewer("GET", `${reviews}/history`)).find(
+    (value) => value.id === id,
+  );
   assert.equal(
     reviewed?.execution?.reference,
     reference,

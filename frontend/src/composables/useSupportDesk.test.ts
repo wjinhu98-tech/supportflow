@@ -13,6 +13,7 @@ import type {
 
 const mocks = vi.hoisted(() => ({
   authenticate: vi.fn(),
+  currentAccount: vi.fn(),
   chat: vi.fn(),
   reply: vi.fn(),
   conversations: vi.fn(),
@@ -34,6 +35,7 @@ vi.mock('../api/client', async (importOriginal) => {
     ...actual,
     ApiClient: class {
       authenticate = mocks.authenticate
+      currentAccount = mocks.currentAccount
       chat = mocks.chat
       conversations = mocks.conversations
       createConversation = mocks.createConversation
@@ -124,7 +126,6 @@ const reviewedTicket: AfterSaleTicket = {
   reviewer: 'reviewer',
   reviewNote: '核对订单后批准',
 }
-const decision = { id: ticket.id, decision: 'APPROVE' as const, note: reviewedTicket.reviewNote! }
 const scopes: ReturnType<typeof effectScope>[] = []
 const createDesk = () => {
   const scope = effectScope()
@@ -144,6 +145,7 @@ beforeEach(() => {
   localStorage.clear()
   sessionStorage.clear()
   mocks.authenticate.mockReset().mockResolvedValue(undefined)
+  mocks.currentAccount.mockReset().mockResolvedValue({ username: 'buyer', accountType: 'BUYER' })
   mocks.chat.mockReset().mockResolvedValue(selection())
   mocks.reply.mockReset().mockResolvedValue(textReply)
   mocks.conversations.mockReset().mockResolvedValue({ conversations: [], nextBeforeId: null })
@@ -725,83 +727,6 @@ describe('useSupportDesk', () => {
     },
   )
 
-  it('retains a successful decision in progress history without triggering execution retry', async () => {
-    const desk = createDesk()
-    await desk.connect('reviewer', 'test')
-    await desk.submitReview(decision)
-    expect(desk.reviewHistoryTickets.value).toEqual([reviewedTicket])
-    expect(mocks.retryExecution).not.toHaveBeenCalled()
-    await desk.loadReviews('history')
-    expect(desk.reviewView.value).toBe('history')
-    expect(mocks.reviewHistory).toHaveBeenCalledTimes(1)
-  })
-
-  it('retries only an explicitly selected retryable failed task and prevents double clicks', async () => {
-    const desk = createDesk()
-    await desk.connect('reviewer', 'test')
-    const failed: AfterSaleTicket = {
-      ...reviewedTicket,
-      execution: {
-        status: 'FAILED',
-        amount: 199.9,
-        currency: 'CNY',
-        attemptCount: 1,
-        maxAttempts: 5,
-        nextAttemptAt: null,
-        completedAt: null,
-        reference: null,
-        lastError: '渠道暂不可用',
-        retryable: true,
-      },
-    }
-    mocks.reviewHistory.mockResolvedValueOnce([failed])
-    await desk.loadReviews('history')
-    expect(mocks.retryExecution).not.toHaveBeenCalled()
-    const pending = deferred<AfterSaleTicket>()
-    mocks.retryExecution.mockReturnValueOnce(pending.promise)
-    const request = desk.retryExecution(failed.id)
-    await desk.retryExecution(failed.id)
-    expect(mocks.retryExecution).toHaveBeenCalledTimes(1)
-    const result: AfterSaleTicket = {
-      ...failed,
-      execution: { ...failed.execution!, status: 'PENDING', retryable: false },
-    }
-    pending.resolve(result)
-    await request
-    expect(desk.reviewHistoryTickets.value).toEqual([result])
-    expect(desk.reviewSubmitting.value).toBe(false)
-    await desk.retryExecution(failed.id)
-    expect(mocks.retryExecution).toHaveBeenCalledTimes(1)
-  })
-
-  it('preserves a failed task on retry errors without replaying it', async () => {
-    const desk = createDesk()
-    await desk.connect('reviewer', 'test')
-    const failed: AfterSaleTicket = {
-      ...reviewedTicket,
-      execution: {
-        status: 'FAILED',
-        amount: 199.9,
-        currency: 'CNY',
-        attemptCount: 1,
-        maxAttempts: 5,
-        nextAttemptAt: null,
-        completedAt: null,
-        reference: null,
-        lastError: '渠道暂不可用',
-        retryable: true,
-      },
-    }
-    mocks.reviewHistory.mockResolvedValueOnce([failed])
-    await desk.loadReviews('history')
-    mocks.retryExecution.mockRejectedValueOnce(new ApiError('状态已变更，请刷新', 409))
-    await desk.retryExecution(failed.id)
-    expect(desk.reviewHistoryTickets.value).toEqual([failed])
-    expect(desk.reviewError.value).toBe('状态已变更，请刷新')
-    expect(mocks.retryExecution).toHaveBeenCalledTimes(1)
-    expect(desk.reviewSubmitting.value).toBe(false)
-  })
-
   it('clearing chat resets a cancelled progress load without keeping its late response', async () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')
@@ -1002,170 +927,26 @@ describe('useSupportDesk', () => {
     expect(desk.connected.value).toBe(false)
   })
 
-  it('loads the review queue and settles its loading state', async () => {
+  it('rejects a merchant identity before loading buyer business data', async () => {
     const desk = createDesk()
-    await desk.connect('reviewer', 'test')
-    const pending = deferred<AfterSaleTicket[]>()
-    mocks.pendingReviews.mockReturnValueOnce(pending.promise)
-    const request = desk.loadReviews()
-    expect(desk.reviewLoading.value).toBe(true)
-    expect(desk.reviewError.value).toBeNull()
-    pending.resolve([ticket])
-    await request
-    expect(mocks.pendingReviews).toHaveBeenCalledWith(expect.any(AbortSignal))
-    expect(desk.reviewTickets.value).toEqual([ticket])
-    expect(desk.reviewLoading.value).toBe(false)
+    mocks.currentAccount.mockResolvedValueOnce({ username: 'staff', accountType: 'MERCHANT_STAFF' })
+    expect(await desk.connect('staff', 'test')).toBe(false)
+    expect(desk.connected.value).toBe(false)
+    expect(desk.loginError.value).toContain('商家管理端')
+    expect(mocks.chat).not.toHaveBeenCalled()
+    expect(mocks.conversations).not.toHaveBeenCalled()
+    expect(desk.username.value).toBe('')
   })
 
-  it('shows review access denial without disconnecting the buyer or retrying', async () => {
+  it('discards a late identity response after disconnect', async () => {
     const desk = createDesk()
-    await desk.connect('buyer', 'test')
-    mocks.pendingReviews.mockRejectedValueOnce(new ApiError('没有审核权限', 403))
-    await desk.loadReviews()
-    expect(desk.reviewError.value).toBe('没有审核权限')
-    expect(desk.reviewLoading.value).toBe(false)
-    expect(desk.reviewTickets.value).toEqual([])
-    expect(desk.connected.value).toBe(true)
-    expect(desk.username.value).toBe('buyer')
-    expect(mocks.pendingReviews).toHaveBeenCalledTimes(1)
-  })
-
-  it('removes only the successfully reviewed item from the current pending queue', async () => {
-    const desk = createDesk()
-    await desk.connect('reviewer', 'test')
-    const otherTicket = {
-      ...ticket,
-      id: 'b5be2bac-e14a-4810-959e-c1b7f3be24e7',
-      orderNo: 'SF10002',
-    }
-    mocks.pendingReviews.mockResolvedValueOnce([ticket, otherTicket])
-    await desk.loadReviews()
-    await desk.submitReview(decision)
-    expect(mocks.decideReview).toHaveBeenCalledWith(
-      ticket.id,
-      'APPROVE',
-      decision.note,
-      expect.any(AbortSignal),
-    )
-    expect(desk.reviewTickets.value).toEqual([otherTicket])
-    expect(desk.reviewSubmitting.value).toBe(false)
-    expect(desk.reviewError.value).toBeNull()
-  })
-
-  it('keeps a failed decision visible without assuming success or automatically resubmitting', async () => {
-    const desk = createDesk()
-    await desk.connect('reviewer', 'test')
-    await desk.loadReviews()
-    mocks.decideReview.mockRejectedValueOnce(new ApiError('服务暂不可用，请刷新后核对状态', 503))
-    await desk.submitReview(decision)
-    expect(desk.reviewTickets.value).toEqual([ticket])
-    expect(desk.reviewError.value).toBe('服务暂不可用，请刷新后核对状态')
-    expect(desk.reviewSubmitting.value).toBe(false)
-    expect(desk.connected.value).toBe(true)
-    expect(mocks.decideReview).toHaveBeenCalledTimes(1)
-  })
-
-  it.each(['logout', 'shop switch'] as const)(
-    'ignores late review-list results after %s without overwriting the new queue',
-    async (transition) => {
-      const desk = createDesk()
-      await desk.connect('reviewer', 'test')
-      const pending = deferred<AfterSaleTicket[]>()
-      mocks.pendingReviews.mockReturnValueOnce(pending.promise)
-      const oldRequest = desk.loadReviews()
-      const oldSignal = mocks.pendingReviews.mock.calls[0]?.[0] as AbortSignal
-      if (transition === 'logout') {
-        desk.disconnect()
-        await desk.connect('new-reviewer', 'test')
-      } else {
-        await desk.changeShop('101')
-      }
-      const currentTicket = { ...ticket, id: 'c5be2bac-e14a-4810-959e-c1b7f3be24e7' }
-      mocks.pendingReviews.mockResolvedValueOnce([currentTicket])
-      await desk.loadReviews()
-      expect(oldSignal.aborted).toBe(true)
-      pending.resolve([ticket])
-      await oldRequest
-      expect(desk.reviewTickets.value).toEqual([currentTicket])
-      expect(desk.reviewLoading.value).toBe(false)
-      expect(desk.reviewError.value).toBeNull()
-    },
-  )
-
-  it.each(['logout', 'shop switch'] as const)(
-    'ignores a late decision after %s instead of removing an item from the new context',
-    async (transition) => {
-      const desk = createDesk()
-      await desk.connect('reviewer', 'test')
-      await desk.loadReviews()
-      const pending = deferred<AfterSaleTicket>()
-      mocks.decideReview.mockReturnValueOnce(pending.promise)
-      const oldRequest = desk.submitReview(decision)
-      const oldSignal = mocks.decideReview.mock.calls[0]?.[3] as AbortSignal
-      if (transition === 'logout') {
-        desk.disconnect()
-        await desk.connect('new-reviewer', 'test')
-      } else {
-        await desk.changeShop('101')
-      }
-      await desk.loadReviews()
-      expect(oldSignal.aborted).toBe(true)
-      pending.resolve(reviewedTicket)
-      await oldRequest
-      expect(desk.reviewTickets.value).toEqual([ticket])
-      expect(desk.reviewSubmitting.value).toBe(false)
-      expect(desk.reviewError.value).toBeNull()
-    },
-  )
-
-  it('clearing chat resets an aborted review load and allows a fresh load to complete', async () => {
-    const desk = createDesk()
-    await desk.connect('reviewer', 'test')
-    const previous = deferred<AfterSaleTicket[]>()
-    const current = deferred<AfterSaleTicket[]>()
-    mocks.pendingReviews.mockReturnValueOnce(previous.promise).mockReturnValueOnce(current.promise)
-    const previousRequest = desk.loadReviews()
-    const previousSignal = mocks.pendingReviews.mock.calls[0]?.[0] as AbortSignal
-    desk.clearConversation()
-    expect(previousSignal.aborted).toBe(true)
-    expect(desk.reviewLoading.value).toBe(false)
-    expect(desk.connected.value).toBe(true)
-    expect(desk.orders.value).toEqual([order])
-    const currentRequest = desk.loadReviews()
-    expect(mocks.pendingReviews).toHaveBeenCalledTimes(2)
-    expect(desk.reviewLoading.value).toBe(true)
-    previous.resolve([ticket])
-    await previousRequest
-    expect(desk.reviewTickets.value).toEqual([])
-    expect(desk.reviewLoading.value).toBe(true)
-    current.resolve([ticket])
-    await currentRequest
-    expect(desk.reviewTickets.value).toEqual([ticket])
-    expect(desk.reviewLoading.value).toBe(false)
-  })
-
-  it('does not clear chat or abort an in-flight business decision', async () => {
-    const desk = createDesk()
-    await desk.connect('reviewer', 'test')
-    await desk.loadReviews()
-    mocks.reply.mockResolvedValueOnce({ ...textReply, type: 'ORDER_DETAILS', orders: [order] })
-    await desk.selectOrder(order)
-    const messages = [...desk.messages.value]
-    const pending = deferred<AfterSaleTicket>()
-    mocks.decideReview.mockReturnValueOnce(pending.promise)
-    const request = desk.submitReview(decision)
-    const signal = mocks.decideReview.mock.calls[0]?.[3] as AbortSignal
-    expect(desk.reviewSubmitting.value).toBe(true)
-    desk.clearConversation()
-    expect(signal.aborted).toBe(false)
-    expect(desk.reviewSubmitting.value).toBe(true)
-    expect(desk.messages.value).toEqual(messages)
-    expect(desk.selectedOrder.value).toEqual(order)
-    await desk.submitReview(decision)
-    expect(mocks.decideReview).toHaveBeenCalledTimes(1)
-    pending.resolve(reviewedTicket)
-    await request
-    expect(desk.reviewTickets.value).toEqual([])
-    expect(desk.reviewSubmitting.value).toBe(false)
+    const pending = deferred<{ username: string; accountType: string }>()
+    mocks.currentAccount.mockReturnValueOnce(pending.promise)
+    const request = desk.connect('buyer', 'test')
+    await Promise.resolve()
+    desk.disconnect()
+    pending.resolve({ username: 'buyer', accountType: 'BUYER' })
+    expect(await request).toBe(false)
+    expect(desk.connected.value).toBe(false)
   })
 })

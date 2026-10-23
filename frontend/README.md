@@ -10,6 +10,8 @@ Vue 3 + TypeScript + Vite 的店铺客服工作台，支持订单咨询、知识
 
 聊天记录使用V8及[会话表运行权限](../config/conversation-runtime-grants.sql)。连接账号后自动恢复当前买家、当前店铺最近创建的会话；可选择历史咨询、开始新会话并分页读取早期消息。新会话不删除旧记录。恢复历史不会重新触发退款表单或业务操作；历史订单卡片是快照，再次咨询才查询最新状态。凭证不持久保存，因此刷新页面后要重新连接账号。详见[会话说明](../docs/conversation-history.md)。
 
+V9起用户与商家采用独立入口：用户端仍是 `/?shopId=100`，商家管理端为 `/merchant`。商家账号必须配置 `MERCHANT_STAFF` 类型并有数据库员工和店铺授权；仅拥有审核权限不代表能查看全平台申请。没有授权时不会自动展示店铺。部署配置和最小权限见[商家管理端说明](../docs/merchant-workspace.md)。
+
 在 PowerShell 中另开终端：
 
 ```powershell
@@ -20,7 +22,7 @@ npm.cmd run dev
 
 浏览器打开 <http://127.0.0.1:5173/?shopId=100>。点击「连接账号」，输入**后端已配置的本地安全账号和原始登录密码**，不是数据库密码、密码哈希或 DeepSeek API Key。本工程不会替你创建用户或向业务库写订单。无订单时会显示空状态。
 
-浏览器地址中的 `shopId` 是当前店铺上下文。接入真正的店铺页面后，应由店铺入口构造这个链接；工作台里的「切换店铺」是现阶段的开发入口，不是要求用户在聊天中告诉模型店铺 ID。当前后端没有店铺目录/商品目录接口，前端不会编造店铺名称、商品、销量或物流轨迹。
+浏览器地址中的 `shopId` 是当前店铺上下文。接入真正的店铺页面后，应由店铺入口构造这个链接；工作台里的「切换店铺」是现阶段的开发入口，不是要求用户在聊天中告诉模型店铺 ID。当前没有面向买家的公开店铺/商品目录接口；商家端的授权店铺元数据来自数据库，前端不会编造店铺名称、商品、销量或物流轨迹。
 
 默认 `/api` 会由 Vite 代理到 `http://127.0.0.1:8080`。如果后端端口不同，在本目录创建被忽略的 `.env.local`，只填服务器代理地址：
 
@@ -56,9 +58,9 @@ API_PROXY_TARGET=http://127.0.0.1:8080
 3. 加载订单通过 `POST /api/v1/shops/{shopId}/chat/messages` 发送 `{"message":"我的订单"}`，继续翻页发送 `我的订单 <原样游标>`。
 4. 咨询通过同一路径发送 `{"message":"咨询此订单","orderNo":"SF10001"}`，同时发送认证头、CSRF 请求头及同源 Cookie。
 5. 页面按响应的 `TEXT / ORDER_DETAILS / ORDER_SELECTION / AFTER_SALE_FORM` 展示文本、订单卡片或退款原因表单。表单指令最多携带一笔已验证归属的订单；空列表时必须先选订单。买家身份和订单归属始终由后端验证，前端不传 `buyerId/customerId`。
-6. 审核页 GET `/api/v1/reviews/after-sales` 读取最多50条待审，POST `/api/v1/reviews/after-sales/{uuid}/decision` 提交人工决定，同样保留 Basic、Cookie 与新 CSRF；不会自动重试决定。
-7. 买家进度读取 GET `/api/v1/shops/{shopId}/after-sales`；管理员进度读取 GET `/api/v1/reviews/after-sales/history`。金额来自后端公开 DTO，前端不能修改退款金额。
-8. 管理员手动重试使用 POST `/api/v1/reviews/after-sales/{uuid}/execution/retry`，不提交金额，保留权限与 CSRF 校验，并与聊天、审核读写共用请求队列。浏览器不会自动重放该请求。
+6. 商家页 GET `/api/v1/merchant/shops/{shopId}/after-sales` 读取当前授权店铺最多50条待审，POST 同前缀 `/{uuid}/decision` 提交人工决定；保留 Basic、Cookie 与新 CSRF，不自动重试决定。
+7. 买家进度读取 GET `/api/v1/shops/{shopId}/after-sales`；商家进度读取 GET `/api/v1/merchant/shops/{shopId}/after-sales/history`。金额来自后端公开 DTO，前端不能修改退款金额。
+8. 商家手动重试使用 POST `/api/v1/merchant/shops/{shopId}/after-sales/{uuid}/execution/retry`，不提交金额，保留店铺授权与 CSRF 校验。浏览器不会自动重放该请求，原全平台 `/api/v1/reviews/**` 已关闭。
 9. 退款表单通过 GET `/api/v1/shops/{shopId}/orders/{orderNo}/after-sale-eligibility` 读取期限核验，确认时 POST 同一订单的 `/after-sales`，请求体仅包含 `reason`。同样使用新 CSRF；确认前不会创建申请，失败也不会自动重放。切店、关闭或断开后，旧检查结果不会覆盖新表单。
 10. 确认收货使用 POST `/api/v1/shops/{shopId}/orders/{orderNo}/receipt-confirmation`，不发送请求体、时间、金额或买家身份。每次显式确认获取新 CSRF，并与其他请求共用队列；服务端要求订单读取及确认收货权限。返回 `order / alreadyConfirmed / eligibility`，页面只展示服务端时间与截止日期，不用浏览器时钟起算；重复请求保留原收货时间，网络失败不自动重放，提示先刷新核实。
 
@@ -102,7 +104,7 @@ npm.cmd run test:e2e   # 真实浏览器 + 独立 HTTP mock，仅公开假数据
 
 浏览器测试默认使用本机 Microsoft Edge，不读取你的浏览器资料或登录态。其他环境可设置 `$env:PLAYWRIGHT_CHANNEL='chromium'` 并先安装 Playwright Chromium。测试会独占 5173 和 mock 18080；请先停止手动启动的 Vite。mock 只由测试命令启动，不是正常开发模式的后备数据。
 
-真实 Java 后端浏览器验证使用 `src/test/java/dev/supportflow/frontend/FrontendTestServer.java`：它只加载测试配置，在一次性 Testcontainers MySQL 中执行 V1–V8 并创建公开假买家/审核账号；强制关闭 DeepSeek。普通应用运行不会加载这个类。测试覆盖会话恢复与分页、历史只读不重放、退款原因表单（期限内、过期、缺少收货时间、确认前不创建）、权限拦截、独立管理员批准/拒绝、管理员和买家查看同一模拟执行凭证，以及知识与跨店物流隔离。`SF10002` 为期限内订单，`PAGE-001` 为过期订单，`SF10001` 缺少收货时间；这些测试日期只写入临时测试容器。
+真实 Java 后端浏览器验证使用 `src/test/java/dev/supportflow/frontend/FrontendTestServer.java`：它只加载测试配置，在一次性 Testcontainers MySQL 中执行 V1–V9 并创建公开假买家/商家账号；强制关闭 DeepSeek。普通应用运行不会加载这个类。测试覆盖会话恢复与分页、历史只读不重放、退款原因表单（期限内、过期、缺少收货时间、确认前不创建）、双入口身份拦截、不同商家店铺隔离、无授权员工、商家批准/拒绝、商家和买家查看同一模拟执行凭证，以及知识与跨店物流隔离。`SF10002` 为期限内订单，`PAGE-001` 为过期订单，`SF10001` 缺少收货时间；这些测试日期只写入临时测试容器。
 
 确认收货浏览器用例使用独立的已发货订单 `SFRECEIPT01`，不会改变其他测试依赖的 `SF10001`。店铺 100 的买家共有 24 笔订单，第一页 20 笔，加载更多后可见新订单。用例验证打开或取消不提交、明确确认后状态和时间同步、后台截止时间恰为收货后 15 天、重复请求不刷新日期，以及刷新页面后仍可读取期限；`PAGE-021` 为已完成但缺少收货时间的历史订单，不提供确认按钮。运行后生成 `test-results/receipt-confirmation.png` 供界面检查。这个用例要求新启动的隔离测试容器，不在日常业务库回退订单状态。
 

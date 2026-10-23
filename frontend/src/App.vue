@@ -22,7 +22,6 @@ import {
   X,
 } from '@lucide/vue'
 import OrderCard from './components/OrderCard.vue'
-import ReviewPanel from './components/ReviewPanel.vue'
 import AfterSalesPanel from './components/AfterSalesPanel.vue'
 import RefundDialog from './components/RefundDialog.vue'
 import ReceiptConfirmationDialog from './components/ReceiptConfirmationDialog.vue'
@@ -63,15 +62,6 @@ const {
   closeRefundForm,
   chooseRefundOrder,
   submitRefund,
-  reviewTickets,
-  reviewHistoryTickets,
-  reviewView,
-  reviewLoading,
-  reviewSubmitting,
-  reviewError,
-  loadReviews,
-  submitReview,
-  retryExecution,
   ownedAfterSales,
   afterSalesLoading,
   afterSalesError,
@@ -112,7 +102,6 @@ const messageInput = ref<HTMLTextAreaElement | null>(null)
 const messageList = ref<HTMLDivElement | null>(null)
 const ordersPanel = ref<HTMLElement | null>(null)
 const compositionActive = ref(false)
-const showReviews = ref(false)
 const showAfterSales = ref(false)
 const loadingEarlier = ref(false)
 let retryAction: (() => Promise<void>) | null = null
@@ -272,18 +261,13 @@ function prefillShippingQuestion() {
   messageInput.value?.focus()
 }
 
-async function openReviews() {
-  showReviews.value = true
-  await loadReviews('pending')
-}
-
 async function openAfterSales() {
   showAfterSales.value = true
   await loadOwnedAfterSales()
 }
 
 function clearLocalConversation() {
-  if (reviewSubmitting.value || refundSubmitting.value || receiptSubmitting.value) return
+  if (refundSubmitting.value || receiptSubmitting.value) return
   clearConversation()
   uiContextVersion++
   messageDraft.value = ''
@@ -301,7 +285,6 @@ watch(
   [connected, shopId],
   ([isConnected, activeShop], [, previousShop]) => {
     if (!isConnected || activeShop !== previousShop) {
-      showReviews.value = false
       showAfterSales.value = false
       uiContextVersion++
       messageDraft.value = ''
@@ -407,15 +390,6 @@ watch(
             @click="openAfterSales"
           >
             售后进度
-          </button>
-          <button
-            v-if="connected"
-            type="button"
-            class="button button-secondary"
-            data-testid="open-reviews"
-            @click="openReviews"
-          >
-            人工审核
           </button>
           <button
             class="shop-switch"
@@ -702,13 +676,7 @@ watch(
               type="button"
               class="clear-chat-button"
               data-testid="new-conversation"
-              :disabled="
-                !connected ||
-                connecting ||
-                reviewSubmitting ||
-                refundSubmitting ||
-                receiptSubmitting
-              "
+              :disabled="!connected || connecting || refundSubmitting || receiptSubmitting"
               title="开始新的咨询，历史记录会保留"
               @click="clearLocalConversation"
             >
@@ -729,7 +697,7 @@ watch(
               id="conversation-select"
               data-testid="conversation-select"
               :value="activeConversation?.id ?? ''"
-              :disabled="reviewSubmitting || refundSubmitting || receiptSubmitting"
+              :disabled="refundSubmitting || receiptSubmitting"
               @change="chooseConversation"
             >
               <option value="">新的咨询</option>
@@ -1550,19 +1518,6 @@ watch(
     @choose="chooseRefundOrder"
     @submit="submitRefund"
     @more="loadOrders(true)"
-  />
-  <ReviewPanel
-    v-if="showReviews && connected"
-    :tickets="reviewTickets"
-    :history-tickets="reviewHistoryTickets"
-    :view="reviewView"
-    :loading="reviewLoading"
-    :submitting="reviewSubmitting"
-    :error="reviewError"
-    @close="showReviews = false"
-    @refresh="loadReviews"
-    @decide="submitReview"
-    @retry="retryExecution"
   />
   <AfterSalesPanel
     v-if="showAfterSales && connected"
