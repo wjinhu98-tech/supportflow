@@ -33,12 +33,44 @@ export interface CsrfResponse {
 }
 
 export interface ChatMessage {
-  id: number
+  id: number | string
   role: 'assistant' | 'user'
   text: string
   createdAt: string
   type?: ChatReplyType
   orders?: Order[]
+  /** Restored order cards are immutable historical snapshots, never current business state. */
+  historical?: boolean
+  pending?: boolean
+}
+
+export interface Conversation {
+  id: string
+  shopId: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ConversationPage {
+  conversations: Conversation[]
+  nextBeforeId: string | null
+}
+
+export interface StoredChatMessage {
+  id: string
+  role: 'USER' | 'ASSISTANT'
+  text: string
+  createdAt: string
+  response: ChatResponse | null
+}
+
+export interface ConversationMessages {
+  conversation: Conversation
+  messages: StoredChatMessage[]
+}
+
+export interface ConversationMessagePage extends ConversationMessages {
+  nextBeforeId: string | null
 }
 
 export interface AfterSaleTicket {

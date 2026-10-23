@@ -159,6 +159,12 @@ public final class FrontendTestServer {
                     + ".support_after_sale_execution TO 'frontend_reader'@'%'");
             statement.execute("GRANT SELECT, INSERT ON " + DATABASE_NAME
                     + ".support_simulated_refund TO 'frontend_reader'@'%'");
+            statement.execute("GRANT SELECT, INSERT, UPDATE ON " + DATABASE_NAME
+                    + ".support_chat_conversation TO 'frontend_reader'@'%'");
+            statement.execute("GRANT SELECT, INSERT, UPDATE ON " + DATABASE_NAME
+                    + ".support_chat_turn TO 'frontend_reader'@'%'");
+            statement.execute("GRANT SELECT, INSERT ON " + DATABASE_NAME
+                    + ".support_chat_message TO 'frontend_reader'@'%'");
             statement.executeUpdate("""
                     INSERT INTO support_order (
                         id, tenant_id, customer_id, buyer_id, order_no, status,

@@ -3,6 +3,11 @@ import type {
   AfterSaleExecution,
   AfterSaleTicket,
   ChatResponse,
+  Conversation,
+  ConversationPage,
+  ConversationMessages,
+  ConversationMessagePage,
+  StoredChatMessage,
   CsrfResponse,
   Order,
   ReceiptConfirmation,
@@ -80,6 +85,54 @@ function isTimestamp(value: unknown): value is string {
     /^\d{4}-\d\d-\d\dT/.test(value) &&
     Number.isFinite(Date.parse(value))
   )
+}
+
+function parseConversation(value: unknown, shopId: string): Conversation {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== 'string' ||
+    !reviewIdPattern.test(value.id) ||
+    value.shopId !== Number(shopId) ||
+    !isTimestamp(value.createdAt) ||
+    !isTimestamp(value.updatedAt)
+  ) {
+    throw new ApiError('无法读取当前店铺的咨询记录，请刷新后核实。', 0, 'INVALID_RESPONSE')
+  }
+  return value as unknown as Conversation
+}
+
+function parseStoredMessages(value: unknown, shopId: string): StoredChatMessage[] {
+  if (!Array.isArray(value) || value.length > 40) {
+    throw new ApiError('咨询记录格式不正确，请刷新后核实。', 0, 'INVALID_RESPONSE')
+  }
+  const ids = new Set<string>()
+  return value.map((message) => {
+    if (
+      !isRecord(message) ||
+      typeof message.id !== 'string' ||
+      !reviewIdPattern.test(message.id) ||
+      ids.has(message.id) ||
+      !['USER', 'ASSISTANT'].includes(String(message.role)) ||
+      typeof message.text !== 'string' ||
+      !isTimestamp(message.createdAt) ||
+      (message.role === 'USER' && message.response !== null)
+    ) {
+      throw new ApiError('咨询记录格式不正确，请刷新后核实。', 0, 'INVALID_RESPONSE')
+    }
+    ids.add(message.id)
+    const response = message.role === 'ASSISTANT' ? parseChat(message.response, shopId) : null
+    if (response && response.reply !== message.text) {
+      throw new ApiError('咨询回复与记录不一致，请刷新后核实。', 0, 'INVALID_RESPONSE')
+    }
+    return { ...message, response } as unknown as StoredChatMessage
+  })
+}
+
+function parseCursor(value: unknown): string | null {
+  if (value !== null && (typeof value !== 'string' || !reviewIdPattern.test(value))) {
+    throw new ApiError('咨询记录分页信息不正确，请刷新后核实。', 0, 'INVALID_RESPONSE')
+  }
+  return value as string | null
 }
 
 function isEligibility(value: unknown): value is AfterSaleEligibility {
@@ -205,6 +258,106 @@ export class ApiClient {
 
   async authenticate(signal?: AbortSignal): Promise<void> {
     await this.getCsrf(signal)
+  }
+
+  async conversations(
+    shopId: string,
+    beforeId: string | null = null,
+    signal?: AbortSignal,
+  ): Promise<ConversationPage> {
+    const path = this.conversationPath(shopId)
+    const suffix = beforeId === null ? '' : `?beforeId=${this.validConversationId(beforeId)}`
+    const data = await this.queued(() => this.request(path + suffix, { method: 'GET' }, signal))
+    if (!isRecord(data) || !Array.isArray(data.conversations) || data.conversations.length > 20)
+      throw new ApiError('咨询列表格式不正确，请刷新后核实。', 0, 'INVALID_RESPONSE')
+    const conversations = data.conversations.map((item) => parseConversation(item, shopId))
+    if (new Set(conversations.map((item) => item.id)).size !== conversations.length)
+      throw new ApiError('咨询列表含有重复记录，请刷新后核实。', 0, 'INVALID_RESPONSE')
+    return { conversations, nextBeforeId: parseCursor(data.nextBeforeId) }
+  }
+
+  async createConversation(shopId: string, signal?: AbortSignal): Promise<Conversation> {
+    const path = this.conversationPath(shopId)
+    return this.queued(async () => {
+      if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
+      const csrf = await this.getCsrf(signal)
+      const data = await this.request(
+        path,
+        { method: 'POST', headers: { [csrf.headerName]: csrf.token } },
+        signal,
+      )
+      return parseConversation(data, shopId)
+    })
+  }
+
+  async conversationMessages(
+    shopId: string,
+    conversationId: string,
+    beforeId: string | null = null,
+    signal?: AbortSignal,
+  ): Promise<ConversationMessagePage> {
+    const path = `${this.conversationPath(shopId)}/${this.validConversationId(conversationId)}/messages`
+    const suffix = beforeId === null ? '' : `?beforeId=${this.validConversationId(beforeId)}`
+    const data = await this.queued(() => this.request(path + suffix, { method: 'GET' }, signal))
+    if (!isRecord(data)) throw new ApiError('无法读取咨询记录。', 0, 'INVALID_RESPONSE')
+    const conversation = parseConversation(data.conversation, shopId)
+    if (conversation.id !== conversationId)
+      throw new ApiError('咨询记录不匹配，请重新选择会话。', 0, 'INVALID_RESPONSE')
+    return {
+      conversation,
+      messages: parseStoredMessages(data.messages, shopId),
+      nextBeforeId: parseCursor(data.nextBeforeId),
+    }
+  }
+
+  async sendConversationMessage(
+    shopId: string,
+    conversationId: string,
+    clientMessageId: string,
+    message: string,
+    orderNo?: string,
+    signal?: AbortSignal,
+  ): Promise<ConversationMessages> {
+    const path = `${this.conversationPath(shopId)}/${this.validConversationId(conversationId)}/messages`
+    this.validConversationId(clientMessageId)
+    if (!message.trim() || message.length > 1000) throw new ApiError('请输入 1–1000 个字符的消息。')
+    if (orderNo !== undefined) this.validateOrderTarget(shopId, orderNo)
+    return this.queued(async () => {
+      if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
+      const csrf = await this.getCsrf(signal)
+      const data = await this.request(
+        path,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', [csrf.headerName]: csrf.token },
+          body: JSON.stringify({ clientMessageId, message, ...(orderNo ? { orderNo } : {}) }),
+        },
+        signal,
+      )
+      if (!isRecord(data))
+        throw new ApiError('回复结果无法确认，请刷新咨询记录核实。', 0, 'INVALID_RESPONSE')
+      const conversation = parseConversation(data.conversation, shopId)
+      const messages = parseStoredMessages(data.messages, shopId)
+      if (
+        conversation.id !== conversationId ||
+        messages.length !== 2 ||
+        messages[0]?.role !== 'USER' ||
+        messages[0].text !== message ||
+        messages[1]?.role !== 'ASSISTANT'
+      )
+        throw new ApiError('回复结果无法确认，请刷新咨询记录核实。', 0, 'INVALID_RESPONSE')
+      return { conversation, messages }
+    })
+  }
+
+  private conversationPath(shopId: string): string {
+    if (!validShopId(shopId)) throw new ApiError('店铺 ID 必须为有效的正整数。')
+    return `/api/v1/shops/${shopId}/chat/conversations`
+  }
+
+  private validConversationId(id: string): string {
+    if (!reviewIdPattern.test(id)) throw new ApiError('咨询记录编号格式不正确。')
+    return id
   }
 
   async confirmReceipt(

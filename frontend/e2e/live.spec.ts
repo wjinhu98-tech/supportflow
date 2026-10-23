@@ -28,14 +28,17 @@ async function chat(page: Page, message: string) {
     const request = response.request()
     return (
       request.method() === 'POST' &&
-      new URL(response.url()).pathname.endsWith('/chat/messages') &&
+      /\/chat\/conversations\/[^/]+\/messages$/.test(new URL(response.url()).pathname) &&
       request.postDataJSON()?.message === message
     )
   })
   await send(page, message)
   const response = await responsePromise
   expect(response.status(), `Chat failed for: ${message}`).toBe(200)
-  const body = (await response.json()) as { reply: string; type: string }
+  const turn = (await response.json()) as {
+    messages: { role: string; response: { reply: string; type: string } | null }[]
+  }
+  const body = turn.messages.find((message) => message.role === 'ASSISTANT')!.response!
   await expect(page.getByTestId('chat-message').last()).toContainText(body.reply)
   return body
 }
@@ -90,6 +93,116 @@ async function openReviewQueue(page: Page, expectedStatus = 200) {
 // These deliberately public test-only accounts must never be copied to local secrets.
 test.beforeEach(async ({ page }) => {
   await page.goto('/?shopId=100')
+})
+
+test('conversation history survives reconnect without reopening refund forms or replaying writes', async ({
+  page,
+}) => {
+  await connect(page, 'frontend-buyer', password)
+  await page.getByTestId('new-conversation').click()
+  const marker = `历史恢复验收-${Date.now()}`
+  await chat(page, marker)
+  const conversationId = await page.getByTestId('conversation-select').inputValue()
+  await selectOrder(page, 'SF10001')
+  await chat(page, '申请退款')
+  await expect(page.getByRole('dialog', { name: '申请退款', exact: true })).toBeVisible()
+  const before = (await ownedTickets(page)).map((ticket) => ticket.id)
+  const writes: string[] = []
+  page.on('request', (request) => {
+    if (
+      request.method() === 'POST' &&
+      /\/chat\/conversations\/[^/]+\/messages$|\/orders\/[^/]+\/(?:after-sales|receipt-confirmation)$/.test(
+        new URL(request.url()).pathname,
+      )
+    )
+      writes.push(request.url())
+  })
+  await page.reload()
+  await expect(page.getByTestId('disconnect-button')).toHaveCount(0)
+  await connect(page, 'frontend-buyer', password)
+  await expect(page.getByTestId('conversation-select')).toHaveValue(conversationId)
+  await expect(page.getByTestId('chat-message').filter({ hasText: marker }).first()).toBeVisible()
+  await expect(page.getByRole('dialog', { name: '申请退款', exact: true })).toHaveCount(0)
+  await expect(page.getByText('历史快照', { exact: false }).first()).toBeVisible()
+  expect(writes).toHaveLength(0)
+  expect((await ownedTickets(page)).map((ticket) => ticket.id)).toEqual(before)
+
+  await switchShop(page, '101')
+  await expect(page.getByTestId('chat-message').filter({ hasText: marker })).toHaveCount(0)
+  const foreignShop = await page.request.get(
+    `/api/v1/shops/101/chat/conversations/${conversationId}/messages`,
+    { headers: buyerHeaders },
+  )
+  expect(foreignShop.status()).toBe(404)
+  await switchShop(page, '100')
+  await expect(page.getByTestId('conversation-select')).toHaveValue(conversationId)
+  expect(writes).toHaveLength(0)
+
+  await page.getByTestId('new-conversation').click()
+  await expect(page.getByTestId('chat-message')).toHaveCount(0)
+  const secondMarker = `新的独立会话-${Date.now()}`
+  await chat(page, secondMarker)
+  await page.getByTestId('conversation-select').selectOption(conversationId)
+  await expect(page.getByTestId('chat-message').filter({ hasText: marker }).first()).toBeVisible()
+  await expect(page.getByTestId('chat-message').filter({ hasText: secondMarker })).toHaveCount(0)
+  await expect(page.getByRole('dialog', { name: '申请退款', exact: true })).toHaveCount(0)
+  await page.screenshot({ path: 'test-results/conversation-history.png', fullPage: true })
+
+  await page.getByTestId('disconnect-button').click()
+  await connect(page, 'frontend-other', password)
+  await expect(page.getByTestId('chat-message').filter({ hasText: marker })).toHaveCount(0)
+  const foreignBuyer = await page.request.get(
+    `/api/v1/shops/100/chat/conversations/${conversationId}/messages`,
+    {
+      headers: {
+        Authorization: `Basic ${Buffer.from(`frontend-other:${password}`).toString('base64')}`,
+      },
+    },
+  )
+  expect(foreignBuyer.status()).toBe(404)
+})
+
+test('real history uses bounded pages for both conversations and older messages', async ({
+  page,
+}) => {
+  test.setTimeout(90_000)
+  await connect(page, 'frontend-buyer', password)
+  async function post(path: string, data: unknown = {}) {
+    const csrfResponse = await page.request.get('/api/v1/security/csrf', { headers: buyerHeaders })
+    expect(csrfResponse.status()).toBe(200)
+    const csrf = (await csrfResponse.json()) as { headerName: string; token: string }
+    const response = await page.request.post(path, {
+      headers: { ...buyerHeaders, [csrf.headerName]: csrf.token },
+      data,
+    })
+    expect(response.ok()).toBe(true)
+    return response.json()
+  }
+  const base = '/api/v1/shops/100/chat/conversations'
+  const { id } = (await post(base)) as { id: string }
+  for (let index = 1; index <= 22; index++) {
+    await post(`${base}/${id}/messages`, {
+      clientMessageId: crypto.randomUUID(),
+      message: `分页消息-${index}`,
+    })
+  }
+  await page.reload()
+  await connect(page, 'frontend-buyer', password)
+  await expect(page.getByTestId('conversation-select')).toHaveValue(id)
+  await expect(page.getByTestId('chat-message')).toHaveCount(40)
+  await page.getByTestId('load-earlier-messages').click()
+  await expect(page.getByTestId('chat-message')).toHaveCount(44)
+  await expect(page.getByTestId('load-earlier-messages')).toHaveCount(0)
+
+  for (let index = 0; index < 21; index++) await post(base)
+  await page.reload()
+  await connect(page, 'frontend-buyer', password)
+  const options = page.getByTestId('conversation-select').locator('option[value]:not([value=""])')
+  await expect(options).toHaveCount(20)
+  await page.getByTestId('load-more-conversations').click()
+  await expect(options).not.toHaveCount(20)
+  await page.getByTestId('conversation-select').selectOption(id)
+  await expect(page.getByTestId('chat-message')).toHaveCount(40)
 })
 
 test('real Spring Security CSRF and real MySQL owned-order selection', async ({ page }) => {

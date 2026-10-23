@@ -2368,3 +2368,39 @@ a {
     flex-wrap: wrap;
   }
 }
+.conversation-history-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border, #eceaf1);
+  font-size: 12px;
+}
+
+.conversation-history-toolbar select {
+  min-width: 0;
+  max-width: 270px;
+  flex: 1;
+  border: 1px solid #e2dfeb;
+  border-radius: 7px;
+  background: white;
+  padding: 7px;
+  color: inherit;
+}
+
+.history-notice,
+.historical-snapshot {
+  padding: 0 24px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #746985;
+}
+
+.historical-snapshot {
+  padding: 0;
+  margin: 4px 0;
+}
+.history-load-earlier {
+  margin: 0 auto 16px;
+}

@@ -35,7 +35,7 @@ Vue 店铺客服页面
 - 物流只读本项目实际录入的事件；无事件明确说暂无录入，不从 SHIPPED 猜运输轨迹。当前无物流录入后台，业务数据需受控导入；仅测试容器预置演示轨迹。
 - 售后创建/审核申请；批准后在同一事务创建持久化任务，后台模拟退款并记录进度、金额和模拟回执。`APPROVED` 是人工结果，`SUCCEEDED` 是模拟结果；不修改订单金额/状态，不调用支付渠道。执行、重试与恢复细节见 [售后执行说明](after-sale-execution.md)。
 - 一笔归属订单仅创建一张售后单。重试或更改原因重复发送会返回原单，不覆盖原原因；当前不支持拒绝后自动创建新单、部分退款、多次售后或撤销审批。
-- 普通聊天不持久保存。售后申请与人工决定存入 MySQL，可跨页面/账号重新查询；没有后台自动通知或自动刷新聊天，买家点击「我的售后」获取最终结果。
+- 店铺会话和成功的一轮双方消息存入 MySQL，按认证买家和当前店铺隔离，连接账号后可分页恢复历史；后台加载订单仍使用不落历史的兼容入口。历史读取不会再次执行模型或业务操作；卡片是当时快照，当前订单状态需要重新查询。详见 [会话记录说明](conversation-history.md)。售后申请与人工决定同样持久化；没有后台自动通知，买家点击「我的售后」获取最终结果。
 
 ## 可直接操作的流程
 
@@ -74,6 +74,8 @@ Vue 店铺客服页面
 | 接口 | 范围与条件 |
 | --- | --- |
 | POST `/api/v1/shops/{shopId}/chat/messages` | 兼容原聊天 DTO，新增编排/知识/物流/售后；认证 + CSRF |
+| GET/POST `/api/v1/shops/{shopId}/chat/conversations` | 本人当前店铺的会话列表/创建；POST需CSRF |
+| GET/POST `/api/v1/shops/{shopId}/chat/conversations/{id}/messages` | 分页只读恢复/带消息UUID提交一轮；POST需CSRF与重复请求校验 |
 | GET `/api/v1/shops/{shopId}/after-sales` | 当前认证买家的当前店铺申请，最近最多50笔 |
 | POST `/api/v1/shops/{shopId}/orders/{orderNo}/receipt-confirmation` | 买家本人已发货订单；`ORDER_READ` + `ORDER_CONFIRM_RECEIPT` + CSRF；原时间幂等保留 |
 | GET `/api/v1/reviews/after-sales` | `AFTER_SALE_REVIEW`，全平台最早50笔待审 |
@@ -85,7 +87,7 @@ Vue 店铺客服页面
 
 根目录 `mvn -o verify`：单元、安全/数据库/迁移/并发集成测试。前端 `npm.cmd run check`、`npm.cmd run build`、`npm.cmd run test:e2e`：类型、状态流、构建、模拟接口浏览器测试。
 
-真正的浏览器/Java/MySQL闭环使用 `FrontendTestServer`。它创建一次性 MySQL、执行 V1–V7、开启模拟执行 Worker、强制关闭 DeepSeek、不加载 `.local`，只监听 `127.0.0.1:18081`。启动方式见 [前端运行说明](../frontend/README.md)。公开测试账号为 `frontend-buyer`、`frontend-other`、`frontend-reviewer`，密码均为源码中的测试专用 `Frontend-Test-Only!`，只能用于该临时实例。不要将它们复制到本地真实配置。
+真正的浏览器/Java/MySQL闭环使用 `FrontendTestServer`。它创建一次性 MySQL、执行 V1–V8、开启模拟执行 Worker、强制关闭 DeepSeek、不加载 `.local`，只监听 `127.0.0.1:18081`。启动方式见 [前端运行说明](../frontend/README.md)。公开测试账号为 `frontend-buyer`、`frontend-other`、`frontend-reviewer`，密码均为源码中的测试专用 `Frontend-Test-Only!`，只能用于该临时实例。不要将它们复制到本地真实配置。
 
 DeepSeek function calling 的协议已由 mock HTTP 单测验证，没有为这轮验收消耗真实模型额度。[DeepSeek 官方工具调用文档](https://api-docs.deepseek.com/guides/tool_calls/)
 

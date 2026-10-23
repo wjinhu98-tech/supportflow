@@ -8,6 +8,8 @@ const expectedAuthorization = `Basic ${Buffer.from(`${MOCK_USERNAME}:${MOCK_PASS
 const slowAuthorization = `Basic ${Buffer.from(`slow-buyer:${MOCK_PASSWORD}`).toString('base64')}`
 const sessions = new Map()
 const requests = []
+const conversations = new Map()
+const pendingReplies = new WeakMap()
 const nextCursor = 7347
 const timestamp = '2026-10-20T01:00:00Z'
 const makeOrder = (shopId, orderNo, overrides = {}) => ({
@@ -30,6 +32,25 @@ const allOrders = [...firstPage, ...finalPage, ...otherShopOrders]
 
 function respond(response, status, value) {
   if (response.destroyed || response.writableEnded) return
+  const pending = pendingReplies.get(response)
+  if (pending && status === 200 && value?.type) {
+    const now = new Date().toISOString()
+    const messages = [
+      {
+        id: randomUUID(),
+        role: 'USER',
+        text: pending.body.message,
+        createdAt: now,
+        response: null,
+      },
+      { id: randomUUID(), role: 'ASSISTANT', text: value.reply, createdAt: now, response: value },
+    ]
+    pending.stored.messages.push(...messages)
+    pending.stored.conversation.updatedAt = now
+    value = { conversation: pending.stored.conversation, messages }
+    pending.stored.results.set(pending.body.clientMessageId, { body: pending.body, value })
+    pendingReplies.delete(response)
+  }
   response.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
@@ -68,6 +89,7 @@ const server = http.createServer(async (request, response) => {
   if (url.pathname === '/__e2e/health') return respond(response, 200, { ready: true })
   if (url.pathname === '/__e2e/reset' && request.method === 'POST') {
     sessions.clear()
+    conversations.clear()
     requests.length = 0
     return respond(response, 200, { reset: true })
   }
@@ -103,7 +125,65 @@ const server = http.createServer(async (request, response) => {
     return respond(response, 200, { headerName: 'X-CSRF-TOKEN', parameterName: '_csrf', token })
   }
 
-  const match = /^\/api\/v1\/shops\/([1-9][0-9]*)\/chat\/messages$/.exec(url.pathname)
+  const conversationMatch =
+    /^\/api\/v1\/shops\/([1-9][0-9]*)\/chat\/conversations(?:\/([a-f0-9-]+)\/messages)?$/.exec(
+      url.pathname,
+    )
+  const owner = request.headers.authorization === slowAuthorization ? 'slow-buyer' : MOCK_USERNAME
+  let stored
+  if (conversationMatch) {
+    const shopId = Number(conversationMatch[1])
+    const id = conversationMatch[2]
+    stored = id ? conversations.get(id) : null
+    if (id && (!stored || stored.owner !== owner || stored.conversation.shopId !== shopId))
+      return failure(response, 404, 'CONVERSATION_NOT_FOUND', '未找到该会话。')
+    if (request.method === 'GET') {
+      record.accepted = true
+      const beforeId = url.searchParams.get('beforeId')
+      if (id) {
+        const end = beforeId
+          ? stored.messages.findIndex((message) => message.id === beforeId)
+          : stored.messages.length
+        if (end < 0) return failure(response, 404, 'CONVERSATION_NOT_FOUND', '未找到该历史记录。')
+        const messages = stored.messages.slice(Math.max(0, end - 40), end)
+        return respond(response, 200, {
+          conversation: stored.conversation,
+          messages,
+          nextBeforeId: end > 40 ? messages[0].id : null,
+        })
+      }
+      const owned = [...conversations.values()]
+        .filter((entry) => entry.owner === owner && entry.conversation.shopId === shopId)
+        .reverse()
+      const start = beforeId
+        ? owned.findIndex((entry) => entry.conversation.id === beforeId) + 1
+        : 0
+      if (beforeId && start === 0)
+        return failure(response, 404, 'CONVERSATION_NOT_FOUND', '未找到该会话。')
+      const page = owned.slice(start, start + 20).map((entry) => entry.conversation)
+      return respond(response, 200, {
+        conversations: page,
+        nextBeforeId: owned.length > start + 20 ? page.at(-1).id : null,
+      })
+    }
+    if (request.method === 'POST' && !id) {
+      if (!hasCsrf)
+        return failure(response, 403, 'ACCESS_DENIED', '请求安全校验未通过，请重新连接账号。')
+      session.token = randomUUID()
+      record.body = await bodyOf(request)
+      const conversation = {
+        id: randomUUID(),
+        shopId,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }
+      conversations.set(conversation.id, { owner, conversation, messages: [], results: new Map() })
+      record.accepted = true
+      return respond(response, 201, conversation)
+    }
+  }
+  const match =
+    /^\/api\/v1\/shops\/([1-9][0-9]*)\/chat\/messages$/.exec(url.pathname) ?? conversationMatch
   if (request.method !== 'POST' || !match)
     return failure(response, 404, 'NOT_FOUND', '接口不存在。')
   if (!hasCsrf)
@@ -122,6 +202,17 @@ const server = http.createServer(async (request, response) => {
     return failure(response, 400, 'INVALID_ARGUMENT', '消息不能为空且不能超过1000字。')
   }
   record.accepted = true
+  if (stored) {
+    if (typeof body.clientMessageId !== 'string')
+      return failure(response, 400, 'INVALID_ARGUMENT', '消息编号不正确。')
+    const previous = stored.results.get(body.clientMessageId)
+    if (previous) {
+      if (JSON.stringify(previous.body) !== JSON.stringify(body))
+        return failure(response, 409, 'CONVERSATION_CONFLICT', '消息内容已发生变化。')
+      return respond(response, 200, previous.value)
+    }
+    pendingReplies.set(response, { stored, body })
+  }
   const shopId = Number(match[1])
   const message = body.message.trim()
   if (message === '触发401')

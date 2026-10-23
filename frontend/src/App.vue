@@ -19,7 +19,6 @@ import {
   ShoppingBag,
   Sparkles,
   Store,
-  Trash2,
   X,
 } from '@lucide/vue'
 import OrderCard from './components/OrderCard.vue'
@@ -32,6 +31,16 @@ import { useSupportDesk } from './composables/useSupportDesk'
 import type { Order } from './types'
 
 const {
+  conversations,
+  activeConversation,
+  nextConversationBeforeId,
+  nextMessageBeforeId,
+  conversationsLoading,
+  historyLoading,
+  conversationError,
+  loadConversations,
+  selectConversation,
+  loadEarlierMessages,
   receiptOpen,
   receiptOrder,
   receiptSubmitting,
@@ -105,11 +114,17 @@ const ordersPanel = ref<HTMLElement | null>(null)
 const compositionActive = ref(false)
 const showReviews = ref(false)
 const showAfterSales = ref(false)
+const loadingEarlier = ref(false)
 let retryAction: (() => Promise<void>) | null = null
 let uiContextVersion = 0
 
 const canSend = computed(
-  () => connected.value && !busy.value && messageDraft.value.trim().length > 0,
+  () =>
+    connected.value &&
+    !busy.value &&
+    !historyLoading.value &&
+    !conversationsLoading.value &&
+    messageDraft.value.trim().length > 0,
 )
 const orderCountLabel = computed(
   () => `${orders.value.length}${nextAfterId.value !== null ? '+' : ''}`,
@@ -175,11 +190,11 @@ async function submitShop() {
 async function submitMessage(text = messageDraft.value) {
   if (!connected.value || busy.value || !text.trim()) return
   const actionContext = uiContextVersion
-  retryAction = () => submitMessage(text)
+  // A timed-out POST may already be committed. A retry reads history rather than replaying it.
+  retryAction = refreshConversation
   if (text === messageDraft.value) messageDraft.value = ''
   await sendMessage(text)
   if (actionContext !== uiContextVersion) return
-  if (error.value && connected.value && !messageDraft.value) messageDraft.value = text
   await nextTick()
   messageInput.value?.focus()
 }
@@ -190,8 +205,40 @@ async function requestOrders(loadMore = false) {
 }
 
 async function consultOrder(order: Order) {
-  retryAction = () => consultOrder(order)
+  retryAction = refreshConversation
   await selectOrder(order)
+}
+
+async function refreshConversation() {
+  dismissError()
+  if (activeConversation.value) await loadEarlierMessages(false)
+  else await loadConversations()
+}
+
+async function chooseConversation(event: Event) {
+  const id = (event.target as HTMLSelectElement).value
+  if (!id) {
+    clearLocalConversation()
+    return
+  }
+  messageDraft.value = ''
+  retryAction = null
+  uiContextVersion++
+  await selectConversation(id)
+}
+
+async function readEarlierMessages() {
+  const element = messageList.value
+  const previousHeight = element?.scrollHeight ?? 0
+  const previousTop = element?.scrollTop ?? 0
+  loadingEarlier.value = true
+  try {
+    await loadEarlierMessages()
+    await nextTick()
+    if (element) element.scrollTop = previousTop + element.scrollHeight - previousHeight
+  } finally {
+    loadingEarlier.value = false
+  }
 }
 
 function retryLastRequest() {
@@ -236,12 +283,15 @@ async function openAfterSales() {
 }
 
 function clearLocalConversation() {
+  if (reviewSubmitting.value || refundSubmitting.value || receiptSubmitting.value) return
   clearConversation()
+  uiContextVersion++
   messageDraft.value = ''
   retryAction = null
 }
 
 watch([() => messages.value.length, busy], async () => {
+  if (loadingEarlier.value) return
   await nextTick()
   const element = messageList.value
   if (element) element.scrollTop = element.scrollHeight
@@ -651,18 +701,72 @@ watch(
             <button
               type="button"
               class="clear-chat-button"
-              data-testid="clear-chat"
-              :disabled="!messages.length || busy"
-              title="仅清空本地对话显示，不删除服务器数据"
+              data-testid="new-conversation"
+              :disabled="
+                !connected ||
+                connecting ||
+                reviewSubmitting ||
+                refundSubmitting ||
+                receiptSubmitting
+              "
+              title="开始新的咨询，历史记录会保留"
               @click="clearLocalConversation"
             >
-              <Trash2
+              <Plus
                 :size="14"
                 aria-hidden="true"
               />
-              <span>清空对话</span>
+              <span>新会话</span>
             </button>
           </header>
+
+          <div
+            v-if="connected"
+            class="conversation-history-toolbar"
+          >
+            <label for="conversation-select">历史咨询</label>
+            <select
+              id="conversation-select"
+              data-testid="conversation-select"
+              :value="activeConversation?.id ?? ''"
+              :disabled="reviewSubmitting || refundSubmitting || receiptSubmitting"
+              @change="chooseConversation"
+            >
+              <option value="">新的咨询</option>
+              <option
+                v-for="conversation in conversations"
+                :key="conversation.id"
+                :value="conversation.id"
+              >
+                {{ formatDate(conversation.createdAt, true) }} · {{ conversation.id.slice(-6) }}
+              </option>
+            </select>
+            <button
+              type="button"
+              class="text-button"
+              :disabled="conversationsLoading || historyLoading || busy"
+              @click="refreshConversation"
+            >
+              {{ conversationsLoading || historyLoading ? '加载中…' : '刷新记录' }}
+            </button>
+            <button
+              v-if="nextConversationBeforeId"
+              type="button"
+              class="text-button"
+              data-testid="load-more-conversations"
+              :disabled="conversationsLoading"
+              @click="loadConversations(true)"
+            >
+              更多会话
+            </button>
+          </div>
+          <p
+            v-if="conversationError"
+            class="history-notice"
+            role="alert"
+          >
+            {{ conversationError }}
+          </p>
 
           <div
             v-if="selectedOrder"
@@ -705,8 +809,25 @@ watch(
             aria-live="polite"
             aria-relevant="additions"
           >
+            <button
+              v-if="nextMessageBeforeId"
+              type="button"
+              class="load-more history-load-earlier"
+              data-testid="load-earlier-messages"
+              :disabled="historyLoading || busy"
+              @click="readEarlierMessages"
+            >
+              {{ historyLoading ? '加载中…' : '加载更早消息' }}
+            </button>
+            <p
+              v-if="historyLoading && !messages.length"
+              class="history-notice"
+              role="status"
+            >
+              正在恢复咨询记录…
+            </p>
             <div
-              v-if="!messages.length"
+              v-if="!messages.length && !historyLoading"
               class="conversation-welcome"
             >
               <div
@@ -784,7 +905,9 @@ watch(
               </button>
             </div>
             <template v-else>
-              <div class="conversation-date"><span>本次咨询</span></div>
+              <div class="conversation-date">
+                <span>{{ activeConversation ? '咨询记录' : '新的咨询' }}</span>
+              </div>
               <article
                 v-for="message in messages"
                 :key="message.id"
@@ -813,11 +936,18 @@ watch(
                     v-if="message.orders?.length"
                     class="message-order-list"
                   >
+                    <p
+                      v-if="message.historical"
+                      class="historical-snapshot"
+                    >
+                      历史快照 · 订单信息以重新查询为准
+                    </p>
                     <OrderCard
                       v-for="order in message.orders"
                       :key="`${order.shopId}-${order.orderNo}`"
                       :order="order"
                       compact
+                      :historical="message.historical"
                       :busy="busy || receiptSubmitting"
                       :selected="
                         selectedOrder?.orderNo === order.orderNo &&
@@ -944,7 +1074,7 @@ watch(
                 ref="messageInput"
                 v-model="messageDraft"
                 data-testid="message-input"
-                :disabled="!connected || busy"
+                :disabled="!connected || busy || historyLoading || conversationsLoading"
                 maxlength="1000"
                 rows="2"
                 :placeholder="
@@ -1000,7 +1130,7 @@ watch(
                 :size="12"
                 aria-hidden="true"
               />
-              <span>订单状态以系统查询为准 · 对话仅保留在当前页面</span>
+              <span>咨询记录按账号和店铺保存 · 刷新后重新连接账号可恢复</span>
             </p>
           </div>
         </section>
@@ -1277,7 +1407,7 @@ watch(
         <p class="modal-intro">
           输入目标店铺 ID，切换本次咨询的店铺。
           <br />
-          切换会清空当前页面的对话与已选订单。
+          切换后载入目标店铺的咨询记录，已选订单将取消。
         </p>
         <label
           class="field-label"
@@ -1380,7 +1510,7 @@ watch(
           </li>
         </ol>
         <p class="help-footnote">
-          当前未实现服务端多轮会话历史。切换店铺、刷新页面或断开连接会清除本地对话。
+          咨询记录按账号和店铺保存。刷新后需重新连接账号；查看历史不会重新提交退款或修改订单。新会话不会删除旧记录。
         </p>
         <button
           class="button button-primary modal-submit"

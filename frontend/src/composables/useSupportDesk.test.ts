@@ -4,6 +4,9 @@ import type {
   AfterSaleEligibility,
   AfterSaleTicket,
   ChatResponse,
+  Conversation,
+  ConversationMessagePage,
+  StoredChatMessage,
   Order,
   ReceiptConfirmation,
 } from '../types'
@@ -11,6 +14,11 @@ import type {
 const mocks = vi.hoisted(() => ({
   authenticate: vi.fn(),
   chat: vi.fn(),
+  reply: vi.fn(),
+  conversations: vi.fn(),
+  createConversation: vi.fn(),
+  conversationMessages: vi.fn(),
+  sendConversationMessage: vi.fn(),
   pendingReviews: vi.fn(),
   decideReview: vi.fn(),
   reviewHistory: vi.fn(),
@@ -27,6 +35,10 @@ vi.mock('../api/client', async (importOriginal) => {
     ApiClient: class {
       authenticate = mocks.authenticate
       chat = mocks.chat
+      conversations = mocks.conversations
+      createConversation = mocks.createConversation
+      conversationMessages = mocks.conversationMessages
+      sendConversationMessage = mocks.sendConversationMessage
       pendingReviews = mocks.pendingReviews
       decideReview = mocks.decideReview
       reviewHistory = mocks.reviewHistory
@@ -58,6 +70,30 @@ const selection = (orders = [order], nextAfterId: number | null = null): ChatRes
   nextAfterId,
 })
 const textReply: ChatResponse = { reply: '你好', type: 'TEXT', orders: [], nextAfterId: null }
+const conversation: Conversation = {
+  id: '00000000-0000-4000-8000-000000000001',
+  shopId: 100,
+  createdAt: '2026-10-23T00:00:00Z',
+  updatedAt: '2026-10-23T00:00:00Z',
+}
+function storedPair(text: string, response: ChatResponse = textReply): StoredChatMessage[] {
+  return [
+    {
+      id: crypto.randomUUID(),
+      role: 'USER',
+      text,
+      createdAt: conversation.createdAt,
+      response: null,
+    },
+    {
+      id: crypto.randomUUID(),
+      role: 'ASSISTANT',
+      text: response.reply,
+      createdAt: conversation.createdAt,
+      response,
+    },
+  ]
+}
 const ticket: AfterSaleTicket = {
   id: 'a5be2bac-e14a-4810-959e-c1b7f3be24e7',
   shopId: 100,
@@ -109,6 +145,29 @@ beforeEach(() => {
   sessionStorage.clear()
   mocks.authenticate.mockReset().mockResolvedValue(undefined)
   mocks.chat.mockReset().mockResolvedValue(selection())
+  mocks.reply.mockReset().mockResolvedValue(textReply)
+  mocks.conversations.mockReset().mockResolvedValue({ conversations: [], nextBeforeId: null })
+  mocks.createConversation
+    .mockReset()
+    .mockImplementation(async (shopId: string) => ({ ...conversation, shopId: Number(shopId) }))
+  mocks.conversationMessages
+    .mockReset()
+    .mockResolvedValue({ conversation, messages: [], nextBeforeId: null })
+  mocks.sendConversationMessage
+    .mockReset()
+    .mockImplementation(
+      async (
+        shopId: string,
+        id: string,
+        _clientMessageId: string,
+        text: string,
+        orderNo?: string,
+        signal?: AbortSignal,
+      ) => ({
+        conversation: { ...conversation, id, shopId: Number(shopId) },
+        messages: storedPair(text, await mocks.reply(shopId, text, orderNo, signal)),
+      }),
+    )
   mocks.pendingReviews.mockReset().mockResolvedValue([ticket])
   mocks.decideReview.mockReset().mockResolvedValue(reviewedTicket)
   mocks.reviewHistory.mockReset().mockResolvedValue([reviewedTicket])
@@ -127,10 +186,240 @@ afterEach(() => {
 })
 
 describe('useSupportDesk', () => {
+  it('restores the latest conversation without re-running an old refund prompt or order action', async () => {
+    const history = storedPair('申请退款', {
+      ...textReply,
+      type: 'AFTER_SALE_FORM',
+      orders: [order],
+    })
+    mocks.conversations.mockResolvedValueOnce({ conversations: [conversation], nextBeforeId: null })
+    mocks.conversationMessages.mockResolvedValueOnce({
+      conversation,
+      messages: history,
+      nextBeforeId: null,
+    })
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    expect(desk.activeConversation.value).toEqual(conversation)
+    expect(desk.messages.value.map((message) => message.id)).toEqual(
+      history.map((message) => message.id),
+    )
+    expect(desk.messages.value.every((message) => message.historical)).toBe(true)
+    expect(desk.selectedOrder.value).toBeNull()
+    expect(desk.refundOpen.value).toBe(false)
+    expect(mocks.afterSaleEligibility).not.toHaveBeenCalled()
+    expect(mocks.applyAfterSale).not.toHaveBeenCalled()
+    expect(mocks.confirmReceipt).not.toHaveBeenCalled()
+    expect(mocks.createConversation).not.toHaveBeenCalled()
+    expect(mocks.sendConversationMessage).not.toHaveBeenCalled()
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('creates a conversation only on first explicit send and preserves history on new conversation', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    desk.clearConversation()
+    expect(mocks.createConversation).not.toHaveBeenCalled()
+    await desk.sendMessage('你好')
+    expect(mocks.createConversation).toHaveBeenCalledOnce()
+    expect(mocks.sendConversationMessage).toHaveBeenCalledWith(
+      '100',
+      conversation.id,
+      expect.stringMatching(/^[\da-f-]{36}$/i),
+      '你好',
+      undefined,
+      expect.any(AbortSignal),
+    )
+    expect(desk.messages.value).toHaveLength(2)
+    expect(desk.messages.value.every((message) => !message.historical && !message.pending)).toBe(
+      true,
+    )
+    desk.clearConversation()
+    expect(desk.messages.value).toEqual([])
+    expect(desk.activeConversation.value).toBeNull()
+    expect(desk.conversations.value).toEqual([conversation])
+    expect(mocks.createConversation).toHaveBeenCalledOnce()
+    await desk.sendMessage('另一段咨询')
+    expect(mocks.createConversation).toHaveBeenCalledTimes(2)
+  })
+
+  it('loads older messages by the returned UUID cursor, prepends in server order, and deduplicates', async () => {
+    const recent = storedPair('新消息')
+    const earlier = storedPair('旧消息')
+    const cursor = recent[0]!.id
+    mocks.conversations.mockResolvedValueOnce({ conversations: [conversation], nextBeforeId: null })
+    const first: ConversationMessagePage = { conversation, messages: recent, nextBeforeId: cursor }
+    mocks.conversationMessages.mockResolvedValueOnce(first).mockResolvedValueOnce({
+      conversation,
+      messages: [...earlier, recent[0]],
+      nextBeforeId: null,
+    })
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    await desk.loadEarlierMessages()
+    expect(mocks.conversationMessages.mock.calls[1]).toEqual([
+      '100',
+      conversation.id,
+      cursor,
+      expect.any(AbortSignal),
+    ])
+    expect(desk.messages.value.map((message) => message.id)).toEqual(
+      [...earlier, ...recent].map((message) => message.id),
+    )
+    await desk.loadEarlierMessages()
+    expect(mocks.conversationMessages).toHaveBeenCalledTimes(2)
+  })
+
+  it('loads more conversations with the returned cursor without reopening the selected history', async () => {
+    const older = { ...conversation, id: '00000000-0000-4000-8000-000000000002' }
+    mocks.conversations
+      .mockResolvedValueOnce({ conversations: [conversation], nextBeforeId: conversation.id })
+      .mockResolvedValueOnce({ conversations: [conversation, older], nextBeforeId: null })
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    await desk.loadConversations(true)
+    expect(mocks.conversations.mock.calls[1]).toEqual([
+      '100',
+      conversation.id,
+      expect.any(AbortSignal),
+    ])
+    expect(desk.conversations.value).toEqual([conversation, older])
+    expect(mocks.conversationMessages).toHaveBeenCalledOnce()
+    await desk.loadConversations(true)
+    expect(mocks.conversations).toHaveBeenCalledTimes(2)
+  })
+
+  it('preserves creation-order pagination when an older conversation receives a new reply', async () => {
+    const older = { ...conversation, id: '00000000-0000-4000-8000-000000000002' }
+    mocks.conversations.mockResolvedValueOnce({
+      conversations: [conversation, older],
+      nextBeforeId: older.id,
+    })
+    mocks.conversationMessages
+      .mockResolvedValueOnce({ conversation, messages: [], nextBeforeId: null })
+      .mockResolvedValueOnce({ conversation: older, messages: [], nextBeforeId: null })
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    await desk.selectConversation(older.id)
+    await desk.sendMessage('继续咨询')
+    expect(desk.conversations.value.map((item) => item.id)).toEqual([conversation.id, older.id])
+    expect(desk.activeConversation.value?.id).toBe(older.id)
+    expect(desk.nextConversationBeforeId.value).toBe(older.id)
+    expect(mocks.createConversation).not.toHaveBeenCalled()
+  })
+
+  it('does not let a late history response replace another selected conversation', async () => {
+    const other = { ...conversation, id: '00000000-0000-4000-8000-000000000002' }
+    mocks.conversations.mockResolvedValueOnce({
+      conversations: [conversation, other],
+      nextBeforeId: null,
+    })
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const pending = deferred<ConversationMessagePage>()
+    mocks.conversationMessages.mockReturnValueOnce(pending.promise).mockResolvedValueOnce({
+      conversation: other,
+      messages: storedPair('另一个会话'),
+      nextBeforeId: null,
+    })
+    const oldLoad = desk.selectConversation(conversation.id)
+    const oldSignal = mocks.conversationMessages.mock.calls[1]?.[3] as AbortSignal
+    await desk.selectConversation(other.id)
+    expect(oldSignal.aborted).toBe(true)
+    pending.resolve({ conversation, messages: storedPair('不应出现'), nextBeforeId: null })
+    await oldLoad
+    expect(desk.activeConversation.value?.id).toBe(other.id)
+    expect(desk.messages.value[0]?.text).toBe('另一个会话')
+    expect(desk.historyLoading.value).toBe(false)
+  })
+
+  it.each(['logout', 'shop switch'] as const)(
+    'discards late conversation-list results after %s',
+    async (transition) => {
+      const desk = createDesk()
+      await desk.connect('buyer', 'test')
+      const pending = deferred<{ conversations: Conversation[]; nextBeforeId: null }>()
+      mocks.conversations.mockReturnValueOnce(pending.promise)
+      const oldLoad = desk.loadConversations()
+      if (transition === 'logout') {
+        desk.disconnect()
+        await desk.connect('another-buyer', 'test')
+      } else await desk.changeShop('101')
+      pending.resolve({ conversations: [conversation], nextBeforeId: null })
+      await oldLoad
+      expect(desk.conversations.value).toEqual([])
+      expect(desk.messages.value).toEqual([])
+      expect(desk.activeConversation.value).toBeNull()
+    },
+  )
+
+  it('keeps historical snapshots immutable when a current order is confirmed', async () => {
+    mocks.conversations.mockResolvedValueOnce({ conversations: [conversation], nextBeforeId: null })
+    mocks.conversationMessages.mockResolvedValueOnce({
+      conversation,
+      messages: storedPair('订单', { ...textReply, type: 'ORDER_DETAILS', orders: [order] }),
+      nextBeforeId: null,
+    })
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    desk.openReceiptConfirmation(order)
+    await desk.confirmReceipt()
+    expect(desk.orders.value[0]?.status).toBe('COMPLETED')
+    expect(desk.messages.value.at(-1)?.orders?.[0]?.status).toBe('SHIPPED')
+  })
+
+  it('rechecks a historical card with the server and never selects it after access is denied', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    mocks.reply.mockRejectedValueOnce(new ApiError('订单不存在', 404))
+    await desk.selectOrder(order)
+    expect(mocks.reply).toHaveBeenCalledWith(
+      '100',
+      '咨询此订单',
+      order.orderNo,
+      expect.any(AbortSignal),
+    )
+    expect(desk.selectedOrder.value).toBeNull()
+  })
+
+  it('does not replay an uncertain message and offers history verification instead', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    mocks.sendConversationMessage.mockRejectedValueOnce(
+      new ApiError('网络错误', 0, 'NETWORK_ERROR'),
+    )
+    await desk.sendMessage('你好')
+    expect(desk.messages.value).toEqual([])
+    expect(desk.error.value).toContain('刷新咨询记录核实')
+    expect(mocks.sendConversationMessage).toHaveBeenCalledOnce()
+    await desk.loadEarlierMessages(false)
+    expect(mocks.sendConversationMessage).toHaveBeenCalledOnce()
+  })
+
+  it('blocks conversation switches while a refund business write has an uncertain outcome', async () => {
+    mocks.conversations.mockResolvedValueOnce({ conversations: [conversation], nextBeforeId: null })
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    await desk.openRefundForm(order)
+    desk.refundReason.value = '商品破损'
+    const pending = deferred<AfterSaleTicket>()
+    mocks.applyAfterSale.mockReturnValueOnce(pending.promise)
+    const submission = desk.submitRefund()
+    const signal = mocks.applyAfterSale.mock.calls[0]?.[3] as AbortSignal
+    desk.clearConversation()
+    await desk.selectConversation(conversation.id)
+    expect(signal.aborted).toBe(false)
+    expect(desk.refundSubmitting.value).toBe(true)
+    expect(mocks.conversationMessages).toHaveBeenCalledOnce()
+    pending.resolve({ ...ticket, eligibility: eligible })
+    await submission
+  })
+
   it('requires explicit confirmation and updates every copy of the confirmed order', async () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')
-    mocks.chat.mockResolvedValueOnce({ ...textReply, type: 'ORDER_DETAILS', orders: [order] })
+    mocks.reply.mockResolvedValueOnce({ ...textReply, type: 'ORDER_DETAILS', orders: [order] })
     await desk.selectOrder(order)
     await desk.openRefundForm(order)
     desk.openReceiptConfirmation(order)
@@ -259,7 +548,7 @@ describe('useSupportDesk', () => {
   it('opens the server selected refund form and checks eligibility without submitting', async () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')
-    mocks.chat.mockResolvedValueOnce({ ...textReply, type: 'AFTER_SALE_FORM', orders: [order] })
+    mocks.reply.mockResolvedValueOnce({ ...textReply, type: 'AFTER_SALE_FORM', orders: [order] })
     await desk.sendMessage('将该订单退款')
     expect(desk.refundOpen.value).toBe(true)
     expect(desk.refundOrder.value).toEqual(order)
@@ -280,7 +569,7 @@ describe('useSupportDesk', () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')
     desk.selectedOrder.value = order
-    mocks.chat.mockResolvedValueOnce({ ...textReply, type: 'AFTER_SALE_FORM', orders: [] })
+    mocks.reply.mockResolvedValueOnce({ ...textReply, type: 'AFTER_SALE_FORM', orders: [] })
     await desk.sendMessage('申请退款')
     expect(desk.refundOrder.value).toBeNull()
     expect(mocks.afterSaleEligibility).not.toHaveBeenCalled()
@@ -574,11 +863,11 @@ describe('useSupportDesk', () => {
   it('selects an order and carries it on subsequent messages', async () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')
-    mocks.chat.mockResolvedValue({ ...textReply, type: 'ORDER_DETAILS', orders: [order] })
+    mocks.reply.mockResolvedValue({ ...textReply, type: 'ORDER_DETAILS', orders: [order] })
     await desk.selectOrder(order)
     await desk.sendMessage('发货了吗')
-    expect(mocks.chat.mock.calls[1]?.slice(0, 3)).toEqual(['100', '咨询此订单', 'SF10001'])
-    expect(mocks.chat.mock.calls[2]?.slice(0, 3)).toEqual(['100', '发货了吗', 'SF10001'])
+    expect(mocks.reply.mock.calls[0]?.slice(0, 3)).toEqual(['100', '咨询此订单', 'SF10001'])
+    expect(mocks.reply.mock.calls[1]?.slice(0, 3)).toEqual(['100', '发货了吗', 'SF10001'])
     expect(desk.messages.value.map((item) => item.role)).toEqual([
       'user',
       'assistant',
@@ -598,7 +887,7 @@ describe('useSupportDesk', () => {
   it('resets order and conversation context when changing shop', async () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')
-    mocks.chat.mockResolvedValueOnce({ ...textReply, type: 'ORDER_DETAILS', orders: [order] })
+    mocks.reply.mockResolvedValueOnce({ ...textReply, type: 'ORDER_DETAILS', orders: [order] })
     await desk.selectOrder(order)
     mocks.chat.mockResolvedValueOnce(selection([{ ...order, shopId: 101 }]))
     await desk.changeShop('101')
@@ -612,7 +901,8 @@ describe('useSupportDesk', () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')
     const pending = deferred<ChatResponse>()
-    mocks.chat.mockReturnValueOnce(pending.promise).mockResolvedValueOnce(selection([]))
+    mocks.reply.mockReturnValueOnce(pending.promise)
+    mocks.chat.mockResolvedValueOnce(selection([]))
     const oldRequest = desk.sendMessage('你好')
     await desk.changeShop('101')
     pending.resolve(textReply)
@@ -638,7 +928,7 @@ describe('useSupportDesk', () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')
     const pending = deferred<ChatResponse>()
-    mocks.chat.mockReturnValueOnce(pending.promise)
+    mocks.reply.mockReturnValueOnce(pending.promise)
     const first = desk.sendMessage('第一条')
     await desk.sendMessage('第二条')
     expect(desk.messages.value).toHaveLength(1)
@@ -650,7 +940,7 @@ describe('useSupportDesk', () => {
   it('clears sensitive UI state on a 401 while preserving a readable login error', async () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')
-    mocks.chat.mockRejectedValueOnce(new ApiError('重新连接', 401))
+    mocks.reply.mockRejectedValueOnce(new ApiError('重新连接', 401))
     await desk.sendMessage('你好')
     expect(desk.connected.value).toBe(false)
     expect(desk.orders.value).toHaveLength(0)
@@ -662,18 +952,18 @@ describe('useSupportDesk', () => {
   it('does not pretend a 403 is successful, and does not resend automatically', async () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')
-    mocks.chat.mockRejectedValueOnce(new ApiError('权限不足', 403))
+    mocks.reply.mockRejectedValueOnce(new ApiError('权限不足', 403))
     await desk.sendMessage('你好')
     expect(desk.error.value).toBe('权限不足')
     expect(desk.connected.value).toBe(true)
-    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(mocks.sendConversationMessage).toHaveBeenCalledTimes(1)
   })
 
   it('clearing local conversation aborts a pending reply and selected context', async () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')
     const pending = deferred<ChatResponse>()
-    mocks.chat.mockReturnValueOnce(pending.promise)
+    mocks.reply.mockReturnValueOnce(pending.promise)
     const oldRequest = desk.selectOrder(order)
     desk.clearConversation()
     pending.resolve(textReply)
@@ -858,7 +1148,7 @@ describe('useSupportDesk', () => {
     const desk = createDesk()
     await desk.connect('reviewer', 'test')
     await desk.loadReviews()
-    mocks.chat.mockResolvedValueOnce({ ...textReply, type: 'ORDER_DETAILS', orders: [order] })
+    mocks.reply.mockResolvedValueOnce({ ...textReply, type: 'ORDER_DETAILS', orders: [order] })
     await desk.selectOrder(order)
     const messages = [...desk.messages.value]
     const pending = deferred<AfterSaleTicket>()

@@ -3,7 +3,13 @@ import { ArrowUpRight, Check } from '@lucide/vue'
 import type { Order } from '../types'
 import { formatAmount, formatDate } from './format'
 
-defineProps<{ order: Order; selected?: boolean; busy?: boolean; compact?: boolean }>()
+defineProps<{
+  order: Order
+  selected?: boolean
+  busy?: boolean
+  compact?: boolean
+  historical?: boolean
+}>()
 defineEmits<{ select: [order: Order]; confirmReceipt: [order: Order] }>()
 </script>
 
@@ -47,7 +53,7 @@ defineEmits<{ select: [order: Order]; confirmReceipt: [order: Order] }>()
           :size="13"
           aria-hidden="true"
         />
-        {{ selected ? '继续咨询' : '咨询此订单' }}
+        {{ historical ? '查询最新订单' : selected ? '继续咨询' : '咨询此订单' }}
         <ArrowUpRight
           v-if="!selected"
           :size="13"
@@ -56,7 +62,7 @@ defineEmits<{ select: [order: Order]; confirmReceipt: [order: Order] }>()
       </button>
     </div>
     <button
-      v-if="order.status === 'SHIPPED' && !order.receivedAt"
+      v-if="!historical && order.status === 'SHIPPED' && !order.receivedAt"
       type="button"
       class="order-consult"
       :disabled="busy"

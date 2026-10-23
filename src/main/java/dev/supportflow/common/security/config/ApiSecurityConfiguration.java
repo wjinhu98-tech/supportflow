@@ -67,6 +67,12 @@ public class ApiSecurityConfiguration {
                         .requestMatchers(
                                 HttpMethod.GET, "/api/v1/security/csrf"
                         ).authenticated()
+                        .requestMatchers(HttpMethod.GET,
+                                "/api/v1/shops/*/chat/conversations",
+                                "/api/v1/shops/*/chat/conversations/*/messages").authenticated()
+                        .requestMatchers(HttpMethod.POST,
+                                "/api/v1/shops/*/chat/conversations",
+                                "/api/v1/shops/*/chat/conversations/*/messages").authenticated()
                         .requestMatchers(
                                 HttpMethod.POST,
                                 "/api/v1/shops/*/chat/messages",

@@ -98,8 +98,12 @@ test('order selection submits the scoped order and retains it for the next quest
   const bodies = (await recorded(request))
     .filter((entry) => entry.method === 'POST')
     .map((entry) => entry.body)
-  expect(bodies).toContainEqual({ message: '咨询此订单', orderNo: 'SF10001' })
-  expect(bodies.at(-1)).toEqual({ message: '现在是什么状态？', orderNo: 'SF10001' })
+  expect(bodies).toContainEqual(
+    expect.objectContaining({ message: '咨询此订单', orderNo: 'SF10001' }),
+  )
+  expect(bodies.at(-1)).toEqual(
+    expect.objectContaining({ message: '现在是什么状态？', orderNo: 'SF10001' }),
+  )
   await page.getByTestId('chat-message').last().scrollIntoViewIfNeeded()
   await page.waitForTimeout(350)
   await page.screenshot({ path: testInfo.outputPath('desktop.png'), fullPage: true })
@@ -134,8 +138,10 @@ test('shop switch clears old context and queries the same order number only in t
   await send(page, '查订单 SF10001')
   await expect(page.getByTestId('chat-message').last()).toContainText('待发货')
   const lastPost = (await recorded(request)).filter((entry) => entry.method === 'POST').at(-1)
-  expect(lastPost?.path).toBe('/api/v1/shops/101/chat/messages')
-  expect(lastPost?.body).toEqual({ message: '查订单 SF10001' })
+  expect(lastPost?.path).toMatch(
+    /^\/api\/v1\/shops\/101\/chat\/conversations\/[a-f0-9-]+\/messages$/,
+  )
+  expect(lastPost?.body).toEqual(expect.objectContaining({ message: '查订单 SF10001' }))
 })
 
 test('empty shop has no invented order cards', async ({ page }) => {
@@ -148,7 +154,7 @@ test('empty shop has no invented order cards', async ({ page }) => {
 for (const [message, expectedMessage] of [
   ['触发404', /未找到当前店铺内属于你的这笔订单/],
   ['触发403', /无权访问，或 CSRF 校验已失效/],
-  ['触发503', /服务暂时不可用/],
+  ['触发503', /消息结果暂时无法确认/],
 ] as const) {
   test(`API error ${message} is visible and keeps the connected account`, async ({ page }) => {
     await connect(page)
@@ -179,22 +185,27 @@ test('canceling pending login does not connect later or retain the password', as
   await expect(page.getByTestId('password-input')).toHaveValue('')
 })
 
-test('a failed message is retried only after an explicit click', async ({ page, request }) => {
+test('a failed message is checked through read-only history instead of replaying its POST', async ({
+  page,
+  request,
+}) => {
   await connect(page)
   await send(page, '触发503')
-  await expect(page.getByRole('alert')).toContainText('服务暂时不可用')
-  await expect(page.getByTestId('message-input')).toHaveValue('触发503')
+  await expect(page.getByRole('alert')).toContainText('消息结果暂时无法确认')
+  await expect(page.getByTestId('message-input')).toHaveValue('')
   let posts = (await recorded(request)).filter((entry) => entry.body?.message === '触发503')
   expect(posts).toHaveLength(1)
   await page.getByRole('button', { name: '重试', exact: true }).click()
   await expect
-    .poll(
-      async () =>
-        (await recorded(request)).filter((entry) => entry.body?.message === '触发503').length,
+    .poll(async () =>
+      (await recorded(request)).some(
+        (entry) =>
+          entry.method === 'GET' && /\/chat\/conversations\/[^/]+\/messages$/.test(entry.path),
+      ),
     )
-    .toBe(2)
-  await expect(page.getByRole('alert')).toContainText('服务暂时不可用')
+    .toBe(true)
   posts = (await recorded(request)).filter((entry) => entry.body?.message === '触发503')
+  expect(posts).toHaveLength(1)
   expect(posts.every((entry) => entry.accepted && entry.hasCsrf && entry.hasSessionCookie)).toBe(
     true,
   )

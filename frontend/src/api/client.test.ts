@@ -57,8 +57,169 @@ const eligibility = {
   checkedAt: '2026-10-21T00:00:00Z',
   windowDays: 15,
 }
+const conversation = {
+  id: '00000000-0000-4000-8000-000000000031',
+  shopId: 100,
+  createdAt: '2026-10-23T00:00:00Z',
+  updatedAt: '2026-10-23T00:00:00Z',
+}
+const userMessage = {
+  id: '00000000-0000-4000-8000-000000000032',
+  role: 'USER',
+  text: '咨询此订单',
+  createdAt: conversation.createdAt,
+  response: null,
+}
+const assistantMessage = {
+  id: '00000000-0000-4000-8000-000000000033',
+  role: 'ASSISTANT',
+  text: reply.reply,
+  createdAt: conversation.createdAt,
+  response: reply,
+}
+const storedPair = { conversation, messages: [userMessage, assistantMessage] }
 
 describe('ApiClient', () => {
+  it('reads conversation lists and history with opaque cursors and no CSRF or business POST', async () => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json({ conversations: [conversation], nextBeforeId: conversation.id }))
+      .mockResolvedValueOnce(json({ ...storedPair, nextBeforeId: userMessage.id }))
+    const api = new ApiClient('buyer', 'test', request)
+    await expect(api.conversations('100', conversation.id)).resolves.toEqual({
+      conversations: [conversation],
+      nextBeforeId: conversation.id,
+    })
+    await expect(api.conversationMessages('100', conversation.id, userMessage.id)).resolves.toEqual(
+      { ...storedPair, nextBeforeId: userMessage.id },
+    )
+    expect(request.mock.calls.map((call) => [call[0], call[1]?.method])).toEqual([
+      [`/api/v1/shops/100/chat/conversations?beforeId=${conversation.id}`, 'GET'],
+      [
+        `/api/v1/shops/100/chat/conversations/${conversation.id}/messages?beforeId=${userMessage.id}`,
+        'GET',
+      ],
+    ])
+    expect(request.mock.calls.every((call) => call[1]?.body === undefined)).toBe(true)
+  })
+
+  it('creates and sends only explicitly, with fresh CSRF, client deduplication ID and selected order', async () => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json(conversation))
+      .mockResolvedValueOnce(json({ ...csrf, token: 'next-token' }))
+      .mockResolvedValueOnce(json(storedPair))
+    const api = new ApiClient('buyer', 'test', request)
+    await expect(api.createConversation('100')).resolves.toEqual(conversation)
+    await expect(
+      api.sendConversationMessage(
+        '100',
+        conversation.id,
+        userMessage.id,
+        userMessage.text,
+        order.orderNo,
+      ),
+    ).resolves.toEqual(storedPair)
+    expect(request.mock.calls[1]?.[1]?.body).toBeUndefined()
+    expect(JSON.parse(String(request.mock.calls[3]?.[1]?.body))).toEqual({
+      clientMessageId: userMessage.id,
+      message: userMessage.text,
+      orderNo: order.orderNo,
+    })
+    expect(request.mock.calls[3]?.[1]?.headers).toMatchObject({ 'X-CSRF-TOKEN': 'next-token' })
+  })
+
+  it.each([
+    { conversations: [{ ...conversation, shopId: 101 }], nextBeforeId: null },
+    { conversations: [{ ...conversation, id: 'bad-id' }], nextBeforeId: null },
+    { conversations: [{ ...conversation, createdAt: 'not-a-date' }], nextBeforeId: null },
+    { conversations: [conversation, conversation], nextBeforeId: null },
+    { conversations: [conversation], nextBeforeId: 2 },
+    {
+      conversations: Array.from({ length: 21 }, (_, index) => ({
+        ...conversation,
+        id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      })),
+      nextBeforeId: null,
+    },
+  ])('rejects invalid or cross-shop conversation lists: %s', async (body) => {
+    const request = fetchMock().mockResolvedValueOnce(json(body))
+    await expect(
+      new ApiClient('buyer', 'test', request).conversations('100'),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+  })
+
+  it.each([
+    { conversation: { ...conversation, shopId: 101 } },
+    { conversation: { ...conversation, id: userMessage.id } },
+    { messages: [{ ...userMessage, response: reply }] },
+    { messages: [{ ...assistantMessage, response: null }] },
+    { messages: [{ ...assistantMessage, text: '不一致' }] },
+    {
+      messages: [
+        { ...assistantMessage, response: { ...reply, orders: [{ ...order, shopId: 101 }] } },
+      ],
+    },
+    { messages: [userMessage, userMessage] },
+    { nextBeforeId: '../invalid' },
+  ])(
+    'rejects malformed or mismatched stored messages without treating them as actions: %s',
+    async (overrides) => {
+      const request = fetchMock().mockResolvedValueOnce(
+        json({ ...storedPair, nextBeforeId: null, ...overrides }),
+      )
+      await expect(
+        new ApiClient('buyer', 'test', request).conversationMessages('100', conversation.id),
+      ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+      expect(request).toHaveBeenCalledOnce()
+    },
+  )
+
+  it.each([
+    { messages: [assistantMessage, userMessage] },
+    { messages: [{ ...userMessage, text: '另一条消息' }, assistantMessage] },
+    { messages: [userMessage] },
+  ])('rejects a mismatched send result rather than assuming success: %s', async (overrides) => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json({ ...storedPair, ...overrides }))
+    await expect(
+      new ApiClient('buyer', 'test', request).sendConversationMessage(
+        '100',
+        conversation.id,
+        userMessage.id,
+        userMessage.text,
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+    expect(request).toHaveBeenCalledTimes(2)
+  })
+
+  it('never replays a timed out or rejected stored-message POST automatically', async () => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockRejectedValueOnce(new TypeError('network'))
+    await expect(
+      new ApiClient('buyer', 'test', request).sendConversationMessage(
+        '100',
+        conversation.id,
+        userMessage.id,
+        userMessage.text,
+      ),
+    ).rejects.toMatchObject({ code: 'NETWORK_ERROR' })
+    expect(request).toHaveBeenCalledTimes(2)
+  })
+
+  it('validates conversation IDs and cursors before making requests', async () => {
+    const request = fetchMock()
+    const api = new ApiClient('buyer', 'test', request)
+    await expect(api.conversations('0')).rejects.toBeInstanceOf(ApiError)
+    await expect(api.conversations('100', '../../')).rejects.toBeInstanceOf(ApiError)
+    await expect(api.conversationMessages('100', '../../')).rejects.toBeInstanceOf(ApiError)
+    await expect(
+      api.sendConversationMessage('100', conversation.id, 'bad', '你好'),
+    ).rejects.toBeInstanceOf(ApiError)
+    expect(request).not.toHaveBeenCalled()
+  })
+
   it('normalizes a legacy order without receipt timestamp to null', async () => {
     const request = fetchMock()
       .mockResolvedValueOnce(json(csrf))
