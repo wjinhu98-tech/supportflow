@@ -5,6 +5,7 @@ import dev.supportflow.chat.application.ModelUnavailableException;
 import dev.supportflow.common.api.error.ErrorCode;
 import dev.supportflow.common.api.response.ApiErrorResponse;
 import dev.supportflow.order.application.exception.OrderNotFoundException;
+import dev.supportflow.order.application.exception.OrderReceiptConflictException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.MessageSourceResolvable;
@@ -27,6 +28,13 @@ import java.util.Objects;
  */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    @ExceptionHandler(OrderReceiptConflictException.class)
+    public ResponseEntity<ApiErrorResponse> handleOrderReceiptConflict() {
+        ErrorCode code = ErrorCode.ORDER_RECEIPT_CONFLICT;
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(
+                new ApiErrorResponse(code, code.getDefaultMessage()));
+    }
 
     @ExceptionHandler(dev.supportflow.assistant.aftersale.AssistantBusinessException.class)
     public ResponseEntity<ApiErrorResponse> handleAssistantBusiness(

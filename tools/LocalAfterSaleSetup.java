@@ -30,8 +30,8 @@ public final class LocalAfterSaleSetup {
             + "?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true&connectTimeout=5000&socketTimeout=15000";
 
     public static void main(String[] args) {
-        if (args.length != 1 || !java.util.Set.of("inspect", "migrate", "configure-reviewer", "verify-demo").contains(args[0])) {
-            System.err.println("Usage: LocalAfterSaleSetup.java inspect|migrate|configure-reviewer|verify-demo");
+        if (args.length != 1 || !java.util.Set.of("inspect", "migrate", "configure-reviewer", "configure-receipt-buyer", "verify-demo").contains(args[0])) {
+            System.err.println("Usage: LocalAfterSaleSetup.java inspect|migrate|configure-reviewer|configure-receipt-buyer|verify-demo");
             System.exit(2);
         }
         try {
@@ -40,6 +40,10 @@ public final class LocalAfterSaleSetup {
             }
             if (args[0].equals("configure-reviewer")) {
                 configureReviewer();
+                return;
+            }
+            if (args[0].equals("configure-receipt-buyer")) {
+                configureReceiptBuyer();
                 return;
             }
             Properties secrets = yaml(".local/secrets.yml");
@@ -218,6 +222,63 @@ public final class LocalAfterSaleSetup {
         System.out.println("EXISTING_BUYER_ACCOUNTS=PRESERVED");
         System.out.println("REVIEWER_LOGIN_FILE=" + ROOT.resolve(loginPath));
         System.out.println("REVIEWER_SECRET_CONFIG=" + ROOT.resolve(configPath));
+    }
+
+    /** Update only the explicitly configured buyer's permission, preserving every account and credential. */
+    private static void configureReceiptBuyer() throws Exception {
+        String relative = ".local/reviewer-security.yml";
+        Path destination = ROOT.resolve(relative);
+        var existing = accounts().accounts();
+        var permission = dev.supportflow.common.security.model.SecurityPermission.valueOf("ORDER_CONFIRM_RECEIPT");
+        var buyer = existing.stream().filter(account -> account.username().equals("customer-200")
+                && account.identity().buyerId() == 200).findFirst().orElseThrow();
+        if (buyer.permissions().contains(permission)) {
+            System.out.println("RECEIPT_BUYER_PERMISSION=ALREADY_CONFIGURED");
+            return;
+        }
+        Process ignored = new ProcessBuilder("git", "check-ignore", "-q", "--", relative)
+                .directory(ROOT.toFile()).redirectErrorStream(true).start();
+        ignored.getInputStream().readAllBytes();
+        if (ignored.waitFor() != 0 || !Files.isRegularFile(destination)) {
+            throw new IllegalStateException("Expected ignored local account snapshot is missing");
+        }
+        String previous = Files.readString(destination, StandardCharsets.UTF_8);
+        StringBuilder contents = new StringBuilder("# Local-only complete account snapshot; do not commit.\nsupportflow:\n  security:\n    local:\n      accounts:\n");
+        for (var account : existing) {
+            contents.append("        - username: ").append(quoted(account.username())).append('\n')
+                    .append("          password-hash: ").append(quoted(account.passwordHash())).append('\n')
+                    .append("          identity:\n            buyer-id: ").append(account.identity().buyerId()).append('\n')
+                    .append("          permissions:\n");
+            for (var authority : account.permissions()) contents.append("            - ").append(authority.name()).append('\n');
+            if (account.username().equals(buyer.username())) contents.append("            - ").append(permission.name()).append('\n');
+        }
+        StringBuilder patch = new StringBuilder("*** Begin Patch\n*** Update File: " + relative + "\n@@\n");
+        previous.lines().forEach(line -> patch.append('-').append(line).append('\n'));
+        contents.toString().lines().forEach(line -> patch.append('+').append(line).append('\n'));
+        patch.append("*** End Patch\n");
+        String executable = System.getenv("SUPPORTFLOW_APPLY_PATCH");
+        if (executable == null || !Files.isRegularFile(Path.of(executable))) {
+            throw new IllegalStateException("The apply_patch executable is required for local configuration");
+        }
+        Process edit = new ProcessBuilder(executable, "--codex-run-as-apply-patch", patch.toString())
+                .directory(ROOT.toFile()).redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .redirectError(ProcessBuilder.Redirect.DISCARD).start();
+        if (!edit.waitFor(15, TimeUnit.SECONDS) || edit.exitValue() != 0) {
+            edit.destroyForcibly();
+            throw new IllegalStateException("Local permission patch failed; no credentials are logged");
+        }
+        var configured = accounts().accounts();
+        if (configured.size() != existing.size()) throw new IllegalStateException("Account count changed");
+        for (var account : existing) {
+            var current = configured.stream().filter(value -> value.username().equals(account.username())).findFirst().orElseThrow();
+            var expected = new java.util.HashSet<>(account.permissions());
+            if (account.username().equals(buyer.username())) expected.add(permission);
+            if (!current.passwordHash().equals(account.passwordHash()) || !current.identity().equals(account.identity())
+                    || !new java.util.HashSet<>(current.permissions()).equals(expected)) {
+                throw new IllegalStateException("Unexpected account change");
+            }
+        }
+        System.out.println("RECEIPT_BUYER_PERMISSION=CONFIGURED ACCOUNT=customer-200 CREDENTIALS_AND_OTHER_ACCOUNTS=PRESERVED");
     }
 
     private static String quoted(String value) {

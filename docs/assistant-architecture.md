@@ -67,7 +67,7 @@ Vue 店铺客服页面
 - 服务端根据已授权订单生成唯一幂等摘要。申请用持排他键锁的 UPSERT 串行化，再比较本次 UUID 判断是否首次创建，避免多路重复键共享锁升级死锁；不会用 SQL 受影响行数猜首次创建。
 - 订单共享锁、售后单与审计写入都处于同一事务。审核用 `version + PENDING_REVIEW` 条件更新，重复或竞争审批返回 409，不写第二份审核审计。
 - 申请提交与审核动作写入独立审计表；不记录密码、API Key 或模型原始响应。
-- 不提供订单写权限；真实支付、真实快递、部分退款、多租户员工权限、向量检索/私有文档 ACL、后台通知不在这个学习版闭环内，不应在面试中宣称已经实现。
+- 售后流程只读取订单；独立的买家确认收货命令仅更新订单状态与收货时间，并写入操作记录。真实支付、真实快递、部分退款、多租户员工权限、向量检索/私有文档 ACL、后台通知尚未实现。确认收货的权限与幂等边界见[确认收货说明](order-receipt-confirmation.md)。
 
 ## 新增 HTTP 接口
 
@@ -75,6 +75,7 @@ Vue 店铺客服页面
 | --- | --- |
 | POST `/api/v1/shops/{shopId}/chat/messages` | 兼容原聊天 DTO，新增编排/知识/物流/售后；认证 + CSRF |
 | GET `/api/v1/shops/{shopId}/after-sales` | 当前认证买家的当前店铺申请，最近最多50笔 |
+| POST `/api/v1/shops/{shopId}/orders/{orderNo}/receipt-confirmation` | 买家本人已发货订单；`ORDER_READ` + `ORDER_CONFIRM_RECEIPT` + CSRF；原时间幂等保留 |
 | GET `/api/v1/reviews/after-sales` | `AFTER_SALE_REVIEW`，全平台最早50笔待审 |
 | POST `/api/v1/reviews/after-sales/{uuid}/decision` | 人工 `{decision: APPROVE或REJECT, note: 审核意见}`；独立权限 + CSRF + 禁止自审 |
 | GET `/api/v1/reviews/after-sales/history` | 管理员最近50条审批与处理记录 |
@@ -84,7 +85,7 @@ Vue 店铺客服页面
 
 根目录 `mvn -o verify`：单元、安全/数据库/迁移/并发集成测试。前端 `npm.cmd run check`、`npm.cmd run build`、`npm.cmd run test:e2e`：类型、状态流、构建、模拟接口浏览器测试。
 
-真正的浏览器/Java/MySQL闭环使用 `FrontendTestServer`。它创建一次性 MySQL、执行 V1–V6、开启模拟执行 Worker、强制关闭 DeepSeek、不加载 `.local`，只监听 `127.0.0.1:18081`。启动方式见 [前端运行说明](../frontend/README.md)。公开测试账号为 `frontend-buyer`、`frontend-other`、`frontend-reviewer`，密码均为源码中的测试专用 `Frontend-Test-Only!`，只能用于该临时实例。不要将它们复制到本地真实配置。
+真正的浏览器/Java/MySQL闭环使用 `FrontendTestServer`。它创建一次性 MySQL、执行 V1–V7、开启模拟执行 Worker、强制关闭 DeepSeek、不加载 `.local`，只监听 `127.0.0.1:18081`。启动方式见 [前端运行说明](../frontend/README.md)。公开测试账号为 `frontend-buyer`、`frontend-other`、`frontend-reviewer`，密码均为源码中的测试专用 `Frontend-Test-Only!`，只能用于该临时实例。不要将它们复制到本地真实配置。
 
 DeepSeek function calling 的协议已由 mock HTTP 单测验证，没有为这轮验收消耗真实模型额度。[DeepSeek 官方工具调用文档](https://api-docs.deepseek.com/guides/tool_calls/)
 

@@ -113,7 +113,7 @@ public final class FrontendTestServer {
     private static void addAccount(
             List<String> settings, int index, String username, long buyerId, String passwordHash
     ) {
-        addAccount(settings, index, username, buyerId, passwordHash, "ORDER_READ");
+        addAccount(settings, index, username, buyerId, passwordHash, "ORDER_READ,ORDER_CONFIRM_RECEIPT");
     }
 
     private static void addAccount(List<String> settings, int index, String username, long buyerId,
@@ -145,6 +145,10 @@ public final class FrontendTestServer {
             createReader.execute();
             statement.execute("GRANT SELECT ON " + DATABASE_NAME
                     + ".support_order TO 'frontend_reader'@'%'");
+            statement.execute("GRANT UPDATE (status, received_at) ON " + DATABASE_NAME
+                    + ".support_order TO 'frontend_reader'@'%'");
+            statement.execute("GRANT SELECT, INSERT ON " + DATABASE_NAME
+                    + ".support_order_receipt_audit TO 'frontend_reader'@'%'");
             statement.execute("GRANT SELECT ON " + DATABASE_NAME
                     + ".support_shipment_event TO 'frontend_reader'@'%'");
             statement.execute("GRANT SELECT, INSERT, UPDATE ON " + DATABASE_NAME
@@ -197,6 +201,15 @@ public final class FrontendTestServer {
             statement.executeUpdate("""
                     UPDATE support_order SET status='COMPLETED', received_at=UTC_TIMESTAMP(3)-INTERVAL 16 DAY
                     WHERE id=1101 AND tenant_id=100 AND buyer_id=200 AND order_no='PAGE-001'
+                    """);
+            statement.executeUpdate("""
+                    INSERT INTO support_order
+                      (id, tenant_id, customer_id, buyer_id, order_no, status, total_amount, currency)
+                    VALUES (1200, 100, 200, 200, 'SFRECEIPT01', 'SHIPPED', 59.90, 'CNY')
+                    """);
+            statement.executeUpdate("""
+                    UPDATE support_order SET status='COMPLETED'
+                    WHERE id=1121 AND tenant_id=100 AND buyer_id=200 AND order_no='PAGE-021'
                     """);
         }
     }

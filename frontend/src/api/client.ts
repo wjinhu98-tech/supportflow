@@ -5,6 +5,7 @@ import type {
   ChatResponse,
   CsrfResponse,
   Order,
+  ReceiptConfirmation,
 } from '../types'
 
 export class ApiError extends Error {
@@ -37,7 +38,8 @@ function validOrder(value: unknown): value is Order {
     ) &&
     typeof value.totalAmount === 'number' &&
     Number.isFinite(value.totalAmount) &&
-    value.totalAmount >= 0
+    value.totalAmount >= 0 &&
+    (value.receivedAt === undefined || value.receivedAt === null || isTimestamp(value.receivedAt))
   )
 }
 
@@ -59,7 +61,11 @@ function parseChat(value: unknown, shopId: string): ChatResponse {
   ) {
     throw new ApiError('服务返回的数据格式不正确，请稍后重试。', 0, 'INVALID_RESPONSE')
   }
-  return value as unknown as ChatResponse
+  const response = value as unknown as ChatResponse
+  return {
+    ...response,
+    orders: response.orders.map((order) => ({ ...order, receivedAt: order.receivedAt ?? null })),
+  }
 }
 
 const reviewIdPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
@@ -199,6 +205,40 @@ export class ApiClient {
 
   async authenticate(signal?: AbortSignal): Promise<void> {
     await this.getCsrf(signal)
+  }
+
+  async confirmReceipt(
+    shopId: string,
+    orderNo: string,
+    signal?: AbortSignal,
+  ): Promise<ReceiptConfirmation> {
+    this.validateOrderTarget(shopId, orderNo)
+    return this.queued(async () => {
+      if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
+      const csrf = await this.getCsrf(signal)
+      const data = await this.request(
+        `/api/v1/shops/${shopId}/orders/${encodeURIComponent(orderNo)}/receipt-confirmation`,
+        { method: 'POST', headers: { [csrf.headerName]: csrf.token } },
+        signal,
+      )
+      if (
+        !isRecord(data) ||
+        !validOrder(data.order) ||
+        data.order.shopId !== Number(shopId) ||
+        data.order.orderNo !== orderNo ||
+        data.order.status !== 'COMPLETED' ||
+        !isTimestamp(data.order.receivedAt) ||
+        typeof data.alreadyConfirmed !== 'boolean' ||
+        !isEligibility(data.eligibility) ||
+        data.eligibility.shopId !== Number(shopId) ||
+        data.eligibility.orderNo !== orderNo ||
+        data.eligibility.receivedAt !== data.order.receivedAt ||
+        !isTimestamp(data.eligibility.deadlineAt)
+      ) {
+        throw new ApiError('无法确认收货结果，请先刷新订单核实状态。', 0, 'INVALID_RESPONSE')
+      }
+      return data as unknown as ReceiptConfirmation
+    })
   }
 
   async afterSaleEligibility(
@@ -430,7 +470,7 @@ export class ApiClient {
         const code = isRecord(data) && typeof data.code === 'string' ? data.code : 'HTTP_ERROR'
         throw new ApiError(
           (response.status === 409 &&
-          code === 'BUSINESS_RULE_VIOLATION' &&
+          ['BUSINESS_RULE_VIOLATION', 'ORDER_RECEIPT_CONFLICT'].includes(code) &&
           serverMessage &&
           serverMessage.length <= 500
             ? serverMessage

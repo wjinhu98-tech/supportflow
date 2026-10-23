@@ -8,6 +8,13 @@ export interface Order {
   currency: string
   createdAt: string
   updatedAt: string
+  receivedAt?: string | null
+}
+
+export interface ReceiptConfirmation {
+  order: Order & { receivedAt: string; status: 'COMPLETED' }
+  alreadyConfirmed: boolean
+  eligibility: AfterSaleEligibility
 }
 
 export type ChatReplyType = 'TEXT' | 'ORDER_DETAILS' | 'ORDER_SELECTION' | 'AFTER_SALE_FORM'

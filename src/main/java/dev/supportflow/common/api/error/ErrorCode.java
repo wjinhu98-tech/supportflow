@@ -7,6 +7,8 @@ import com.fasterxml.jackson.annotation.JsonValue;
  */
 public enum ErrorCode {
 
+    ORDER_RECEIPT_CONFLICT("ORDER_RECEIPT_CONFLICT", "当前订单状态不支持确认收货，请刷新后重试；历史订单缺少收货时间时，请联系客服核实。"),
+
     INVALID_ARGUMENT("INVALID_ARGUMENT", "请求参数不合法"),
     ORDER_NOT_FOUND("ORDER_NOT_FOUND", "订单不存在或无权访问"),
     AUTHENTICATION_REQUIRED("AUTHENTICATION_REQUIRED", "请先完成身份认证"),

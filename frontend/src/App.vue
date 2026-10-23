@@ -26,11 +26,23 @@ import OrderCard from './components/OrderCard.vue'
 import ReviewPanel from './components/ReviewPanel.vue'
 import AfterSalesPanel from './components/AfterSalesPanel.vue'
 import RefundDialog from './components/RefundDialog.vue'
+import ReceiptConfirmationDialog from './components/ReceiptConfirmationDialog.vue'
 import { formatAmount, formatDate, formatTime } from './components/format'
 import { useSupportDesk } from './composables/useSupportDesk'
 import type { Order } from './types'
 
 const {
+  receiptOpen,
+  receiptOrder,
+  receiptSubmitting,
+  receiptError,
+  receiptResult,
+  selectedEligibility,
+  selectedEligibilityLoading,
+  selectedEligibilityError,
+  openReceiptConfirmation,
+  closeReceiptConfirmation,
+  confirmReceipt,
   refundOpen,
   refundOrder,
   refundReason,
@@ -570,8 +582,9 @@ watch(
                 :selected="
                   selectedOrder?.orderNo === order.orderNo && selectedOrder?.shopId === order.shopId
                 "
-                :busy="busy"
+                :busy="busy || receiptSubmitting"
                 @select="consultOrder"
+                @confirm-receipt="openReceiptConfirmation"
               />
               <button
                 v-if="nextAfterId !== null"
@@ -805,12 +818,13 @@ watch(
                       :key="`${order.shopId}-${order.orderNo}`"
                       :order="order"
                       compact
-                      :busy="busy"
+                      :busy="busy || receiptSubmitting"
                       :selected="
                         selectedOrder?.orderNo === order.orderNo &&
                         selectedOrder?.shopId === order.shopId
                       "
                       @select="consultOrder"
+                      @confirm-receipt="openReceiptConfirmation"
                     />
                   </div>
                 </div>
@@ -1048,7 +1062,40 @@ watch(
               <dt>币种</dt>
               <dd>{{ selectedOrder.currency }}</dd>
             </div>
+            <div v-if="selectedOrder.receivedAt">
+              <dt>确认收货时间</dt>
+              <dd data-testid="order-received-at">
+                {{ formatDate(selectedOrder.receivedAt, true) }}
+              </dd>
+            </div>
+            <div v-if="selectedEligibility?.deadlineAt">
+              <dt>售后申请截止</dt>
+              <dd data-testid="order-after-sale-deadline">
+                {{ formatDate(selectedEligibility.deadlineAt, true) }}
+              </dd>
+            </div>
           </dl>
+          <p
+            v-if="selectedEligibilityLoading"
+            role="status"
+          >
+            正在读取售后截止时间…
+          </p>
+          <p
+            v-if="selectedEligibilityError"
+            role="alert"
+          >
+            {{ selectedEligibilityError }}
+          </p>
+          <button
+            v-if="selectedOrder.status === 'SHIPPED' && !selectedOrder.receivedAt"
+            class="button button-primary detail-query"
+            type="button"
+            :disabled="busy || ordersBusy || receiptSubmitting"
+            @click="openReceiptConfirmation(selectedOrder)"
+          >
+            确认收货
+          </button>
           <div class="detail-note">
             <Clock3
               :size="16"
@@ -1326,7 +1373,9 @@ watch(
             <span>03</span>
             <div>
               <strong>选择订单，开始咨询</strong>
-              <p>点击「咨询此订单」，或发送订单号与问题。页面只做查询，不修改订单。</p>
+              <p>
+                点击「咨询此订单」，或发送订单号与问题。收到商品后可确认收货；申请退款需选择原因并确认提交。
+              </p>
             </div>
           </li>
         </ol>
@@ -1347,6 +1396,15 @@ watch(
       </div>
     </dialog>
   </div>
+  <ReceiptConfirmationDialog
+    v-if="receiptOpen && receiptOrder && connected"
+    :order="receiptOrder"
+    :submitting="receiptSubmitting"
+    :error="receiptError"
+    :result="receiptResult"
+    @close="closeReceiptConfirmation"
+    @confirm="confirmReceipt"
+  />
   <RefundDialog
     v-if="refundOpen && connected"
     v-model:reason="refundReason"

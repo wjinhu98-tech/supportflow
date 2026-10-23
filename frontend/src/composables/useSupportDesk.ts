@@ -1,6 +1,12 @@
-import { onScopeDispose, ref } from 'vue'
+import { onScopeDispose, ref, watch } from 'vue'
 import { ApiClient, ApiError, validShopId } from '../api/client'
-import type { AfterSaleEligibility, AfterSaleTicket, ChatMessage, Order } from '../types'
+import type {
+  AfterSaleEligibility,
+  AfterSaleTicket,
+  ChatMessage,
+  Order,
+  ReceiptConfirmation,
+} from '../types'
 
 /** UI orchestrator: events -> API DTOs -> reactive state. No backend ownership decisions here. */
 export function useSupportDesk() {
@@ -35,6 +41,17 @@ export function useSupportDesk() {
   const refundLoading = ref(false)
   const refundSubmitting = ref(false)
   const refundError = ref<string | null>(null)
+  const receiptOpen = ref(false)
+  const receiptOrder = ref<Order | null>(null)
+  const receiptSubmitting = ref(false)
+  const receiptError = ref<string | null>(null)
+  const receiptResult = ref<ReceiptConfirmation | null>(null)
+  const selectedEligibility = ref<AfterSaleEligibility | null>(null)
+  const selectedEligibilityLoading = ref(false)
+  const selectedEligibilityError = ref<string | null>(null)
+  let receiptRequest = new AbortController()
+  let receiptVersion = 0
+  let detailRequest = new AbortController()
   let refundRequest = new AbortController()
   let refundVersion = 0
   let client: ApiClient | null = null
@@ -42,6 +59,11 @@ export function useSupportDesk() {
   let messageId = 0
 
   function resetContext() {
+    resetReceiptConfirmation()
+    detailRequest.abort()
+    selectedEligibility.value = null
+    selectedEligibilityLoading.value = false
+    selectedEligibilityError.value = null
     closeRefundForm()
     context.abort()
     context = new AbortController()
@@ -108,7 +130,7 @@ export function useSupportDesk() {
   }
 
   async function loadOrders(loadMore = false) {
-    if (!client || !connected.value || ordersBusy.value) return
+    if (!client || !connected.value || ordersBusy.value || receiptSubmitting.value) return
     if (loadMore && nextAfterId.value === null) return
     const signal = context.signal
     const cursor = loadMore ? nextAfterId.value : null
@@ -169,7 +191,7 @@ export function useSupportDesk() {
       error.value = '请先连接账号，再咨询订单。'
       return
     }
-    if (busy.value) return
+    if (busy.value || receiptSubmitting.value) return
     const signal = context.signal
     const activeShop = shopId.value
     const selected = selectedOrder.value?.orderNo
@@ -203,7 +225,13 @@ export function useSupportDesk() {
   }
 
   async function selectOrder(order: Order) {
-    if (!connected.value || busy.value || order.shopId !== Number(shopId.value)) return
+    if (
+      !connected.value ||
+      busy.value ||
+      receiptSubmitting.value ||
+      order.shopId !== Number(shopId.value)
+    )
+      return
     selectedOrder.value = order
     await sendMessage('咨询此订单')
   }
@@ -214,7 +242,14 @@ export function useSupportDesk() {
   function clearConversation() {
     // An approval is a business write: clearing chat must not cancel its result
     // and leave the reviewer unsure whether the server accepted the decision.
-    if (connecting.value || reviewSubmitting.value || refundSubmitting.value) return
+    if (
+      connecting.value ||
+      reviewSubmitting.value ||
+      refundSubmitting.value ||
+      receiptSubmitting.value
+    )
+      return
+    resetReceiptConfirmation()
     closeRefundForm()
     // Abort old requests before removing their conversation, then preserve the current order list.
     context.abort()
@@ -233,6 +268,141 @@ export function useSupportDesk() {
     error.value = null
   }
 
+  function sameOrder(left: Order | null | undefined, right: Order) {
+    return left?.shopId === right.shopId && left.orderNo === right.orderNo
+  }
+
+  function resetReceiptConfirmation() {
+    receiptRequest.abort()
+    receiptRequest = new AbortController()
+    receiptVersion++
+    receiptOpen.value = false
+    receiptOrder.value = null
+    receiptSubmitting.value = false
+    receiptError.value = null
+    receiptResult.value = null
+  }
+
+  function closeReceiptConfirmation() {
+    if (!receiptSubmitting.value) resetReceiptConfirmation()
+  }
+
+  function openReceiptConfirmation(order: Order) {
+    if (
+      !client ||
+      !connected.value ||
+      busy.value ||
+      ordersBusy.value ||
+      receiptSubmitting.value ||
+      refundSubmitting.value ||
+      order.shopId !== Number(shopId.value) ||
+      order.status !== 'SHIPPED' ||
+      order.receivedAt
+    )
+      return
+    resetReceiptConfirmation()
+    receiptOrder.value = order
+    receiptOpen.value = true
+  }
+
+  async function confirmReceipt() {
+    const order = receiptOrder.value
+    if (
+      !client ||
+      !connected.value ||
+      !receiptOpen.value ||
+      receiptSubmitting.value ||
+      receiptResult.value ||
+      !order ||
+      order.shopId !== Number(shopId.value) ||
+      order.status !== 'SHIPPED' ||
+      order.receivedAt
+    )
+      return
+    const signal = AbortSignal.any([context.signal, receiptRequest.signal])
+    const version = receiptVersion
+    receiptSubmitting.value = true
+    receiptError.value = null
+    try {
+      const result = await client.confirmReceipt(shopId.value, order.orderNo, signal)
+      if (signal.aborted || version !== receiptVersion) return
+      const updated = result.order
+      orders.value = orders.value.map((item) => (sameOrder(item, updated) ? updated : item))
+      if (sameOrder(selectedOrder.value, updated)) {
+        selectedEligibility.value = result.eligibility
+        selectedOrder.value = updated
+      }
+      messages.value = messages.value.map((message) => ({
+        ...message,
+        ...(message.orders
+          ? { orders: message.orders.map((item) => (sameOrder(item, updated) ? updated : item)) }
+          : {}),
+      }))
+      if (sameOrder(refundOrder.value, updated)) closeRefundForm()
+      receiptOrder.value = updated
+      receiptResult.value = result
+    } catch (failure) {
+      if (!signal.aborted && version === receiptVersion) {
+        receiptError.value =
+          failure instanceof ApiError && [400, 403, 404, 409].includes(failure.status)
+            ? failure.message
+            : '暂时无法确认收货结果，请先刷新订单核实状态，再决定是否重新操作。'
+        if (failure instanceof ApiError && failure.status === 401) report(failure, signal)
+      }
+    } finally {
+      if (!signal.aborted && version === receiptVersion) receiptSubmitting.value = false
+    }
+  }
+
+  async function loadSelectedEligibility() {
+    detailRequest.abort()
+    detailRequest = new AbortController()
+    const order = selectedOrder.value
+    selectedEligibilityLoading.value = false
+    selectedEligibilityError.value = null
+    if (
+      !client ||
+      !connected.value ||
+      !order?.receivedAt ||
+      order.shopId !== Number(shopId.value)
+    ) {
+      selectedEligibility.value = null
+      return
+    }
+    if (
+      selectedEligibility.value?.shopId === order.shopId &&
+      selectedEligibility.value.orderNo === order.orderNo &&
+      selectedEligibility.value.receivedAt === order.receivedAt
+    )
+      return
+    selectedEligibility.value = null
+    const signal = AbortSignal.any([context.signal, detailRequest.signal])
+    selectedEligibilityLoading.value = true
+    try {
+      const result = await client.afterSaleEligibility(shopId.value, order.orderNo, signal)
+      if (!signal.aborted) selectedEligibility.value = result
+    } catch (failure) {
+      if (!signal.aborted) {
+        selectedEligibilityError.value =
+          failure instanceof ApiError
+            ? failure.message
+            : '暂时无法读取售后截止时间，请稍后重新查询订单。'
+        if (failure instanceof ApiError && failure.status === 401) report(failure, signal)
+      }
+    } finally {
+      if (!signal.aborted) selectedEligibilityLoading.value = false
+    }
+  }
+
+  watch(
+    () => [
+      selectedOrder.value?.shopId,
+      selectedOrder.value?.orderNo,
+      selectedOrder.value?.receivedAt,
+    ],
+    loadSelectedEligibility,
+  )
+
   function closeRefundForm() {
     refundRequest.abort()
     refundRequest = new AbortController()
@@ -247,7 +417,7 @@ export function useSupportDesk() {
   }
 
   async function openRefundForm(order: Order | null = selectedOrder.value) {
-    if (!client || !connected.value || refundSubmitting.value) return
+    if (!client || !connected.value || refundSubmitting.value || receiptSubmitting.value) return
     closeRefundForm()
     refundOpen.value = true
     if (order?.shopId === Number(shopId.value)) await chooseRefundOrder(order)
@@ -433,12 +603,25 @@ export function useSupportDesk() {
     }
   }
   onScopeDispose(() => {
+    resetReceiptConfirmation()
+    detailRequest.abort()
     closeRefundForm()
     context.abort()
     client = null
   })
 
   return {
+    receiptOpen,
+    receiptOrder,
+    receiptSubmitting,
+    receiptError,
+    receiptResult,
+    selectedEligibility,
+    selectedEligibilityLoading,
+    selectedEligibilityError,
+    openReceiptConfirmation,
+    closeReceiptConfirmation,
+    confirmReceipt,
     refundOpen,
     refundOrder,
     refundReason,

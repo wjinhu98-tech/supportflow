@@ -9,6 +9,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authorization.AuthorityAuthorizationManager;
+import org.springframework.security.authorization.AuthorizationManagers;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
@@ -49,6 +51,11 @@ public class ApiSecurityConfiguration {
                         )
                         .requestMatchers(HttpMethod.POST, "/api/v1/shops/*/orders/*/after-sales")
                         .hasAuthority(SecurityPermission.ORDER_READ.getAuthority())
+                        .requestMatchers(HttpMethod.POST, "/api/v1/shops/*/orders/*/receipt-confirmation")
+                        .access(AuthorizationManagers.allOf(
+                                AuthorityAuthorizationManager.hasAuthority(SecurityPermission.ORDER_READ.getAuthority()),
+                                AuthorityAuthorizationManager.hasAuthority(SecurityPermission.ORDER_CONFIRM_RECEIPT.getAuthority())
+                        ))
                         .requestMatchers(
                                 HttpMethod.GET, "/api/v1/shops/*/after-sales"
                         ).hasAuthority(SecurityPermission.ORDER_READ.getAuthority())

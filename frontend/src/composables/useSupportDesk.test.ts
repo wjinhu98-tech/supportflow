@@ -1,6 +1,12 @@
-import { effectScope } from 'vue'
+import { effectScope, nextTick } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AfterSaleEligibility, AfterSaleTicket, ChatResponse, Order } from '../types'
+import type {
+  AfterSaleEligibility,
+  AfterSaleTicket,
+  ChatResponse,
+  Order,
+  ReceiptConfirmation,
+} from '../types'
 
 const mocks = vi.hoisted(() => ({
   authenticate: vi.fn(),
@@ -12,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   ownedAfterSales: vi.fn(),
   afterSaleEligibility: vi.fn(),
   applyAfterSale: vi.fn(),
+  confirmReceipt: vi.fn(),
 }))
 vi.mock('../api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api/client')>()
@@ -27,6 +34,7 @@ vi.mock('../api/client', async (importOriginal) => {
       ownedAfterSales = mocks.ownedAfterSales
       afterSaleEligibility = mocks.afterSaleEligibility
       applyAfterSale = mocks.applyAfterSale
+      confirmReceipt = mocks.confirmReceipt
     },
   }
 })
@@ -108,12 +116,146 @@ beforeEach(() => {
   mocks.ownedAfterSales.mockReset().mockResolvedValue([reviewedTicket])
   mocks.afterSaleEligibility.mockReset().mockResolvedValue(eligible)
   mocks.applyAfterSale.mockReset().mockResolvedValue({ ...ticket, eligibility: eligible })
+  mocks.confirmReceipt.mockReset().mockResolvedValue({
+    order: { ...order, status: 'COMPLETED', receivedAt: eligible.receivedAt },
+    alreadyConfirmed: false,
+    eligibility: eligible,
+  })
 })
 afterEach(() => {
   for (const scope of scopes.splice(0)) scope.stop()
 })
 
 describe('useSupportDesk', () => {
+  it('requires explicit confirmation and updates every copy of the confirmed order', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    mocks.chat.mockResolvedValueOnce({ ...textReply, type: 'ORDER_DETAILS', orders: [order] })
+    await desk.selectOrder(order)
+    await desk.openRefundForm(order)
+    desk.openReceiptConfirmation(order)
+    expect(desk.receiptOpen.value).toBe(true)
+    expect(mocks.confirmReceipt).not.toHaveBeenCalled()
+    desk.closeReceiptConfirmation()
+    expect(mocks.confirmReceipt).not.toHaveBeenCalled()
+    desk.openReceiptConfirmation(order)
+    const pending = deferred<ReceiptConfirmation>()
+    mocks.confirmReceipt.mockReturnValueOnce(pending.promise)
+    const confirmation = desk.confirmReceipt()
+    await desk.confirmReceipt()
+    desk.closeReceiptConfirmation()
+    desk.clearConversation()
+    expect(desk.receiptOpen.value).toBe(true)
+    expect(desk.receiptSubmitting.value).toBe(true)
+    expect(mocks.confirmReceipt).toHaveBeenCalledTimes(1)
+    const result: ReceiptConfirmation = {
+      order: { ...order, status: 'COMPLETED', receivedAt: eligible.receivedAt! },
+      alreadyConfirmed: false,
+      eligibility: eligible,
+    }
+    pending.resolve(result)
+    await confirmation
+    await nextTick()
+    expect(desk.orders.value[0]).toEqual(result.order)
+    expect(desk.selectedOrder.value).toEqual(result.order)
+    expect(desk.messages.value.at(-1)?.orders).toEqual([result.order])
+    expect(desk.receiptResult.value).toEqual(result)
+    expect(desk.selectedEligibility.value).toEqual(eligible)
+    expect(desk.refundOpen.value).toBe(false)
+    await desk.confirmReceipt()
+    expect(mocks.confirmReceipt).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    { ...order, status: 'COMPLETED', receivedAt: null },
+    { ...order, status: 'PAID' },
+    { ...order, receivedAt: '2026-10-20T00:00:00Z' },
+    { ...order, shopId: 101 },
+  ])('does not offer receipt confirmation for an ineligible UI target: %s', async (target) => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    desk.openReceiptConfirmation(target)
+    await desk.confirmReceipt()
+    expect(desk.receiptOpen.value).toBe(false)
+    expect(mocks.confirmReceipt).not.toHaveBeenCalled()
+  })
+
+  it.each(['logout', 'shop switch'] as const)(
+    'ignores late receipt results after %s',
+    async (transition) => {
+      const desk = createDesk()
+      await desk.connect('buyer', 'test')
+      desk.openReceiptConfirmation(order)
+      const pending = deferred<ReceiptConfirmation>()
+      mocks.confirmReceipt.mockReturnValueOnce(pending.promise)
+      const confirmation = desk.confirmReceipt()
+      const signal = mocks.confirmReceipt.mock.calls[0]?.[2] as AbortSignal
+      if (transition === 'logout') desk.disconnect()
+      else {
+        mocks.chat.mockResolvedValueOnce(selection([{ ...order, shopId: 101 }]))
+        await desk.changeShop('101')
+      }
+      pending.resolve({
+        order: { ...order, status: 'COMPLETED', receivedAt: eligible.receivedAt! },
+        alreadyConfirmed: false,
+        eligibility: eligible,
+      })
+      await confirmation
+      expect(signal.aborted).toBe(true)
+      expect(desk.receiptResult.value).toBeNull()
+      expect(desk.receiptOpen.value).toBe(false)
+      expect(desk.orders.value.some((item) => item.status === 'COMPLETED')).toBe(false)
+    },
+  )
+
+  it.each([
+    [new ApiError('没有确认收货权限', 403), '没有确认收货权限'],
+    [new ApiError('网络错误', 0, 'NETWORK_ERROR'), '请先刷新订单核实状态'],
+  ])(
+    'keeps the server decision and does not replay uncertain receipt outcomes',
+    async (failure, expected) => {
+      const desk = createDesk()
+      await desk.connect('buyer', 'test')
+      desk.openReceiptConfirmation(order)
+      mocks.confirmReceipt.mockRejectedValueOnce(failure)
+      await desk.confirmReceipt()
+      expect(desk.receiptError.value).toContain(expected)
+      expect(desk.orders.value).toEqual([order])
+      expect(desk.receiptResult.value).toBeNull()
+      expect(mocks.confirmReceipt).toHaveBeenCalledOnce()
+    },
+  )
+
+  it('fetches deadlines only for the selected order with a known receipt timestamp', async () => {
+    const desk = createDesk()
+    const known = { ...order, status: 'COMPLETED', receivedAt: eligible.receivedAt }
+    mocks.chat.mockResolvedValueOnce(selection([known]))
+    await desk.connect('buyer', 'test')
+    expect(mocks.afterSaleEligibility).not.toHaveBeenCalled()
+    desk.selectedOrder.value = known
+    await nextTick()
+    await vi.waitFor(() => expect(desk.selectedEligibility.value).toEqual(eligible))
+    expect(mocks.afterSaleEligibility).toHaveBeenCalledOnce()
+    desk.selectedOrder.value = { ...known }
+    await nextTick()
+    expect(mocks.afterSaleEligibility).toHaveBeenCalledOnce()
+  })
+
+  it('ignores a late deadline result after another order is selected', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const pending = deferred<AfterSaleEligibility>()
+    mocks.afterSaleEligibility.mockReturnValueOnce(pending.promise)
+    desk.selectedOrder.value = { ...order, status: 'COMPLETED', receivedAt: eligible.receivedAt }
+    await nextTick()
+    desk.selectedOrder.value = { ...order, orderNo: 'SFOTHER', receivedAt: null }
+    await nextTick()
+    pending.resolve(eligible)
+    await nextTick()
+    expect(desk.selectedEligibility.value).toBeNull()
+    expect(desk.selectedEligibilityLoading.value).toBe(false)
+  })
+
   it('opens the server selected refund form and checks eligibility without submitting', async () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')

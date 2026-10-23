@@ -18,7 +18,8 @@ public record OrderResponse(
         BigDecimal totalAmount,
         String currency,
         Instant createdAt,
-        Instant updatedAt
+        Instant updatedAt,
+        Instant receivedAt
 ) {
 
     /**
@@ -35,7 +36,8 @@ public record OrderResponse(
                 order.totalAmount(),
                 order.currency(),
                 order.createdAt(),
-                order.updatedAt()
+                order.updatedAt(),
+                order.receivedAt()
         );
     }
 }

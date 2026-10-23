@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { connect, send, switchShop } from './helpers'
-import type { AfterSaleEligibility, AfterSaleTicket } from '../src/types'
+import type { AfterSaleEligibility, AfterSaleTicket, ReceiptConfirmation } from '../src/types'
 
 const password = 'Frontend-Test-Only!'
 const reviewPath = '/api/v1/reviews/after-sales'
@@ -104,7 +104,112 @@ test('real Spring Security CSRF and real MySQL owned-order selection', async ({ 
   const cookie = (await page.context().cookies()).find((item) => item.name === 'JSESSIONID')
   expect(cookie?.httpOnly).toBe(true)
   await page.getByTestId('load-more-orders').click()
-  await expect(panel.getByTestId('order-card')).toHaveCount(23)
+  await expect(panel.getByTestId('order-card')).toHaveCount(24)
+})
+
+test('receipt confirmation needs explicit consent and persists the server receipt and refund deadline', async ({
+  page,
+}) => {
+  // The existing layout shows its order-detail sidebar only above 1450px.
+  await page.setViewportSize({ width: 1600, height: 1000 })
+  await connect(page, 'frontend-buyer', password)
+  await page.getByTestId('load-more-orders').click()
+  const panel = page.getByTestId('orders-panel')
+  await expect(panel.getByTestId('order-card')).toHaveCount(24)
+  const historic = panel.getByTestId('order-card').filter({ hasText: 'PAGE-021' })
+  await expect(historic.locator('[data-status="COMPLETED"]')).toBeVisible()
+  await expect(
+    historic.getByRole('button', { name: '确认收货 PAGE-021', exact: true }),
+  ).toHaveCount(0)
+  await selectOrder(page, 'SFRECEIPT01')
+  const card = panel.getByTestId('order-card').filter({ hasText: 'SFRECEIPT01' })
+  const requests: string[] = []
+  page.on('request', (request) => {
+    if (
+      request.method() === 'POST' &&
+      new URL(request.url()).pathname.endsWith('/receipt-confirmation')
+    )
+      requests.push(request.url())
+  })
+  await card.getByRole('button', { name: '确认收货 SFRECEIPT01', exact: true }).click()
+  const dialog = page.getByTestId('receipt-confirmation-dialog')
+  await expect(dialog).toContainText('已经收到')
+  await expect(dialog).toContainText('售后申请期限')
+  expect(requests).toHaveLength(0)
+  await dialog.getByRole('button', { name: '暂不确认', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(requests).toHaveLength(0)
+  await expect(card.locator('[data-status="SHIPPED"]')).toBeVisible()
+  await card.getByRole('button', { name: '确认收货 SFRECEIPT01', exact: true }).click()
+  const responsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname ===
+        '/api/v1/shops/100/orders/SFRECEIPT01/receipt-confirmation',
+  )
+  await dialog.getByTestId('confirm-receipt-submit').click()
+  const response = await responsePromise
+  expect(response.status()).toBe(200)
+  expect(response.request().postData()).toBeNull()
+  const result = (await response.json()) as ReceiptConfirmation
+  expect(result.order).toMatchObject({ shopId: 100, orderNo: 'SFRECEIPT01', status: 'COMPLETED' })
+  expect(result.order.receivedAt).toBeTruthy()
+  expect(result.alreadyConfirmed).toBe(false)
+  expect(result.eligibility).toMatchObject({
+    status: 'ELIGIBLE',
+    canSubmit: true,
+    receivedAt: result.order.receivedAt,
+    windowDays: 15,
+  })
+  expect(Date.parse(result.eligibility.deadlineAt!) - Date.parse(result.order.receivedAt)).toBe(
+    15 * 24 * 60 * 60 * 1000,
+  )
+  await expect(dialog.getByTestId('receipt-confirmation-result')).toContainText('售后申请截止')
+  await expect(dialog.getByTestId('confirm-receipt-submit')).toHaveCount(0)
+  await expect(card.locator('[data-status="COMPLETED"]')).toBeVisible()
+  await expect(page.getByTestId('order-received-at')).toBeVisible()
+  await expect(page.getByTestId('order-after-sale-deadline')).toBeVisible()
+  await expect(
+    page
+      .getByTestId('chat-message')
+      .last()
+      .getByTestId('order-card')
+      .locator('[data-status="COMPLETED"]'),
+  ).toBeVisible()
+  expect(requests).toHaveLength(1)
+  await page.screenshot({ path: 'test-results/receipt-confirmation.png', fullPage: true })
+  await dialog.getByRole('button', { name: '完成', exact: true }).click()
+  await expect(card.getByRole('button', { name: '确认收货 SFRECEIPT01', exact: true })).toHaveCount(
+    0,
+  )
+
+  // Deliberately repeat via the isolated public test account, never a business database.
+  const csrfResponse = await page.request.get('/api/v1/security/csrf', { headers: buyerHeaders })
+  expect(csrfResponse.status()).toBe(200)
+  const csrf = (await csrfResponse.json()) as { headerName: string; token: string }
+  const repeatedResponse = await page.request.post(
+    '/api/v1/shops/100/orders/SFRECEIPT01/receipt-confirmation',
+    {
+      headers: { ...buyerHeaders, [csrf.headerName]: csrf.token },
+    },
+  )
+  expect(repeatedResponse.status()).toBe(200)
+  const repeated = (await repeatedResponse.json()) as ReceiptConfirmation
+  expect(repeated.alreadyConfirmed).toBe(true)
+  expect(repeated.order.receivedAt).toBe(result.order.receivedAt)
+  expect(repeated.eligibility.deadlineAt).toBe(result.eligibility.deadlineAt)
+  const eligibility = await eligibilityFor(page, 'SFRECEIPT01')
+  expect(eligibility.receivedAt).toBe(result.order.receivedAt)
+  expect(eligibility.deadlineAt).toBe(result.eligibility.deadlineAt)
+  await page.reload()
+  await connect(page, 'frontend-buyer', password)
+  await page.getByTestId('load-more-orders').click()
+  await expect(panel.getByTestId('order-card')).toHaveCount(24)
+  await selectOrder(page, 'SFRECEIPT01')
+  await expect(page.getByTestId('order-after-sale-deadline')).toBeVisible()
+  await expect(card.getByRole('button', { name: '确认收货 SFRECEIPT01', exact: true })).toHaveCount(
+    0,
+  )
 })
 
 test('real API keeps same-number orders scoped to the active shop and rejects a missing order', async ({

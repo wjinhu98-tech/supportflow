@@ -4,7 +4,7 @@ import type { Order } from '../types'
 import { formatAmount, formatDate } from './format'
 
 defineProps<{ order: Order; selected?: boolean; busy?: boolean; compact?: boolean }>()
-defineEmits<{ select: [order: Order] }>()
+defineEmits<{ select: [order: Order]; confirmReceipt: [order: Order] }>()
 </script>
 
 <template>
@@ -27,6 +27,12 @@ defineEmits<{ select: [order: Order] }>()
       </span>
     </div>
     <p class="order-card-meta">{{ formatDate(order.createdAt) }} · 店铺 {{ order.shopId }}</p>
+    <p
+      v-if="order.receivedAt"
+      class="order-card-meta"
+    >
+      确认收货：{{ formatDate(order.receivedAt, true) }}
+    </p>
     <div class="order-card-bottom">
       <span class="order-amount">{{ formatAmount(order.totalAmount, order.currency) }}</span>
       <button
@@ -49,5 +55,15 @@ defineEmits<{ select: [order: Order] }>()
         />
       </button>
     </div>
+    <button
+      v-if="order.status === 'SHIPPED' && !order.receivedAt"
+      type="button"
+      class="order-consult"
+      :disabled="busy"
+      :aria-label="`确认收货 ${order.orderNo}`"
+      @click="$emit('confirmReceipt', order)"
+    >
+      确认收货
+    </button>
   </article>
 </template>

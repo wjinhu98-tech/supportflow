@@ -10,6 +10,7 @@ const order = {
   currency: 'CNY',
   createdAt: '2026-10-01T00:00:00Z',
   updatedAt: '2026-10-02T00:00:00Z',
+  receivedAt: null,
 }
 const csrf = { headerName: 'X-CSRF-TOKEN', parameterName: '_csrf', token: 'public-test-csrf' }
 const reply = { reply: '订单已发货', type: 'ORDER_DETAILS', orders: [order], nextAfterId: null }
@@ -58,6 +59,158 @@ const eligibility = {
 }
 
 describe('ApiClient', () => {
+  it('normalizes a legacy order without receipt timestamp to null', async () => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json({ ...reply, orders: [{ ...order, receivedAt: undefined }] }))
+    await expect(
+      new ApiClient('buyer', 'test', request).chat('100', '咨询此订单', order.orderNo),
+    ).resolves.toEqual(reply)
+  })
+
+  it('confirms receipt with fresh CSRF and no client-supplied dates or identity', async () => {
+    const result = {
+      order: { ...order, status: 'COMPLETED', receivedAt: eligibility.receivedAt },
+      alreadyConfirmed: false,
+      eligibility,
+    }
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json(result))
+      .mockResolvedValueOnce(json({ ...csrf, token: 'fresh-second-token' }))
+      .mockResolvedValueOnce(json({ ...result, alreadyConfirmed: true }))
+    const api = new ApiClient('buyer', 'test', request)
+    await expect(api.confirmReceipt('100', order.orderNo)).resolves.toEqual(result)
+    await expect(api.confirmReceipt('100', order.orderNo)).resolves.toMatchObject({
+      alreadyConfirmed: true,
+    })
+    expect(request.mock.calls.map((call) => call[0])).toEqual([
+      '/api/v1/security/csrf',
+      '/api/v1/shops/100/orders/SF10001/receipt-confirmation',
+      '/api/v1/security/csrf',
+      '/api/v1/shops/100/orders/SF10001/receipt-confirmation',
+    ])
+    expect(request.mock.calls[1]?.[1]?.body).toBeUndefined()
+    expect(request.mock.calls[1]?.[1]?.headers).toMatchObject({ 'X-CSRF-TOKEN': csrf.token })
+    expect(request.mock.calls[3]?.[1]?.headers).toMatchObject({
+      'X-CSRF-TOKEN': 'fresh-second-token',
+    })
+  })
+
+  it.each([
+    { order: { ...order, status: 'SHIPPED', receivedAt: eligibility.receivedAt } },
+    { order: { ...order, status: 'COMPLETED', receivedAt: null } },
+    { order: { ...order, status: 'COMPLETED', shopId: 101, receivedAt: eligibility.receivedAt } },
+    {
+      order: {
+        ...order,
+        status: 'COMPLETED',
+        orderNo: 'SFOTHER',
+        receivedAt: eligibility.receivedAt,
+      },
+    },
+    { eligibility: { ...eligibility, receivedAt: '2026-10-19T00:00:00Z' } },
+    { eligibility: { ...eligibility, orderNo: 'SFOTHER' } },
+    { eligibility: { ...eligibility, deadlineAt: null } },
+    { alreadyConfirmed: 'true' },
+  ])('rejects an inconsistent receipt result: %s', async (overrides) => {
+    const result = {
+      order: { ...order, status: 'COMPLETED', receivedAt: eligibility.receivedAt },
+      alreadyConfirmed: false,
+      eligibility,
+      ...overrides,
+    }
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json(result))
+    await expect(
+      new ApiClient('buyer', 'test', request).confirmReceipt('100', order.orderNo),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+  })
+
+  it('does not replay denied or failed receipt confirmations', async () => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json({ code: 'ACCESS_DENIED' }, 403))
+      .mockResolvedValueOnce(json(csrf))
+      .mockRejectedValueOnce(new TypeError('network'))
+    const api = new ApiClient('buyer', 'test', request)
+    await expect(api.confirmReceipt('100', order.orderNo)).rejects.toMatchObject({ status: 403 })
+    expect(request).toHaveBeenCalledTimes(2)
+    await expect(api.confirmReceipt('100', order.orderNo)).rejects.toMatchObject({
+      code: 'NETWORK_ERROR',
+    })
+    expect(request).toHaveBeenCalledTimes(4)
+  })
+
+  it('shows the bounded known receipt conflict without exposing unknown conflict details', async () => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(
+        json({ code: 'ORDER_RECEIPT_CONFLICT', message: '订单当前状态不支持确认收货。' }, 409),
+      )
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(
+        json({ code: 'UNKNOWN_INTERNAL', message: 'private backend detail' }, 409),
+      )
+    const api = new ApiClient('buyer', 'test', request)
+    await expect(api.confirmReceipt('100', order.orderNo)).rejects.toMatchObject({
+      message: '订单当前状态不支持确认收货。',
+    })
+    await expect(api.confirmReceipt('100', order.orderNo)).rejects.not.toMatchObject({
+      message: 'private backend detail',
+    })
+    expect(request).toHaveBeenCalledTimes(4)
+  })
+
+  it('serializes receipt confirmation with chat and eligibility reads', async () => {
+    const paths: string[] = []
+    const result = {
+      order: { ...order, status: 'COMPLETED', receivedAt: eligibility.receivedAt },
+      alreadyConfirmed: false,
+      eligibility,
+    }
+    const request = fetchMock().mockImplementation(async (path) => {
+      paths.push(String(path))
+      if (String(path).endsWith('/csrf')) return json(csrf)
+      if (String(path).endsWith('/receipt-confirmation')) return json(result)
+      if (String(path).endsWith('/after-sale-eligibility')) return json(eligibility)
+      return json(reply)
+    })
+    const api = new ApiClient('buyer', 'test', request)
+    await Promise.all([
+      api.chat('100', '咨询此订单', order.orderNo),
+      api.confirmReceipt('100', order.orderNo),
+      api.afterSaleEligibility('100', order.orderNo),
+    ])
+    expect(paths).toEqual([
+      '/api/v1/security/csrf',
+      '/api/v1/shops/100/chat/messages',
+      '/api/v1/security/csrf',
+      '/api/v1/shops/100/orders/SF10001/receipt-confirmation',
+      '/api/v1/shops/100/orders/SF10001/after-sale-eligibility',
+    ])
+  })
+
+  it('never sends a receipt confirmation cancelled while waiting in the queue', async () => {
+    let finish!: (value: Response) => void
+    const request = fetchMock().mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve
+      }),
+    )
+    const api = new ApiClient('buyer', 'test', request)
+    const read = api.afterSaleEligibility('100', order.orderNo)
+    const controller = new AbortController()
+    const confirmation = api.confirmReceipt('100', order.orderNo, controller.signal)
+    controller.abort()
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1))
+    finish(json(eligibility))
+    await read
+    await expect(confirmation).rejects.toMatchObject({ name: 'AbortError' })
+    expect(request).toHaveBeenCalledOnce()
+  })
+
   it('reads eligibility without submitting anything', async () => {
     const request = fetchMock().mockResolvedValue(json(eligibility))
     await expect(

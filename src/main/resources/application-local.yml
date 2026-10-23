@@ -35,3 +35,4 @@ supportflow:
             buyer-id: 200
           permissions:
             - ORDER_READ
+            - ORDER_CONFIRM_RECEIPT
