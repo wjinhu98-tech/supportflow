@@ -1,6 +1,11 @@
 import { expect, test, type Page } from '@playwright/test'
 import { connect, send, switchShop } from './helpers'
-import type { AfterSaleEligibility, AfterSaleTicket, ReceiptConfirmation } from '../src/types'
+import type {
+  AfterSaleEligibility,
+  AfterSaleTicket,
+  ChatResponse,
+  ReceiptConfirmation,
+} from '../src/types'
 
 const password = 'Frontend-Test-Only!'
 const reviewPath = '/api/v1/merchant/shops/100/after-sales'
@@ -36,7 +41,7 @@ async function chat(page: Page, message: string) {
   const response = await responsePromise
   expect(response.status(), `Chat failed for: ${message}`).toBe(200)
   const turn = (await response.json()) as {
-    messages: { role: string; response: { reply: string; type: string } | null }[]
+    messages: { role: string; response: ChatResponse | null }[]
   }
   const body = turn.messages.find((message) => message.role === 'ASSISTANT')!.response!
   await expect(page.getByTestId('chat-message').last()).toContainText(body.reply)
@@ -419,8 +424,14 @@ test('real knowledge citations and recorded logistics stay separate from same-nu
   await connect(page, 'frontend-buyer', password)
   const knowledge = await chat(page, '售后审批规则')
   expect(knowledge.type).toBe('TEXT')
-  expect(knowledge.reply).toMatch(/\[来源：[^\]]+@[^\]]+\]/)
-  expect(knowledge.reply).toContain('演示环境')
+  expect(knowledge.knowledge?.status).toBe('ANSWERED')
+  expect(knowledge.knowledge?.sources.length).toBeGreaterThan(0)
+  expect(knowledge.knowledge?.sources.map((source) => source.sourceId)).toContain(
+    'after-sale-review',
+  )
+  await expect(
+    page.getByTestId('chat-message').last().getByTestId('knowledge-sources'),
+  ).toBeVisible()
 
   await selectOrder(page, 'SF10001')
   const logistics = await chat(page, '查物流')

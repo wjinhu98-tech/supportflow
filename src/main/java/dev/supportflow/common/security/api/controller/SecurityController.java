@@ -3,6 +3,7 @@ package dev.supportflow.common.security.api.controller;
 import dev.supportflow.common.security.api.response.CsrfResponse;
 import dev.supportflow.common.security.model.AccountType;
 import dev.supportflow.common.security.model.CustomerPrincipal;
+import dev.supportflow.merchant.MerchantCapabilities;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.web.csrf.CsrfToken;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -18,10 +19,10 @@ public class SecurityController {
 
     @GetMapping("/me")
     public AccountResponse me(@AuthenticationPrincipal(errorOnInvalidType = true) CustomerPrincipal principal) {
-        return new AccountResponse(principal.getUsername(), principal.getAccountType());
+        return new AccountResponse(principal.getUsername(), principal.getAccountType(), MerchantCapabilities.from(principal));
     }
 
-    public record AccountResponse(String username, AccountType accountType) { }
+    public record AccountResponse(String username, AccountType accountType, MerchantCapabilities capabilities) { }
 
     @GetMapping("/csrf")
     public CsrfResponse csrf(CsrfToken csrfToken) {

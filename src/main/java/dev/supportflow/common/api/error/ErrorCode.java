@@ -17,6 +17,9 @@ public enum ErrorCode {
     REQUEST_REJECTED("REQUEST_REJECTED", "请求无法处理"),
     REVIEW_NOT_FOUND("REVIEW_NOT_FOUND", "售后申请不存在"),
     REVIEW_CONFLICT("REVIEW_CONFLICT", "售后申请已处理或状态已变化"),
+    KNOWLEDGE_NOT_FOUND("KNOWLEDGE_NOT_FOUND", "知识资料不存在"),
+    KNOWLEDGE_CONFLICT("KNOWLEDGE_CONFLICT", "知识资料已更新或状态已变化，请刷新后重试"),
+    KNOWLEDGE_LIMIT_REACHED("KNOWLEDGE_LIMIT_REACHED", "店铺已达到同时发布资料的数量上限"),
     BUSINESS_RULE_VIOLATION("BUSINESS_RULE_VIOLATION", "不符合当前业务处理条件"),
     INTERNAL_ERROR("INTERNAL_ERROR", "服务暂时不可用，请稍后重试");
 

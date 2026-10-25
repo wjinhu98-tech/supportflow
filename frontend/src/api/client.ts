@@ -3,6 +3,7 @@ import type {
   AfterSaleExecution,
   AfterSaleTicket,
   ChatResponse,
+  ChatKnowledge,
   Conversation,
   ConversationPage,
   ConversationMessages,
@@ -11,9 +12,14 @@ import type {
   CsrfResponse,
   CurrentAccount,
   MerchantShop,
+  KnowledgeArticle,
+  KnowledgeInput,
+  KnowledgePage,
+  KnowledgeAuditPage,
   Order,
   ReceiptConfirmation,
 } from '../types'
+import { validKnowledgeArticle, validKnowledgeAudit, validKnowledgeInput } from './knowledge'
 
 export class ApiError extends Error {
   constructor(
@@ -50,14 +56,53 @@ function validOrder(value: unknown): value is Order {
   )
 }
 
+function validChatKnowledge(value: unknown): value is ChatKnowledge | null {
+  if (value === null) return true
+  if (
+    !isRecord(value) ||
+    typeof value.status !== 'string' ||
+    !['ANSWERED', 'NO_MATCH', 'UNAVAILABLE'].includes(String(value.status)) ||
+    !Array.isArray(value.sources) ||
+    value.sources.length > 2 ||
+    (value.status === 'ANSWERED' ? value.sources.length === 0 : value.sources.length !== 0)
+  )
+    return false
+  const sourceIds = new Set<string>()
+  return value.sources.every((source) => {
+    if (
+      !isRecord(source) ||
+      typeof source.sourceId !== 'string' ||
+      source.sourceId.trim() !== source.sourceId ||
+      !/^[a-z][a-z0-9-]{1,63}$/.test(source.sourceId) ||
+      sourceIds.has(source.sourceId) ||
+      typeof source.version !== 'string' ||
+      source.version.trim() !== source.version ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{1,63}$/.test(source.version) ||
+      typeof source.title !== 'string' ||
+      !source.title.trim() ||
+      source.title.length > 240 ||
+      typeof source.content !== 'string' ||
+      !source.content.trim() ||
+      source.content.length > 16_384
+    )
+      return false
+    sourceIds.add(source.sourceId)
+    return true
+  })
+}
+
 function parseChat(value: unknown, shopId: string): ChatResponse {
   if (
     !isRecord(value) ||
     typeof value.reply !== 'string' ||
+    typeof value.type !== 'string' ||
     !['TEXT', 'ORDER_DETAILS', 'ORDER_SELECTION', 'AFTER_SALE_FORM'].includes(String(value.type)) ||
     !Array.isArray(value.orders) ||
     !value.orders.every(validOrder) ||
     value.orders.some((order) => order.shopId !== Number(shopId)) ||
+    (Object.hasOwn(value, 'knowledge') && !validChatKnowledge(value.knowledge)) ||
+    (value.knowledge != null &&
+      (value.type !== 'TEXT' || value.orders.length !== 0 || value.nextAfterId !== null)) ||
     (value.type === 'AFTER_SALE_FORM' && (value.orders.length > 1 || value.nextAfterId !== null)) ||
     !(
       value.nextAfterId === null ||
@@ -72,6 +117,17 @@ function parseChat(value: unknown, shopId: string): ChatResponse {
   return {
     ...response,
     orders: response.orders.map((order) => ({ ...order, receivedAt: order.receivedAt ?? null })),
+    knowledge: response.knowledge
+      ? {
+          status: response.knowledge.status,
+          sources: response.knowledge.sources.map(({ sourceId, version, title, content }) => ({
+            sourceId,
+            version,
+            title,
+            content,
+          })),
+        }
+      : null,
   }
 }
 
@@ -270,10 +326,20 @@ export class ApiClient {
       !isRecord(data) ||
       typeof data.username !== 'string' ||
       !data.username.trim() ||
-      !['BUYER', 'MERCHANT_STAFF'].includes(String(data.accountType))
+      !['BUYER', 'MERCHANT_STAFF'].includes(String(data.accountType)) ||
+      !isRecord(data.capabilities) ||
+      typeof data.capabilities.reviewAfterSales !== 'boolean' ||
+      typeof data.capabilities.manageKnowledge !== 'boolean'
     )
       throw new ApiError('无法确认账号身份，请重新登录。', 0, 'INVALID_RESPONSE')
-    return { username: data.username, accountType: data.accountType } as CurrentAccount
+    return {
+      username: data.username,
+      accountType: data.accountType,
+      capabilities: {
+        reviewAfterSales: data.capabilities.reviewAfterSales,
+        manageKnowledge: data.capabilities.manageKnowledge,
+      },
+    } as CurrentAccount
   }
 
   async merchantShops(signal?: AbortSignal): Promise<MerchantShop[]> {
@@ -309,6 +375,206 @@ export class ApiClient {
   private merchantReviewPath(shopId: string): string {
     if (!validShopId(shopId)) throw new ApiError('请选择已授权的有效店铺。')
     return `/api/v1/merchant/shops/${shopId}/after-sales`
+  }
+
+  private knowledgePath(shopId: string, id?: string): string {
+    if (!validShopId(shopId) || (id !== undefined && !reviewIdPattern.test(id)))
+      throw new ApiError('请选择当前授权店铺的有效知识文档。')
+    return `/api/v1/merchant/shops/${shopId}/knowledge${id === undefined ? '' : '/' + id}`
+  }
+
+  async knowledgeArticles(
+    shopId: string,
+    beforeId: string | null = null,
+    signal?: AbortSignal,
+  ): Promise<KnowledgePage> {
+    const path = this.knowledgePath(shopId)
+    const suffix = beforeId === null ? '' : `?beforeId=${this.validConversationId(beforeId)}`
+    const data = await this.queued(() => this.request(path + suffix, { method: 'GET' }, signal))
+    if (
+      !isRecord(data) ||
+      !Array.isArray(data.items) ||
+      data.items.length > 20 ||
+      !data.items.every((item) => validKnowledgeArticle(item, shopId)) ||
+      new Set(data.items.map((item) => item.id)).size !== data.items.length
+    )
+      throw new ApiError('无法读取当前店铺知识列表，请刷新核实。', 0, 'INVALID_RESPONSE')
+    return { items: data.items, nextBeforeId: parseCursor(data.nextBeforeId) }
+  }
+
+  async knowledgeArticle(
+    shopId: string,
+    id: string,
+    signal?: AbortSignal,
+  ): Promise<KnowledgeArticle> {
+    const path = this.knowledgePath(shopId, id)
+    const data = await this.queued(() => this.request(path, { method: 'GET' }, signal))
+    if (!validKnowledgeArticle(data, shopId) || data.id !== id)
+      throw new ApiError('知识文档与当前店铺不匹配，请重新读取。', 0, 'INVALID_RESPONSE')
+    return data
+  }
+
+  async knowledgeAudit(
+    shopId: string,
+    id: string,
+    beforeId: string | null = null,
+    signal?: AbortSignal,
+  ): Promise<KnowledgeAuditPage> {
+    const path = this.knowledgePath(shopId, id)
+    if (beforeId !== null && (!beforeId || beforeId.length > 200 || /[\p{Cc}]/u.test(beforeId)))
+      throw new ApiError('操作记录分页信息不正确。')
+    const suffix = beforeId === null ? '' : `?beforeId=${encodeURIComponent(beforeId)}`
+    const data = await this.queued(() =>
+      this.request(path + '/audit' + suffix, { method: 'GET' }, signal),
+    )
+    if (
+      !isRecord(data) ||
+      !Array.isArray(data.items) ||
+      data.items.length > 20 ||
+      !data.items.every(validKnowledgeAudit) ||
+      new Set(data.items.map((item) => item.id)).size !== data.items.length ||
+      !(
+        data.nextBeforeId === null ||
+        (typeof data.nextBeforeId === 'string' &&
+          data.nextBeforeId.length > 0 &&
+          data.nextBeforeId.length <= 200 &&
+          !/[\p{Cc}]/u.test(data.nextBeforeId))
+      )
+    )
+      throw new ApiError('知识操作记录格式不正确，请刷新核实。', 0, 'INVALID_RESPONSE')
+    return { items: data.items, nextBeforeId: data.nextBeforeId }
+  }
+
+  async createKnowledgeArticle(
+    shopId: string,
+    input: KnowledgeInput,
+    signal?: AbortSignal,
+  ): Promise<KnowledgeArticle> {
+    return this.knowledgeMutation(
+      'POST',
+      this.knowledgePath(shopId),
+      shopId,
+      input,
+      undefined,
+      signal,
+    )
+  }
+
+  async saveKnowledgeArticle(
+    shopId: string,
+    id: string,
+    expectedVersion: number,
+    input: KnowledgeInput,
+    signal?: AbortSignal,
+  ): Promise<KnowledgeArticle> {
+    this.validateKnowledgeVersion(expectedVersion)
+    return this.knowledgeMutation(
+      'PUT',
+      this.knowledgePath(shopId, id),
+      shopId,
+      input,
+      { id, expectedVersion },
+      signal,
+    )
+  }
+
+  async publishKnowledgeArticle(
+    shopId: string,
+    id: string,
+    expectedVersion: number,
+    signal?: AbortSignal,
+  ): Promise<KnowledgeArticle> {
+    this.validateKnowledgeVersion(expectedVersion)
+    return this.knowledgeMutation(
+      'POST',
+      this.knowledgePath(shopId, id) + '/publish',
+      shopId,
+      undefined,
+      { id, expectedVersion },
+      signal,
+    )
+  }
+
+  async offlineKnowledgeArticle(
+    shopId: string,
+    id: string,
+    expectedVersion: number,
+    signal?: AbortSignal,
+  ): Promise<KnowledgeArticle> {
+    this.validateKnowledgeVersion(expectedVersion)
+    return this.knowledgeMutation(
+      'POST',
+      this.knowledgePath(shopId, id) + '/offline',
+      shopId,
+      undefined,
+      { id, expectedVersion },
+      signal,
+    )
+  }
+
+  private validateKnowledgeVersion(version: number) {
+    if (!Number.isSafeInteger(version) || version < 0)
+      throw new ApiError('请重新读取文档版本后操作。')
+  }
+
+  private knowledgeMutation(
+    method: 'POST' | 'PUT',
+    path: string,
+    shopId: string,
+    input?: KnowledgeInput,
+    target?: { id: string; expectedVersion: number },
+    signal?: AbortSignal,
+  ): Promise<KnowledgeArticle> {
+    if (input !== undefined && !validKnowledgeInput(input))
+      throw new ApiError('请填写有效标题、1–12 个关键词和正文，注意长度限制。')
+    const body = {
+      ...(target ? { expectedVersion: target.expectedVersion } : {}),
+      ...(input
+        ? {
+            title: input.title.trim(),
+            keywords: input.keywords.map((keyword) => keyword.trim()),
+            content: input.content.trim(),
+          }
+        : {}),
+    }
+    return this.queued(async () => {
+      if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
+      const csrf = await this.getCsrf(signal)
+      try {
+        const data = await this.request(
+          path,
+          {
+            method,
+            headers: { 'Content-Type': 'application/json', [csrf.headerName]: csrf.token },
+            body: JSON.stringify(body),
+          },
+          signal,
+        )
+        if (
+          !validKnowledgeArticle(data, shopId) ||
+          (target && (data.id !== target.id || data.version !== target.expectedVersion + 1)) ||
+          (!target && (data.status !== 'DRAFT' || data.version !== 0)) ||
+          (path.endsWith('/publish') && data.status !== 'PUBLISHED') ||
+          (path.endsWith('/offline') && data.status !== 'OFFLINE')
+        )
+          throw new ApiError(
+            '操作结果暂时无法确认，请先重新读取当前店铺文档，不要重复提交。',
+            0,
+            'INVALID_RESPONSE',
+          )
+        return data
+      } catch (failure) {
+        if (failure instanceof ApiError && failure.status === 409)
+          throw new ApiError(
+            failure.code === 'KNOWLEDGE_LIMIT_REACHED'
+              ? '本店发布文档已达到上限，请先下线不再需要的内容。'
+              : '文档已被他人更新或状态已变化，请先重新读取再操作；本地输入尚未覆盖线上内容。',
+            409,
+            failure.code,
+          )
+        throw failure
+      }
+    })
   }
 
   async conversations(

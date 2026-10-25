@@ -10,8 +10,13 @@ public record ChatReply(
         String reply,
         ChatReplyType type,
         List<SupportOrder> orders,
-        Long nextAfterId
+        Long nextAfterId,
+        KnowledgeEvidence knowledge
 ) {
+    public ChatReply(String reply, ChatReplyType type, List<SupportOrder> orders, Long nextAfterId) {
+        this(reply, type, orders, nextAfterId, null);
+    }
+
     public ChatReply {
         Objects.requireNonNull(reply, "reply must not be null");
         Objects.requireNonNull(type, "type must not be null");
@@ -25,10 +30,18 @@ public record ChatReply(
                 || orders.isEmpty() && nextAfterId != null) {
             throw new IllegalArgumentException("Invalid chat result");
         }
+        if (knowledge != null && type != ChatReplyType.TEXT) {
+            throw new IllegalArgumentException("Knowledge evidence cannot replace business results");
+        }
     }
 
     public static ChatReply text(String reply) {
         return new ChatReply(reply, ChatReplyType.TEXT, List.of(), null);
+    }
+
+    public static ChatReply knowledge(String reply, KnowledgeEvidence evidence) {
+        return new ChatReply(reply, ChatReplyType.TEXT, List.of(), null,
+                Objects.requireNonNull(evidence, "knowledge evidence must not be null"));
     }
 
     public static ChatReply details(String reply, SupportOrder order) {

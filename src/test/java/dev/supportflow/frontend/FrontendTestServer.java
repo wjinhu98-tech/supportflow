@@ -98,14 +98,21 @@ public final class FrontendTestServer {
             addAccount(settings, 0, "frontend-buyer", 200L, passwordHash);
             addAccount(settings, 1, "frontend-other", 201L, passwordHash);
             addAccount(settings, 2, "frontend-reviewer", 999L, passwordHash,
-                    "ORDER_READ,AFTER_SALE_REVIEW");
+                    "ORDER_READ,AFTER_SALE_REVIEW,KNOWLEDGE_MANAGE");
             settings.add("--supportflow.security.local.accounts[2].account-type=MERCHANT_STAFF");
             addAccount(settings, 3, "frontend-reviewer-other", 998L, passwordHash,
-                    "ORDER_READ,AFTER_SALE_REVIEW");
+                    "ORDER_READ,AFTER_SALE_REVIEW,KNOWLEDGE_MANAGE");
             settings.add("--supportflow.security.local.accounts[3].account-type=MERCHANT_STAFF");
             addAccount(settings, 4, "frontend-unassigned", 997L, passwordHash,
                     "ORDER_READ,AFTER_SALE_REVIEW");
             settings.add("--supportflow.security.local.accounts[4].account-type=MERCHANT_STAFF");
+            addAccount(settings, 5, "frontend-editor", 996L, passwordHash, "KNOWLEDGE_MANAGE");
+            settings.add("--supportflow.security.local.accounts[5].account-type=MERCHANT_STAFF");
+            addAccount(settings, 6, "frontend-review-only", 995L, passwordHash,
+                    "ORDER_READ,AFTER_SALE_REVIEW");
+            settings.add("--supportflow.security.local.accounts[6].account-type=MERCHANT_STAFF");
+            addAccount(settings, 7, "frontend-editor-other", 994L, passwordHash, "KNOWLEDGE_MANAGE");
+            settings.add("--supportflow.security.local.accounts[7].account-type=MERCHANT_STAFF");
 
             application.set(new SpringApplicationBuilder(SupportFlowApplication.class)
                     .registerShutdownHook(false)
@@ -176,6 +183,12 @@ public final class FrontendTestServer {
                     "support_merchant_staff", "support_merchant_staff_shop_grant")) {
                 statement.execute("GRANT SELECT ON " + DATABASE_NAME + "." + table + " TO 'frontend_reader'@'%'");
             }
+            statement.execute("GRANT SELECT, INSERT, UPDATE ON " + DATABASE_NAME
+                    + ".support_knowledge_article TO 'frontend_reader'@'%'");
+            for (String table : List.of("support_knowledge_revision", "support_knowledge_audit")) {
+                statement.execute("GRANT SELECT, INSERT ON " + DATABASE_NAME + "." + table
+                        + " TO 'frontend_reader'@'%'");
+            }
             statement.executeUpdate("""
                     INSERT INTO support_merchant (id, name, status)
                     VALUES (1, '测试商家甲', 'ACTIVE'), (2, '测试商家乙', 'ACTIVE')
@@ -188,11 +201,15 @@ public final class FrontendTestServer {
                     INSERT INTO support_merchant_staff (id, merchant_id, username, linked_buyer_id, status)
                     VALUES (1, 1, 'frontend-reviewer', 999, 'ACTIVE'),
                            (2, 2, 'frontend-reviewer-other', 998, 'ACTIVE'),
-                           (3, 1, 'frontend-unassigned', 997, 'ACTIVE')
+                           (3, 1, 'frontend-unassigned', 997, 'ACTIVE'),
+                           (4, 1, 'frontend-editor', 996, 'ACTIVE'),
+                           (5, 1, 'frontend-review-only', 995, 'ACTIVE'),
+                           (6, 2, 'frontend-editor-other', 994, 'ACTIVE')
                     """);
             statement.executeUpdate("""
                     INSERT INTO support_merchant_staff_shop_grant (staff_id, shop_id, enabled)
-                    VALUES (1, 100, TRUE), (2, 101, TRUE)
+                    VALUES (1, 100, TRUE), (2, 101, TRUE),
+                           (4, 100, TRUE), (5, 100, TRUE), (6, 101, TRUE)
                     """);
             statement.executeUpdate("""
                     INSERT INTO support_order (

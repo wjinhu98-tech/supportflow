@@ -117,6 +117,7 @@ const server = http.createServer(async (request, response) => {
     return respond(response, 200, {
       username: request.headers.authorization === slowAuthorization ? 'slow-buyer' : MOCK_USERNAME,
       accountType: 'BUYER',
+      capabilities: { reviewAfterSales: false, manageKnowledge: false },
     })
   }
 

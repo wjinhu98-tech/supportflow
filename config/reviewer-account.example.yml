@@ -13,5 +13,8 @@ supportflow:
           permissions:
             - ORDER_READ
             - AFTER_SALE_REVIEW
+            - KNOWLEDGE_MANAGE
+# A knowledge-only employee needs KNOWLEDGE_MANAGE, not either review permission above.
+# Capabilities are independent; keep only the permissions assigned to this employee's job.
 # Account type and review authority do not grant access to a shop by themselves.
 # A database administrator must explicitly register the employee and assign shops.

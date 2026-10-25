@@ -212,7 +212,13 @@ export function useSupportDesk() {
       text: message.text,
       createdAt: message.createdAt,
       historical,
-      ...(message.response ? { type: message.response.type, orders: message.response.orders } : {}),
+      ...(message.response
+        ? {
+            type: message.response.type,
+            orders: message.response.orders,
+            knowledge: message.response.knowledge ?? null,
+          }
+        : {}),
     }
   }
 

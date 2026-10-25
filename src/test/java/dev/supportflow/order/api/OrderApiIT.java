@@ -1,5 +1,7 @@
 package dev.supportflow.order.api;
 
+import dev.supportflow.testsupport.KnowledgeFixtures;
+
 import dev.supportflow.SupportFlowApplication;
 import dev.supportflow.chat.application.ModelUnavailableException;
 import dev.supportflow.chat.application.model.OrderIntent;
@@ -172,6 +174,7 @@ class OrderApiIT {
         ) {
             createUser.setString(1, QUERY_PASSWORD);
             createUser.execute();
+            KnowledgeFixtures.grantRead(connection, "supportflow_api_test", "order_reader");
             statement.execute(
                     """
                     GRANT SELECT

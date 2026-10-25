@@ -69,7 +69,7 @@ class MerchantAccessServiceTest {
     @Test
     void readAuthorizationIsRecheckedRatherThanCached() {
         var access = new MerchantShopAccess(7, 100);
-        when(repository.find("staff", 999, 100, false)).thenReturn(Optional.of(access), Optional.empty());
+        when(repository.find("staff", 999, 100, false)).thenReturn(Optional.of(access)).thenReturn(Optional.empty());
         assertThat(service.requireShop(staff, 100)).isEqualTo(access);
         assertThatThrownBy(() -> service.requireShop(staff, 100)).isInstanceOf(AccessDeniedException.class);
         verify(repository, times(2)).find("staff", 999, 100, false);
@@ -89,6 +89,38 @@ class MerchantAccessServiceTest {
         assertThatThrownBy(() -> service.lockShop(staff, 101)).isInstanceOf(AccessDeniedException.class);
         verify(repository).find("staff", 999, 101, true);
         verifyNoMoreInteractions(repository);
+    }
+
+    @Test
+    void knowledgeOnlyStaffMayListAssignedShopsButCannotReviewAfterSales() {
+        var editor = principal(AccountType.MERCHANT_STAFF, SecurityPermission.KNOWLEDGE_MANAGE);
+        when(repository.activeStaff("staff", 999)).thenReturn(true);
+        when(repository.list("staff", 999)).thenReturn(List.of(new MerchantShop(100, "Shop", 1, "Merchant")));
+        assertThat(service.shops(editor)).hasSize(1);
+        assertThatThrownBy(() -> service.requireShop(editor, 100)).isInstanceOf(AccessDeniedException.class);
+        assertThat(MerchantCapabilities.from(editor)).isEqualTo(new MerchantCapabilities(false, true));
+    }
+
+    @Test
+    void knowledgeAuthorizationIsIndependentAndStillRequiresLiveShopGrant() {
+        var editor = principal(AccountType.MERCHANT_STAFF, SecurityPermission.KNOWLEDGE_MANAGE);
+        var authorization = new MerchantShopAccess(7, 100);
+        when(repository.find("staff", 999, 100, false)).thenReturn(Optional.of(authorization)).thenReturn(Optional.empty());
+        when(repository.find("staff", 999, 100, true)).thenReturn(Optional.of(authorization));
+        assertThat(service.requireKnowledgeShop(editor, 100)).isEqualTo(authorization);
+        assertThat(service.lockKnowledgeShop(editor, 100)).isEqualTo(authorization);
+        assertThatThrownBy(() -> service.requireKnowledgeShop(editor, 100)).isInstanceOf(AccessDeniedException.class);
+        verify(repository, times(2)).find("staff", 999, 100, false);
+    }
+
+    @Test
+    void buyerWithKnowledgePermissionAndReviewOnlyStaffCannotManageKnowledge() {
+        var buyer = principal(AccountType.BUYER, SecurityPermission.KNOWLEDGE_MANAGE);
+        assertThatThrownBy(() -> service.requireKnowledgeShop(buyer, 100)).isInstanceOf(AccessDeniedException.class);
+        assertThatThrownBy(() -> service.lockKnowledgeShop(staff, 100)).isInstanceOf(AccessDeniedException.class);
+        assertThat(MerchantCapabilities.from(buyer)).isEqualTo(new MerchantCapabilities(false, false));
+        assertThat(MerchantCapabilities.from(staff)).isEqualTo(new MerchantCapabilities(true, false));
+        verifyNoInteractions(repository);
     }
 
     private static CustomerPrincipal principal(AccountType type, SecurityPermission... permissions) {

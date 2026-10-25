@@ -3,6 +3,7 @@ package dev.supportflow.assistant;
 import dev.supportflow.SupportFlowApplication;
 import dev.supportflow.order.domain.model.OrderStatus;
 import dev.supportflow.testsupport.MerchantFixtures;
+import dev.supportflow.testsupport.KnowledgeFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -137,6 +138,7 @@ class AssistantWorkflowIT {
             grant.execute("GRANT SELECT, INSERT, UPDATE ON supportflow_assistant_test.support_after_sale_execution TO 'assistant_runtime'@'%'");
             grant.execute("GRANT SELECT, INSERT ON supportflow_assistant_test.support_simulated_refund TO 'assistant_runtime'@'%'");
             MerchantFixtures.grantRuntimeRead(connection, "supportflow_assistant_test", "assistant_runtime");
+            KnowledgeFixtures.grantRead(connection, "supportflow_assistant_test", "assistant_runtime");
             MerchantFixtures.standardReviewers(connection);
         }
         prepared = true;
@@ -149,9 +151,38 @@ class AssistantWorkflowIT {
 
     @Test
     void shouldAnswerAfterSaleProcessFromVersionedKnowledgeRatherThanWrite() throws Exception {
+        long casesBefore = count("SELECT COUNT(*) FROM support_after_sale WHERE tenant_id=?", 100L);
+        long tasksBefore = count("SELECT COUNT(*) FROM support_after_sale_execution task "
+                + "JOIN support_after_sale ticket ON ticket.id=task.request_id WHERE ticket.tenant_id=?", 100L);
+        long auditsBefore = count("SELECT COUNT(*) FROM support_after_sale_audit audit "
+                + "JOIN support_after_sale ticket ON ticket.id=audit.request_id WHERE ticket.tenant_id=?", 100L);
         JsonNode response = body(chat("buyer", 100L, "售后审批流程").andExpect(status().isOk()).andReturn());
         assertThat(response.get("type").asString()).isEqualTo("TEXT");
-        assertThat(response.get("reply").asString()).contains("来源", "@", "演示环境");
+        assertThat(response.get("reply").asString()).contains("演示环境");
+        JsonNode knowledge = response.path("knowledge");
+        assertThat(knowledge.path("status").asString()).isEqualTo("ANSWERED");
+        assertThat(knowledge.path("sources").size()).isBetween(1, 2);
+        boolean controlledAfterSalePolicy = false;
+        for (JsonNode source : knowledge.path("sources")) {
+            assertThat(source.path("sourceId").asString()).isNotBlank().doesNotStartWith("kb-");
+            assertThat(source.path("version").asString()).isNotBlank();
+            assertThat(source.path("title").asString()).isNotBlank();
+            assertThat(source.path("content").asString()).isNotBlank();
+            if (source.path("sourceId").asString().equals("after-sale-review")) {
+                controlledAfterSalePolicy = true;
+                assertThat(source.path("version").asString()).isEqualTo("2026-10-21-v3");
+                assertThat(source.path("content").asString()).contains("15", "人工", "不承诺退款到账");
+            }
+        }
+        assertThat(controlledAfterSalePolicy).isTrue();
+        assertThat(knowledge.toString()).contains("审核", "15", "演示环境");
+        assertThat(count("SELECT COUNT(*) FROM support_after_sale WHERE tenant_id=?", 100L)).isEqualTo(casesBefore);
+        assertThat(count("SELECT COUNT(*) FROM support_after_sale_execution task "
+                + "JOIN support_after_sale ticket ON ticket.id=task.request_id WHERE ticket.tenant_id=?", 100L))
+                .isEqualTo(tasksBefore);
+        assertThat(count("SELECT COUNT(*) FROM support_after_sale_audit audit "
+                + "JOIN support_after_sale ticket ON ticket.id=audit.request_id WHERE ticket.tenant_id=?", 100L))
+                .isEqualTo(auditsBefore);
     }
 
     @Test

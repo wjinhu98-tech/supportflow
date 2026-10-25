@@ -1,6 +1,7 @@
 import { computed, onScopeDispose, ref } from 'vue'
 import { ApiClient, ApiError } from '../api/client'
-import type { AfterSaleTicket, MerchantShop } from '../types'
+import type { AccountCapabilities, AfterSaleTicket, MerchantShop } from '../types'
+import { useMerchantKnowledge } from './useMerchantKnowledge'
 
 /** Merchant-only workflow. The server's current authorization is authoritative on every request. */
 export function useMerchantDesk() {
@@ -8,6 +9,10 @@ export function useMerchantDesk() {
   const connected = ref(false)
   const connecting = ref(false)
   const loginError = ref<string | null>(null)
+  const capabilities = ref<AccountCapabilities>({ reviewAfterSales: false, manageKnowledge: false })
+  const activeModule = ref<'after-sales' | 'knowledge'>('after-sales')
+  const canReviewAfterSales = computed(() => connected.value && capabilities.value.reviewAfterSales)
+  const canManageKnowledge = computed(() => connected.value && capabilities.value.manageKnowledge)
   const shops = ref<MerchantShop[]>([])
   const shopId = ref('')
   const selectedShop = computed(() => shops.value.find((shop) => String(shop.id) === shopId.value))
@@ -21,9 +26,23 @@ export function useMerchantDesk() {
   let client: ApiClient | null = null
   let accountContext = new AbortController()
   let shopContext = new AbortController()
+  const knowledge = useMerchantKnowledge({
+    client: () => client,
+    shop: () => (selectedShop.value ? shopId.value : null),
+    signal: () => shopContext.signal,
+    allowed: () => canManageKnowledge.value && activeModule.value === 'knowledge',
+    submitting,
+    report,
+  })
+  const navigationBlocked = computed(
+    () =>
+      submitting.value ||
+      knowledge.knowledgeDirty.value ||
+      knowledge.knowledgeNeedsVerification.value,
+  )
 
   function guardNavigation(event: BeforeUnloadEvent) {
-    if (!submitting.value) return
+    if (!navigationBlocked.value) return
     event.preventDefault()
     event.returnValue = ''
   }
@@ -38,6 +57,7 @@ export function useMerchantDesk() {
     loading.value = false
     error.value = null
     needsVerification.value = false
+    knowledge.resetKnowledge()
   }
 
   function resetAccount() {
@@ -51,11 +71,13 @@ export function useMerchantDesk() {
     shops.value = []
     shopId.value = ''
     loginError.value = null
+    capabilities.value = { reviewAfterSales: false, manageKnowledge: false }
+    activeModule.value = 'after-sales'
   }
 
   function disconnect(): boolean {
     // Do not cancel a business POST and leave the operator unsure whether it committed.
-    if (submitting.value) return false
+    if (navigationBlocked.value) return false
     resetAccount()
     return true
   }
@@ -77,7 +99,7 @@ export function useMerchantDesk() {
   }
 
   async function connect(account: string, password: string): Promise<boolean> {
-    if (connecting.value || submitting.value) return false
+    if (connecting.value || navigationBlocked.value) return false
     resetAccount()
     connecting.value = true
     const signal = accountContext.signal
@@ -90,11 +112,16 @@ export function useMerchantDesk() {
       if (identity.accountType !== 'MERCHANT_STAFF') {
         throw new ApiError('这是买家账号，请使用用户端登录。', 0, 'WRONG_ACCOUNT_TYPE')
       }
-      const granted = await candidate.merchantShops(signal)
+      const granted =
+        identity.capabilities.reviewAfterSales || identity.capabilities.manageKnowledge
+          ? await candidate.merchantShops(signal)
+          : []
       if (signal.aborted) return false
       client = candidate
       username.value = identity.username
       shops.value = granted
+      capabilities.value = identity.capabilities
+      activeModule.value = identity.capabilities.reviewAfterSales ? 'after-sales' : 'knowledge'
       connected.value = true
       connecting.value = false
       if (granted[0]) await changeShop(String(granted[0].id))
@@ -112,7 +139,7 @@ export function useMerchantDesk() {
 
   async function changeShop(nextId: string) {
     if (
-      submitting.value ||
+      navigationBlocked.value ||
       !connected.value ||
       !shops.value.some((shop) => String(shop.id) === nextId)
     )
@@ -120,11 +147,32 @@ export function useMerchantDesk() {
     if (shopId.value === nextId) return
     resetShop()
     shopId.value = nextId
-    await loadReviews('pending')
+    if (activeModule.value === 'after-sales') await loadReviews('pending')
+    else await knowledge.loadKnowledge()
+  }
+
+  async function switchModule(next: 'after-sales' | 'knowledge') {
+    if (navigationBlocked.value || !connected.value || activeModule.value === next) return
+    if (
+      (next === 'after-sales' && !canReviewAfterSales.value) ||
+      (next === 'knowledge' && !canManageKnowledge.value)
+    )
+      return
+    resetShop()
+    activeModule.value = next
+    if (next === 'after-sales') await loadReviews('pending')
+    else await knowledge.loadKnowledge()
   }
 
   async function loadReviews(nextView: 'pending' | 'history' = view.value) {
-    if (!client || !selectedShop.value || !connected.value || loading.value || submitting.value)
+    if (
+      !client ||
+      !selectedShop.value ||
+      !canReviewAfterSales.value ||
+      activeModule.value !== 'after-sales' ||
+      loading.value ||
+      submitting.value
+    )
       return
     const activeClient = client
     const activeShop = shopId.value
@@ -156,6 +204,8 @@ export function useMerchantDesk() {
     if (
       !client ||
       !connected.value ||
+      !canReviewAfterSales.value ||
+      activeModule.value !== 'after-sales' ||
       !selectedShop.value ||
       loading.value ||
       submitting.value ||
@@ -203,6 +253,8 @@ export function useMerchantDesk() {
     if (
       !client ||
       !connected.value ||
+      !canReviewAfterSales.value ||
+      activeModule.value !== 'after-sales' ||
       !selectedShop.value ||
       loading.value ||
       submitting.value ||
@@ -236,10 +288,18 @@ export function useMerchantDesk() {
     window.removeEventListener('beforeunload', guardNavigation)
     accountContext.abort()
     shopContext.abort()
+    knowledge.resetKnowledge()
     client = null
   })
 
   return {
+    ...knowledge,
+    capabilities,
+    activeModule,
+    canReviewAfterSales,
+    canManageKnowledge,
+    navigationBlocked,
+    switchModule,
     username,
     connected,
     connecting,

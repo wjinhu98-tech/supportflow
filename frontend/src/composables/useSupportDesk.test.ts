@@ -70,8 +70,15 @@ const selection = (orders = [order], nextAfterId: number | null = null): ChatRes
   type: 'ORDER_SELECTION',
   orders,
   nextAfterId,
+  knowledge: null,
 })
-const textReply: ChatResponse = { reply: '你好', type: 'TEXT', orders: [], nextAfterId: null }
+const textReply: ChatResponse = {
+  reply: '你好',
+  type: 'TEXT',
+  orders: [],
+  nextAfterId: null,
+  knowledge: null,
+}
 const conversation: Conversation = {
   id: '00000000-0000-4000-8000-000000000001',
   shopId: 100,
@@ -145,7 +152,11 @@ beforeEach(() => {
   localStorage.clear()
   sessionStorage.clear()
   mocks.authenticate.mockReset().mockResolvedValue(undefined)
-  mocks.currentAccount.mockReset().mockResolvedValue({ username: 'buyer', accountType: 'BUYER' })
+  mocks.currentAccount.mockReset().mockResolvedValue({
+    username: 'buyer',
+    accountType: 'BUYER',
+    capabilities: { reviewAfterSales: false, manageKnowledge: false },
+  })
   mocks.chat.mockReset().mockResolvedValue(selection())
   mocks.reply.mockReset().mockResolvedValue(textReply)
   mocks.conversations.mockReset().mockResolvedValue({ conversations: [], nextBeforeId: null })
@@ -188,6 +199,74 @@ afterEach(() => {
 })
 
 describe('useSupportDesk', () => {
+  const citedReply: ChatResponse = {
+    ...textReply,
+    reply: '可以搭配贺卡。',
+    knowledge: {
+      status: 'ANSWERED',
+      sources: [
+        { sourceId: 'kb-gift', version: 'v1', title: '包装说明', content: '礼盒可搭配贺卡。' },
+      ],
+    },
+  }
+
+  it('propagates structured evidence on send and restores its original snapshot without a new query', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    mocks.reply.mockResolvedValueOnce(citedReply)
+    await desk.sendMessage('能放张祝福卡吗？')
+    expect(desk.messages.value[1]).toMatchObject({
+      knowledge: citedReply.knowledge,
+      historical: false,
+    })
+    const persisted = storedPair('能放张祝福卡吗？', citedReply)
+    mocks.conversationMessages.mockResolvedValueOnce({
+      conversation,
+      messages: persisted,
+      nextBeforeId: null,
+    })
+    const sendCount = mocks.sendConversationMessage.mock.calls.length
+    const replyCount = mocks.reply.mock.calls.length
+    await desk.selectConversation(conversation.id)
+    expect(desk.messages.value[1]).toMatchObject({
+      knowledge: citedReply.knowledge,
+      historical: true,
+    })
+    expect(mocks.sendConversationMessage).toHaveBeenCalledTimes(sendCount)
+    expect(mocks.reply).toHaveBeenCalledTimes(replyCount)
+    expect(desk.selectedOrder.value).toBeNull()
+  })
+
+  it('preserves evidence while prepending history and clears it on shop changes and disconnect', async () => {
+    const recent = storedPair('recent', citedReply)
+    const older = storedPair('older', {
+      ...citedReply,
+      knowledge: {
+        status: 'ANSWERED',
+        sources: [
+          { sourceId: 'kb-wash', version: 'v2', title: '洗护说明', content: '请低温手洗。' },
+        ],
+      },
+    })
+    mocks.conversations.mockResolvedValueOnce({ conversations: [conversation], nextBeforeId: null })
+    mocks.conversationMessages
+      .mockResolvedValueOnce({ conversation, messages: recent, nextBeforeId: recent[0]!.id })
+      .mockResolvedValueOnce({ conversation, messages: older, nextBeforeId: null })
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    await desk.loadEarlierMessages()
+    expect(
+      desk.messages.value
+        .filter((message) => message.role === 'assistant')
+        .map((message) => message.knowledge),
+    ).toEqual([older[1]!.response!.knowledge, citedReply.knowledge])
+    expect(mocks.reply).not.toHaveBeenCalled()
+    await desk.changeShop('101')
+    expect(desk.messages.value).toEqual([])
+    desk.disconnect()
+    expect(desk.messages.value).toEqual([])
+  })
+
   it('restores the latest conversation without re-running an old refund prompt or order action', async () => {
     const history = storedPair('申请退款', {
       ...textReply,
@@ -929,7 +1008,11 @@ describe('useSupportDesk', () => {
 
   it('rejects a merchant identity before loading buyer business data', async () => {
     const desk = createDesk()
-    mocks.currentAccount.mockResolvedValueOnce({ username: 'staff', accountType: 'MERCHANT_STAFF' })
+    mocks.currentAccount.mockResolvedValueOnce({
+      username: 'staff',
+      accountType: 'MERCHANT_STAFF',
+      capabilities: { reviewAfterSales: true, manageKnowledge: false },
+    })
     expect(await desk.connect('staff', 'test')).toBe(false)
     expect(desk.connected.value).toBe(false)
     expect(desk.loginError.value).toContain('商家管理端')
@@ -940,12 +1023,20 @@ describe('useSupportDesk', () => {
 
   it('discards a late identity response after disconnect', async () => {
     const desk = createDesk()
-    const pending = deferred<{ username: string; accountType: string }>()
+    const pending = deferred<{
+      username: string
+      accountType: string
+      capabilities: { reviewAfterSales: boolean; manageKnowledge: boolean }
+    }>()
     mocks.currentAccount.mockReturnValueOnce(pending.promise)
     const request = desk.connect('buyer', 'test')
     await Promise.resolve()
     desk.disconnect()
-    pending.resolve({ username: 'buyer', accountType: 'BUYER' })
+    pending.resolve({
+      username: 'buyer',
+      accountType: 'BUYER',
+      capabilities: { reviewAfterSales: false, manageKnowledge: false },
+    })
     expect(await request).toBe(false)
     expect(desk.connected.value).toBe(false)
   })

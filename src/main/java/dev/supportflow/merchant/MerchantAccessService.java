@@ -17,7 +17,7 @@ public class MerchantAccessService {
     public MerchantAccessService(MerchantAccessRepository repository) { this.repository = repository; }
 
     public List<MerchantShop> shops(CustomerPrincipal principal) {
-        requireStaff(principal);
+        if (!MerchantCapabilities.from(principal).any()) throw denied();
         if (!repository.activeStaff(principal.getUsername(), principal.getIdentity().buyerId())) throw denied();
         return repository.list(principal.getUsername(), principal.getIdentity().buyerId());
     }
@@ -25,6 +25,19 @@ public class MerchantAccessService {
     public MerchantShopAccess requireShop(CustomerPrincipal principal, long shopId) {
         requireStaff(principal);
         return repository.find(principal.getUsername(), principal.getIdentity().buyerId(), shopId, false)
+                .orElseThrow(MerchantAccessService::denied);
+    }
+
+    public MerchantShopAccess requireKnowledgeShop(CustomerPrincipal principal, long shopId) {
+        if (!MerchantCapabilities.from(principal).manageKnowledge()) throw denied();
+        return repository.find(principal.getUsername(), principal.getIdentity().buyerId(), shopId, false)
+                .orElseThrow(MerchantAccessService::denied);
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public MerchantShopAccess lockKnowledgeShop(CustomerPrincipal principal, long shopId) {
+        if (!MerchantCapabilities.from(principal).manageKnowledge()) throw denied();
+        return repository.find(principal.getUsername(), principal.getIdentity().buyerId(), shopId, true)
                 .orElseThrow(MerchantAccessService::denied);
     }
 

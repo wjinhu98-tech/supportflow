@@ -13,7 +13,13 @@ const order = {
   receivedAt: null,
 }
 const csrf = { headerName: 'X-CSRF-TOKEN', parameterName: '_csrf', token: 'public-test-csrf' }
-const reply = { reply: '订单已发货', type: 'ORDER_DETAILS', orders: [order], nextAfterId: null }
+const reply = {
+  reply: '订单已发货',
+  type: 'ORDER_DETAILS',
+  orders: [order],
+  nextAfterId: null,
+  knowledge: null,
+}
 const ticket = {
   id: '00000000-0000-4000-8000-000000000001',
   shopId: 100,
@@ -491,6 +497,7 @@ describe('ApiClient', () => {
         type: 'AFTER_SALE_FORM',
         orders,
         nextAfterId: null,
+        knowledge: null,
       }
       const request = fetchMock()
         .mockResolvedValueOnce(json(csrf))

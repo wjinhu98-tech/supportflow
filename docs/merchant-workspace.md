@@ -11,7 +11,7 @@
 
 ## 身份和权限不是同一回事
 
-账号类型是服务端配置的枚举 `BUYER` / `MERCHANT_STAFF`，省略时默认买家。单独拥有 `AFTER_SALE_REVIEW` 不会升级为商家员工；前端也不能凭用户名猜测身份。GET `/api/v1/security/me` 仅返回当前账号名和类型，不返回密码、买家ID或权限凭据。
+账号类型是服务端配置的枚举 `BUYER` / `MERCHANT_STAFF`，省略时默认买家。单独拥有 `AFTER_SALE_REVIEW` 不会升级为商家员工；前端也不能凭用户名猜测身份。GET `/api/v1/security/me` 返回账号名、类型和公开功能开关 `capabilities`，不返回密码、买家ID或凭据。V10起知识维护使用独立 `KNOWLEDGE_MANAGE`，知识专职员工不需要退款审批权限；见[知识管理说明](shop-knowledge-management.md)。
 
 员工进入管理端需要：明确的员工账号类型、`ORDER_READ`与`AFTER_SALE_REVIEW`、有效商家与员工绑定，以及相同商家下的有效店铺和显式授权。买家账号不能调用商家接口；员工账号不能调用买家订单/聊天/历史接口。服务内部读取订单进行审批校验仍受原业务逻辑控制。
 

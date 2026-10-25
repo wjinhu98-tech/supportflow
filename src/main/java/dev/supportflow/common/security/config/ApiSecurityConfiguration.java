@@ -5,6 +5,7 @@ import dev.supportflow.common.security.api.JsonAuthenticationEntryPoint;
 import dev.supportflow.common.security.model.SecurityPermission;
 import dev.supportflow.common.security.model.AccountType;
 import dev.supportflow.common.security.model.CustomerPrincipal;
+import dev.supportflow.merchant.MerchantCapabilities;
 import jakarta.servlet.DispatcherType;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -62,7 +63,15 @@ public class ApiSecurityConfiguration {
                         ).access(accountAccess(AccountType.BUYER, SecurityPermission.ORDER_READ))
                         // Retired global queues must never become an alternate authorization path.
                         .requestMatchers("/api/v1/reviews/**").denyAll()
-                        .requestMatchers(HttpMethod.GET, "/api/v1/merchant/shops",
+                        .requestMatchers(HttpMethod.GET, "/api/v1/merchant/shops")
+                        .access((authentication, context) -> new AuthorizationDecision(
+                                authentication.get().getPrincipal() instanceof CustomerPrincipal principal
+                                        && (MerchantCapabilities.from(principal).reviewAfterSales()
+                                        || MerchantCapabilities.from(principal).manageKnowledge())))
+                        .requestMatchers("/api/v1/merchant/shops/*/knowledge",
+                                "/api/v1/merchant/shops/*/knowledge/**")
+                        .access(accountAccess(AccountType.MERCHANT_STAFF, SecurityPermission.KNOWLEDGE_MANAGE))
+                        .requestMatchers(HttpMethod.GET,
                                 "/api/v1/merchant/shops/*/after-sales",
                                 "/api/v1/merchant/shops/*/after-sales/history")
                         .access(accountAccess(AccountType.MERCHANT_STAFF, SecurityPermission.ORDER_READ,

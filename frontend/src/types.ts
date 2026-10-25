@@ -19,11 +19,25 @@ export interface ReceiptConfirmation {
 
 export type ChatReplyType = 'TEXT' | 'ORDER_DETAILS' | 'ORDER_SELECTION' | 'AFTER_SALE_FORM'
 
+/** Immutable evidence carried with this reply, never a URL to fetch current article content. */
+export interface ChatKnowledgeSource {
+  sourceId: string
+  version: string
+  title: string
+  content: string
+}
+
+export interface ChatKnowledge {
+  status: 'ANSWERED' | 'NO_MATCH' | 'UNAVAILABLE'
+  sources: ChatKnowledgeSource[]
+}
+
 export interface ChatResponse {
   reply: string
   type: ChatReplyType
   orders: Order[]
   nextAfterId: number | null
+  knowledge: ChatKnowledge | null
 }
 
 export interface CsrfResponse {
@@ -39,6 +53,7 @@ export interface ChatMessage {
   createdAt: string
   type?: ChatReplyType
   orders?: Order[]
+  knowledge?: ChatKnowledge | null
   /** Restored order cards are immutable historical snapshots, never current business state. */
   historical?: boolean
   pending?: boolean
@@ -116,6 +131,12 @@ export interface AfterSaleExecution {
 export interface CurrentAccount {
   username: string
   accountType: 'BUYER' | 'MERCHANT_STAFF'
+  capabilities: AccountCapabilities
+}
+
+export interface AccountCapabilities {
+  reviewAfterSales: boolean
+  manageKnowledge: boolean
 }
 
 export interface MerchantShop {
@@ -123,4 +144,45 @@ export interface MerchantShop {
   name: string
   merchantId: number
   merchantName: string
+}
+
+export interface KnowledgeInput {
+  title: string
+  keywords: string[]
+  content: string
+}
+
+export interface KnowledgeSnapshot extends KnowledgeInput {
+  revision: number
+  publishedAt: string
+}
+
+export interface KnowledgeArticle extends KnowledgeInput {
+  id: string
+  shopId: number
+  status: 'DRAFT' | 'PUBLISHED' | 'OFFLINE'
+  version: number
+  publishedRevision: number | null
+  publishedSnapshot: KnowledgeSnapshot | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface KnowledgePage {
+  items: KnowledgeArticle[]
+  nextBeforeId: string | null
+}
+
+export interface KnowledgeAudit extends KnowledgeInput {
+  id: string
+  action: 'CREATED' | 'SAVED' | 'PUBLISHED' | 'OFFLINE'
+  actor: string
+  version: number
+  publishedRevision: number | null
+  createdAt: string
+}
+
+export interface KnowledgeAuditPage {
+  items: KnowledgeAudit[]
+  nextBeforeId: string | null
 }

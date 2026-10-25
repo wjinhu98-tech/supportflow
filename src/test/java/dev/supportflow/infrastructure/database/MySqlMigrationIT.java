@@ -74,7 +74,7 @@ class MySqlMigrationIT {
         MigrateResult firstMigration = flyway.migrate();
 
         assertThat(firstMigration.success).isTrue();
-        assertThat(firstMigration.migrationsExecuted).isEqualTo(8);
+        assertThat(firstMigration.migrationsExecuted).isEqualTo(10);
 
         MigrateResult secondMigration = flyway.migrate();
 
@@ -87,10 +87,11 @@ class MySqlMigrationIT {
                 MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword());
              Statement statement = connection.createStatement()) {
             for (String table : List.of("support_merchant", "support_merchant_shop",
-                    "support_merchant_staff", "support_merchant_staff_shop_grant")) {
+                    "support_merchant_staff", "support_merchant_staff_shop_grant",
+                    "support_knowledge_article", "support_knowledge_revision", "support_knowledge_audit")) {
                 try (ResultSet rows = statement.executeQuery("SELECT COUNT(*) FROM " + table)) {
                     assertThat(rows.next()).isTrue();
-                    assertThat(rows.getLong(1)).as("Migration must not assign authorization: " + table).isZero();
+                    assertThat(rows.getLong(1)).as("Migration must not invent authorization or publish knowledge: " + table).isZero();
                 }
             }
         }
@@ -164,7 +165,7 @@ class MySqlMigrationIT {
                     FROM flyway_schema_history
                     ORDER BY installed_rank
                     """)) {
-                for (String version : List.of("1", "2", "3", "4", "5", "6", "7", "8", "9")) {
+                for (String version : List.of("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11")) {
                     assertThat(history.next()).isTrue();
                     assertThat(history.getString("version")).isEqualTo(version);
                     assertThat(history.getBoolean("success")).isTrue();
@@ -174,6 +175,16 @@ class MySqlMigrationIT {
             org.assertj.core.api.Assertions.assertThatThrownBy(() ->
                     statement.executeUpdate("UPDATE support_order SET buyer_id = 0")
             ).isInstanceOf(SQLException.class);
+            for (String nullablePublication : List.of("NULL,1", "1,NULL")) {
+                org.assertj.core.api.Assertions.assertThatThrownBy(() -> statement.executeUpdate("""
+                        INSERT INTO support_knowledge_article
+                        (id,tenant_id,title,keywords_json,content,status,version,last_revision,published_revision,publication_slot)
+                        VALUES (UUID(),100,'Invalid publication',JSON_ARRAY('test'),'Invalid publication snapshot',
+                                'PUBLISHED',1,1,
+                        """ + nullablePublication + ")"))
+                        .as("PUBLISHED rows require both a revision and a bounded non-null slot")
+                        .isInstanceOf(SQLException.class);
+            }
         }
     }
 

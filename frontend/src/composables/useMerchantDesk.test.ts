@@ -1,6 +1,7 @@
 import { effectScope } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AfterSaleTicket, CurrentAccount, MerchantShop } from '../types'
+import { knowledgeDraft } from '../test/knowledgeFixtures'
 
 const mocks = vi.hoisted(() => ({
   authenticate: vi.fn(),
@@ -10,6 +11,13 @@ const mocks = vi.hoisted(() => ({
   reviewHistory: vi.fn(),
   decideReview: vi.fn(),
   retryExecution: vi.fn(),
+  knowledgeArticles: vi.fn(),
+  knowledgeArticle: vi.fn(),
+  knowledgeAudit: vi.fn(),
+  createKnowledgeArticle: vi.fn(),
+  saveKnowledgeArticle: vi.fn(),
+  publishKnowledgeArticle: vi.fn(),
+  offlineKnowledgeArticle: vi.fn(),
 }))
 vi.mock('../api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api/client')>()
@@ -23,6 +31,13 @@ vi.mock('../api/client', async (importOriginal) => {
       reviewHistory = mocks.reviewHistory
       decideReview = mocks.decideReview
       retryExecution = mocks.retryExecution
+      knowledgeArticles = mocks.knowledgeArticles
+      knowledgeArticle = mocks.knowledgeArticle
+      knowledgeAudit = mocks.knowledgeAudit
+      createKnowledgeArticle = mocks.createKnowledgeArticle
+      saveKnowledgeArticle = mocks.saveKnowledgeArticle
+      publishKnowledgeArticle = mocks.publishKnowledgeArticle
+      offlineKnowledgeArticle = mocks.offlineKnowledgeArticle
     },
   }
 })
@@ -85,8 +100,14 @@ function desk() {
 }
 beforeEach(() => {
   for (const mock of Object.values(mocks)) mock.mockReset()
+  mocks.knowledgeArticles.mockResolvedValue({ items: [], nextBeforeId: null })
+  mocks.knowledgeAudit.mockResolvedValue({ items: [], nextBeforeId: null })
   mocks.authenticate.mockResolvedValue(undefined)
-  mocks.currentAccount.mockResolvedValue({ username: 'staff', accountType: 'MERCHANT_STAFF' })
+  mocks.currentAccount.mockResolvedValue({
+    username: 'staff',
+    accountType: 'MERCHANT_STAFF',
+    capabilities: { reviewAfterSales: true, manageKnowledge: false },
+  })
   mocks.merchantShops.mockResolvedValue(shops)
   mocks.pendingReviews.mockImplementation((shopId: string) =>
     Promise.resolve(shopId === '100' ? [ticket] : []),
@@ -103,6 +124,137 @@ afterEach(() => {
 })
 
 describe('useMerchantDesk', () => {
+  it('opens knowledge-only staff directly in knowledge without querying after-sale APIs', async () => {
+    const state = desk()
+    mocks.currentAccount.mockResolvedValueOnce({
+      username: 'editor',
+      accountType: 'MERCHANT_STAFF',
+      capabilities: { reviewAfterSales: false, manageKnowledge: true },
+    })
+    expect(await state.connect('editor', 'test')).toBe(true)
+    expect(state.activeModule.value).toBe('knowledge')
+    expect(state.canReviewAfterSales.value).toBe(false)
+    expect(state.canManageKnowledge.value).toBe(true)
+    expect(mocks.knowledgeArticles).toHaveBeenCalledWith('100', null, expect.any(AbortSignal))
+    await state.loadReviews()
+    await state.switchModule('after-sales')
+    expect(mocks.pendingReviews).not.toHaveBeenCalled()
+    expect(state.activeModule.value).toBe('knowledge')
+  })
+
+  it('never treats a reviewer-only account as a knowledge manager', async () => {
+    const state = desk()
+    await state.connect('reviewer', 'test')
+    await state.switchModule('knowledge')
+    state.newKnowledge()
+    await state.loadKnowledge()
+    expect(state.activeModule.value).toBe('after-sales')
+    expect(state.knowledgeEditing.value).toBe(false)
+    expect(mocks.knowledgeArticles).not.toHaveBeenCalled()
+  })
+
+  it('does not request shops or business records for staff without either capability', async () => {
+    const state = desk()
+    mocks.currentAccount.mockResolvedValueOnce({
+      username: 'unassigned',
+      accountType: 'MERCHANT_STAFF',
+      capabilities: { reviewAfterSales: false, manageKnowledge: false },
+    })
+    expect(await state.connect('unassigned', 'test')).toBe(true)
+    expect(state.shops.value).toEqual([])
+    expect(mocks.merchantShops).not.toHaveBeenCalled()
+    expect(mocks.pendingReviews).not.toHaveBeenCalled()
+    expect(mocks.knowledgeArticles).not.toHaveBeenCalled()
+  })
+
+  it('preserves unsaved knowledge input and locks shop/module/logout until explicitly cancelled', async () => {
+    const state = desk()
+    mocks.currentAccount.mockResolvedValueOnce({
+      username: 'both',
+      accountType: 'MERCHANT_STAFF',
+      capabilities: { reviewAfterSales: true, manageKnowledge: true },
+    })
+    await state.connect('both', 'test')
+    await state.switchModule('knowledge')
+    state.newKnowledge()
+    state.knowledgeTitle.value = '未保存的草稿'
+    expect(state.navigationBlocked.value).toBe(true)
+    await state.changeShop('101')
+    await state.switchModule('after-sales')
+    expect(state.disconnect()).toBe(false)
+    expect(state.activeModule.value).toBe('knowledge')
+    expect(state.shopId.value).toBe('100')
+    expect(state.knowledgeTitle.value).toBe('未保存的草稿')
+    state.cancelKnowledge()
+    expect(state.navigationBlocked.value).toBe(false)
+    expect(state.disconnect()).toBe(true)
+  })
+
+  it('shares the pending write lock across knowledge and after-sale navigation', async () => {
+    const state = desk()
+    mocks.currentAccount.mockResolvedValueOnce({
+      username: 'both',
+      accountType: 'MERCHANT_STAFF',
+      capabilities: { reviewAfterSales: true, manageKnowledge: true },
+    })
+    await state.connect('both', 'test')
+    await state.switchModule('knowledge')
+    state.newKnowledge()
+    state.knowledgeTitle.value = knowledgeDraft.title
+    state.knowledgeKeywords.value = '配送'
+    state.knowledgeContent.value = knowledgeDraft.content
+    const pending = deferred<typeof knowledgeDraft>()
+    mocks.createKnowledgeArticle.mockReturnValueOnce(pending.promise)
+    const request = state.saveKnowledge()
+    await state.changeShop('101')
+    await state.switchModule('after-sales')
+    state.cancelKnowledge()
+    expect(state.submitting.value).toBe(true)
+    expect(state.disconnect()).toBe(false)
+    expect(state.shopId.value).toBe('100')
+    expect(state.activeModule.value).toBe('knowledge')
+    expect(mocks.createKnowledgeArticle.mock.lastCall?.[0]).toBe('100')
+    pending.resolve(knowledgeDraft)
+    await request
+    await state.switchModule('after-sales')
+    expect(state.knowledgeSelected.value).toBeNull()
+    expect(state.knowledgeArticles.value).toEqual([])
+    expect(state.activeModule.value).toBe('after-sales')
+  })
+
+  it('ignores late knowledge list results after switching back to after-sale management', async () => {
+    const state = desk()
+    mocks.currentAccount.mockResolvedValueOnce({
+      username: 'both',
+      accountType: 'MERCHANT_STAFF',
+      capabilities: { reviewAfterSales: true, manageKnowledge: true },
+    })
+    await state.connect('both', 'test')
+    const pending = deferred<{ items: (typeof knowledgeDraft)[]; nextBeforeId: null }>()
+    mocks.knowledgeArticles.mockReturnValueOnce(pending.promise)
+    const request = state.switchModule('knowledge')
+    await state.switchModule('after-sales')
+    pending.resolve({ items: [knowledgeDraft], nextBeforeId: null })
+    await request
+    expect(state.activeModule.value).toBe('after-sales')
+    expect(state.knowledgeArticles.value).toEqual([])
+    expect(state.knowledgeLoading.value).toBe(false)
+  })
+
+  it('disconnects cleanly when a knowledge request sees expired authentication', async () => {
+    const state = desk()
+    mocks.currentAccount.mockResolvedValueOnce({
+      username: 'editor',
+      accountType: 'MERCHANT_STAFF',
+      capabilities: { reviewAfterSales: false, manageKnowledge: true },
+    })
+    await state.connect('editor', 'test')
+    mocks.knowledgeArticles.mockRejectedValueOnce(new ApiError('请重新登录', 401))
+    await state.loadKnowledge()
+    expect(state.connected.value).toBe(false)
+    expect(state.loginError.value).toBe('请重新登录')
+    expect(state.shops.value).toEqual([])
+  })
   it('verifies the server identity before listing granted shops and scoped pending tickets', async () => {
     const state = desk()
     expect(await state.connect('staff', 'test')).toBe(true)
@@ -117,7 +269,11 @@ describe('useMerchantDesk', () => {
 
   it('rejects a buyer identity without loading any merchant records or retaining credentials', async () => {
     const state = desk()
-    mocks.currentAccount.mockResolvedValueOnce({ username: 'buyer', accountType: 'BUYER' })
+    mocks.currentAccount.mockResolvedValueOnce({
+      username: 'buyer',
+      accountType: 'BUYER',
+      capabilities: { reviewAfterSales: false, manageKnowledge: false },
+    })
     expect(await state.connect('buyer', 'test')).toBe(false)
     expect(state.connected.value).toBe(false)
     expect(state.username.value).toBe('')
@@ -148,7 +304,13 @@ describe('useMerchantDesk', () => {
       for (let i = 0; i < 5; i++) await Promise.resolve()
       expect(state.disconnect()).toBe(true)
       pending.resolve(
-        stage === 'identity' ? { username: 'staff', accountType: 'MERCHANT_STAFF' } : shops,
+        stage === 'identity'
+          ? {
+              username: 'staff',
+              accountType: 'MERCHANT_STAFF',
+              capabilities: { reviewAfterSales: true, manageKnowledge: false },
+            }
+          : shops,
       )
       expect(await request).toBe(false)
       expect(state.connected.value).toBe(false)

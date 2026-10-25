@@ -8,7 +8,7 @@
 Vue 店铺客服页面
   → Java ChatController（认证、CSRF、请求校验）
   → ConversationOrchestrator / ConversationRouter
-     ├─ KNOWLEDGE → KnowledgeService → 本地版本化文档 → 引用式知识答复
+     ├─ KNOWLEDGE → KnowledgeService → 公共说明 + 当前店铺已发布快照 → 引用式知识答复
      └─ Agent → 允许的工具 / 参数校验
          ├─ 订单：复用既有 ChatService / OrderQueryService
          ├─ LogisticsTool → 归属校验后读取 support_shipment_event
@@ -30,8 +30,8 @@ Vue 店铺客服页面
 - Router 是服务器掌控的确定性路由，不让模型自行将读请求升级为写操作。显式固定指令「申请售后」优先，原因中含“政策/规则”也不会被误分流。
 - 物流/售后 Agent 每次最多规划并执行一个允许的工具。启用 DeepSeek 时使用官方 `tools/tool_choice/tool_calls` 协议；关闭时使用离线规则规划器。模型只能返回 `orderNo`，不能提供买家、店铺、金额、SQL、权限或审批结果。
 - Java 校验订单号证据、歧义、当前店铺、可信买家身份与订单归属。出现多个不同显式 SF 单号时要求重新选择，不能让模型任挑一笔。
-- RAG 当前采用版本化 Markdown、关键词/中文二元检索、原文抽取和逐源引用。无命中会拒答。这是可解释的检索/引用学习基线，不是向量数据库或让模型自由生成企业政策的系统。
-- 知识文档是本项目服务说明，不包含用户未提供的真实企业退款政策。文档路径为 `src/main/resources/knowledge`，更新时同步版本与测试；当前都属于公开的学习说明，不包含私有租户知识。
+- RAG采用公共版本化Markdown与MySQL中的店铺已发布快照、关键词/中文二元检索和逐源引用。草稿及其他店铺内容不进入当前店铺语料。普通问题有可靠店铺FAQ命中时直接引用，无依据不编造；这是词法检索基线，不是向量数据库或让模型自由生成政策。
+- 公共说明位于 `src/main/resources/knowledge`，商家在 `/merchant` 的知识管理区维护本店纯文本FAQ，编辑权限独立于售后审批。店铺知识对本店买家公开，不等于员工私密文件ACL。售后期限、订单事实及人工审批采用受控业务逻辑，商家文章不能覆盖它们；详见[知识库管理说明](shop-knowledge-management.md)。
 - 物流只读本项目实际录入的事件；无事件明确说暂无录入，不从 SHIPPED 猜运输轨迹。当前无物流录入后台，业务数据需受控导入；仅测试容器预置演示轨迹。
 - 售后创建/审核申请；批准后在同一事务创建持久化任务，后台模拟退款并记录进度、金额和模拟回执。`APPROVED` 是人工结果，`SUCCEEDED` 是模拟结果；不修改订单金额/状态，不调用支付渠道。执行、重试与恢复细节见 [售后执行说明](after-sale-execution.md)。
 - 一笔归属订单仅创建一张售后单。重试或更改原因重复发送会返回原单，不覆盖原原因；当前不支持拒绝后自动创建新单、部分退款、多次售后或撤销审批。
@@ -89,7 +89,7 @@ Vue 店铺客服页面
 
 根目录 `mvn -o verify`：单元、安全/数据库/迁移/并发集成测试。前端 `npm.cmd run check`、`npm.cmd run build`、`npm.cmd run test:e2e`：类型、状态流、构建、模拟接口浏览器测试。
 
-真正的浏览器/Java/MySQL闭环使用 `FrontendTestServer`。它创建一次性 MySQL、执行 V1–V9、开启模拟执行 Worker、强制关闭 DeepSeek、不加载 `.local`，只监听 `127.0.0.1:18081`。启动方式见 [前端运行说明](../frontend/README.md)。公开测试账号包括 `frontend-buyer`、`frontend-other`、`frontend-reviewer`、`frontend-reviewer-other`、`frontend-unassigned`，覆盖买家、不同商家和无店铺授权员工。密码均为源码中的测试专用 `Frontend-Test-Only!`，只能用于该临时实例。不要将它们复制到本地真实配置。
+真正的浏览器/Java/MySQL闭环使用 `FrontendTestServer`。它创建一次性MySQL、执行V1–V11、开启模拟执行Worker、强制关闭DeepSeek、不加载 `.local`，只监听 `127.0.0.1:18081`。启动方式见[前端运行说明](../frontend/README.md)。公开测试账号包括买家、不同商家的员工、无授权员工，以及 `frontend-editor` 知识专职和 `frontend-review-only` 审核专职账号。密码均为源码中的测试专用 `Frontend-Test-Only!`，只能用于该临时实例。不要复制到本地真实配置。
 
 DeepSeek function calling 的协议已由 mock HTTP 单测验证，没有为这轮验收消耗真实模型额度。[DeepSeek 官方工具调用文档](https://api-docs.deepseek.com/guides/tool_calls/)
 

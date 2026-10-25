@@ -19,6 +19,8 @@ final class KnowledgeRetriever {
     private static final Pattern WORDS = Pattern.compile("[\\p{IsHan}]+|[a-z0-9_]+");
     private static final Set<String> STOP_TERMS = Set.of(
             "什么", "怎么", "如何", "可以", "是否", "一下", "这个", "请问", "帮我", "我的", "需要", "订单");
+    private static final Set<String> GENERIC_SHOP_KEYWORDS = Set.of(
+            "清洁", "保养", "测量", "建议", "说明", "方法", "清洗", "洗涤", "洗护");
     private final List<KnowledgeDocument> documents;
     private final Map<String, Integer> documentFrequency = new HashMap<>();
     private final Map<String, Set<String>> documentTerms = new HashMap<>();
@@ -34,19 +36,37 @@ final class KnowledgeRetriever {
     }
 
     List<KnowledgeMatch> retrieve(String message) {
-        String query = normalize(message);
+        var expansion = KnowledgeQueryExpansion.expand(message);
+        String query = expansion.canonicalQuery();
         Set<String> queryTerms = tokenize(query);
         List<KnowledgeMatch> matches = new ArrayList<>();
         for (KnowledgeDocument document : documents) {
+            String normalizedContent = normalize(document.title() + " " + document.content());
+            boolean shopDocument = document.sourceId().startsWith("kb-");
+            if (shopDocument && KnowledgeQueryExpansion.conflicts(query, normalizedContent)) continue;
             LinkedHashSet<String> evidence = new LinkedHashSet<>();
             int keywordHits = 0;
             double score = 0;
+            Set<String> keywordConcepts = new LinkedHashSet<>();
             for (String keyword : document.keywords()) {
-                String normalized = normalize(keyword);
-                if (query.contains(normalized)) {
+                String normalized = KnowledgeQueryExpansion.expand(keyword).canonicalQuery();
+                // NFKC can turn non-breaking Unicode spaces into ordinary whitespace. An empty
+                // normalized keyword must never act as a universal query.contains("") match.
+                if (normalized.isBlank()) continue;
+                if (query.contains(normalized) && keywordConcepts.add(normalized)) {
                     evidence.add(keyword);
-                    keywordHits++;
+                    if (!shopDocument || !GENERIC_SHOP_KEYWORDS.contains(normalized)) keywordHits++;
                     score += 4.0;
+                }
+            }
+            // A deliberately configured, non-generic alias may match the source body even when
+            // a merchant did not repeat that term in the metadata. Never expand arbitrary words.
+            boolean expandedAnchor = false;
+            for (String concept : expansion.concepts()) {
+                if (!GENERIC_SHOP_KEYWORDS.contains(concept) && normalizedContent.contains(concept)) {
+                    expandedAnchor = true;
+                    evidence.add(expansion.expandedConcepts().contains(concept)
+                            ? "[" + KnowledgeQueryExpansion.VERSION + "]" + concept : concept);
                 }
             }
             int lexicalHits = 0;
@@ -58,7 +78,9 @@ final class KnowledgeRetriever {
                 }
             }
             // A generic one-bigram overlap is not enough evidence to claim an answer.
-            if (keywordHits > 0 || lexicalHits >= 3) {
+            // Shop prose needs a concrete subject anchor, not three accidental bigrams or a
+            // generic cleaning/advice keyword. The controlled catalog keeps its legacy recall.
+            if (keywordHits > 0 || expandedAnchor || (!shopDocument && lexicalHits >= 3)) {
                 matches.add(new KnowledgeMatch(document.sourceId(), document.version(), document.title(),
                         document.content(), score, List.copyOf(evidence)));
             }

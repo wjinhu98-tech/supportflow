@@ -2,6 +2,7 @@ package dev.supportflow.chat.api.response;
 
 import dev.supportflow.chat.application.model.ChatReply;
 import dev.supportflow.chat.application.model.ChatReplyType;
+import dev.supportflow.chat.application.model.KnowledgeEvidence;
 import dev.supportflow.order.api.response.OrderResponse;
 
 import java.util.List;
@@ -11,16 +12,25 @@ public record ChatResponse(
         String reply,
         ChatReplyType type,
         List<OrderResponse> orders,
-        Long nextAfterId
+        Long nextAfterId,
+        KnowledgeEvidence knowledge
 ) {
+    /** Compatibility for existing callers and historical response_json without knowledge metadata. */
+    public ChatResponse(String reply, ChatReplyType type, List<OrderResponse> orders, Long nextAfterId) {
+        this(reply, type, orders, nextAfterId, null);
+    }
+
     public ChatResponse {
         orders = List.copyOf(orders);
+        if (knowledge != null && (type != ChatReplyType.TEXT || !orders.isEmpty() || nextAfterId != null)) {
+            throw new IllegalArgumentException("Knowledge evidence cannot replace business results");
+        }
     }
 
     public static ChatResponse from(ChatReply result) {
         return new ChatResponse(
                 result.reply(), result.type(),
                 result.orders().stream().map(OrderResponse::from).toList(),
-                result.nextAfterId());
+                result.nextAfterId(), result.knowledge());
     }
 }

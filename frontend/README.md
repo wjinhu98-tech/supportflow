@@ -12,6 +12,10 @@ Vue 3 + TypeScript + Vite 的店铺客服工作台，支持订单咨询、知识
 
 V9起用户与商家采用独立入口：用户端仍是 `/?shopId=100`，商家管理端为 `/merchant`。商家账号必须配置 `MERCHANT_STAFF` 类型并有数据库员工和店铺授权；仅拥有审核权限不代表能查看全平台申请。没有授权时不会自动展示店铺。部署配置和最小权限见[商家管理端说明](../docs/merchant-workspace.md)。
 
+V10/V11增加店铺知识管理。在商家端选择“知识库”，可保存FAQ草稿、发布、下线并查看历史快照与操作记录。员工须有独立 `KNOWLEDGE_MANAGE` 权限；知识专职账号不会调用售后接口。修改已发布文章先保留旧发布内容，重新发布才改变买家回答。遇到版本冲突或网络结果不明时，重新读取只更新服务器版本并保留本地输入，确认后再显式保存，不自动重放写操作。详见[知识管理说明](../docs/shop-knowledge-management.md)。
+
+知识回答新增结构化 `knowledge`：有依据、无依据和资料不可用分开表示。回答下方的“参考来源”显示标题与版本，默认折叠完整原文；展开只读取本次响应，不抓取当前文章或外部网址。恢复历史保留当时版本并显示历史快照提示。旧历史没有该字段时仍可阅读。支持有限的同义问法，不代表向量语义检索；细节与可复现评测见[知识质量说明](../docs/knowledge-quality-and-interview.md)。
+
 在 PowerShell 中另开终端：
 
 ```powershell
@@ -49,7 +53,7 @@ API_PROXY_TARGET=http://127.0.0.1:8080
 - 错误提示、加载状态、重复发送防护、切换店铺/断开后的迟到响应隔离。
 - 桌面与移动端布局、键盘操作、中文输入法 Enter 防误发。
 
-固定指令「我的订单」「查订单 SF10001」「咨询此订单」不依赖模型。自然语言查单需后端启用 DeepSeek；新增物流/售后在关闭模型时可使用受限规则规划器。知识检索是本地文档检索与引用式抽取，不是任意知识问答。物流未接真实快递接口；审批通过不等于已退款。当前不支持流式聊天，对话只保留在页面内存中，售后与审计持久化到 MySQL。
+固定指令「我的订单」「查订单 SF10001」「咨询此订单」不依赖模型。自然语言查单需后端启用 DeepSeek；新增物流/售后在关闭模型时可使用受限规则规划器。知识检索是本地文档检索与引用式抽取，不是任意知识问答。物流未接真实快递接口；审批通过不等于已退款。当前不支持流式聊天；Basic 凭证只保留在页面内存中，对话历史、售后与审计持久化到 MySQL。
 
 ## 接口与安全边界
 
@@ -99,12 +103,12 @@ API_PROXY_TARGET=http://127.0.0.1:8080
 ```powershell
 npm.cmd run check      # TypeScript + API/状态流单元测试
 npm.cmd run build      # TypeScript + 生产打包，输出 dist/
-npm.cmd run test:e2e   # 真实浏览器 + 独立 HTTP mock，仅公开假数据
+npm.cmd run test:e2e -- --output=test-results/new-mock-run   # 使用尚不存在的输出目录
 ```
 
-浏览器测试默认使用本机 Microsoft Edge，不读取你的浏览器资料或登录态。其他环境可设置 `$env:PLAYWRIGHT_CHANNEL='chromium'` 并先安装 Playwright Chromium。测试会独占 5173 和 mock 18080；请先停止手动启动的 Vite。mock 只由测试命令启动，不是正常开发模式的后备数据。
+浏览器测试默认使用本机 Microsoft Edge，不读取你的浏览器资料或登录态。其他环境可设置 `$env:PLAYWRIGHT_CHANNEL='chromium'` 并先安装 Playwright Chromium。测试会独占 5173 和 mock 18080；请先停止手动启动的 Vite。mock 只由测试命令启动，不是正常开发模式的后备数据。每次传入新的、尚不存在的 `--output` 目录；不要复用旧测试结果目录，避免测试运行器自动清理既有文件。
 
-真实 Java 后端浏览器验证使用 `src/test/java/dev/supportflow/frontend/FrontendTestServer.java`：它只加载测试配置，在一次性 Testcontainers MySQL 中执行 V1–V9 并创建公开假买家/商家账号；强制关闭 DeepSeek。普通应用运行不会加载这个类。测试覆盖会话恢复与分页、历史只读不重放、退款原因表单（期限内、过期、缺少收货时间、确认前不创建）、双入口身份拦截、不同商家店铺隔离、无授权员工、商家批准/拒绝、商家和买家查看同一模拟执行凭证，以及知识与跨店物流隔离。`SF10002` 为期限内订单，`PAGE-001` 为过期订单，`SF10001` 缺少收货时间；这些测试日期只写入临时测试容器。
+真实Java后端浏览器验证使用 `src/test/java/dev/supportflow/frontend/FrontendTestServer.java`：它只加载测试配置，在一次性Testcontainers MySQL中执行V1–V11并创建公开假买家/商家账号；强制关闭DeepSeek。普通应用运行不会加载这个类。测试覆盖会话、订单、退款与确认收货、独立商家审批、跨店隔离，以及知识草稿/发布/下线、旧发布快照、审计、知识/审核专职账号、409冲突保留输入和丢失发布响应不重放。`SF10002`为期限内订单，`PAGE-001`为过期订单，`SF10001`缺少收货时间；这些测试日期只写入临时容器。
 
 确认收货浏览器用例使用独立的已发货订单 `SFRECEIPT01`，不会改变其他测试依赖的 `SF10001`。店铺 100 的买家共有 24 笔订单，第一页 20 笔，加载更多后可见新订单。用例验证打开或取消不提交、明确确认后状态和时间同步、后台截止时间恰为收货后 15 天、重复请求不刷新日期，以及刷新页面后仍可读取期限；`PAGE-021` 为已完成但缺少收货时间的历史订单，不提供确认按钮。运行后生成 `test-results/receipt-confirmation.png` 供界面检查。这个用例要求新启动的隔离测试容器，不在日常业务库回退订单状态。
 
@@ -120,8 +124,10 @@ JDK 路径按本机安装调整，或用 PATH 中的 `java`。等待 `FRONTEND_T
 
 ```powershell
 $env:E2E_BACKEND_URL='http://127.0.0.1:18081'
-npm.cmd run test:e2e
-Remove-Item Env:E2E_BACKEND_URL
+$browserOutput = 'test-results/live-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff')
+if (Test-Path -LiteralPath $browserOutput) { throw '请选择尚不存在的测试输出目录' }
+npm.cmd run test:e2e -- --output=$browserOutput
+$env:E2E_BACKEND_URL=$null
 ```
 
 测试使用 launcher 中公开的假账号，不使用你的日常账号。完成后 Ctrl+C 停止测试后端，临时容器随其关闭。不要将 `E2E_BACKEND_URL` 指向日常业务实例。

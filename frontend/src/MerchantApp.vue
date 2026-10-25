@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { Store, ShieldCheck, LogOut, LoaderCircle, ArrowLeft } from '@lucide/vue'
 import ReviewPanel from './components/ReviewPanel.vue'
+import KnowledgePanel from './components/KnowledgePanel.vue'
 import { useMerchantDesk } from './composables/useMerchantDesk'
 
 const {
@@ -12,6 +13,11 @@ const {
   shops,
   shopId,
   selectedShop,
+  activeModule,
+  canReviewAfterSales,
+  canManageKnowledge,
+  navigationBlocked,
+  switchModule,
   tickets,
   historyTickets,
   view,
@@ -25,6 +31,32 @@ const {
   loadReviews,
   submitReview,
   retryExecution,
+  knowledgeArticles,
+  knowledgeSelected,
+  knowledgeEditing,
+  knowledgeTitle,
+  knowledgeKeywords,
+  knowledgeContent,
+  knowledgeNextBeforeId,
+  knowledgeAudit,
+  knowledgeNextAuditBeforeId,
+  knowledgeLoading,
+  knowledgeDetailLoading,
+  knowledgeAuditLoading,
+  knowledgeError,
+  knowledgeNotice,
+  knowledgeNeedsVerification,
+  knowledgeDirty,
+  knowledgeHasUnpublishedChanges,
+  loadKnowledge,
+  loadKnowledgeAudit,
+  openKnowledge,
+  reloadKnowledge,
+  newKnowledge,
+  cancelKnowledge,
+  saveKnowledge,
+  publishKnowledge,
+  offlineKnowledge,
 } = useMerchantDesk()
 const account = ref('')
 const password = ref('')
@@ -65,7 +97,7 @@ function switchShop(event: Event) {
       </div>
       <div class="merchant-header-actions">
         <a
-          v-if="!submitting"
+          v-if="!navigationBlocked"
           href="/?shopId=100"
         >
           <ArrowLeft :size="16" />
@@ -76,7 +108,7 @@ function switchShop(event: Event) {
           <button
             type="button"
             data-testid="merchant-disconnect"
-            :disabled="submitting"
+            :disabled="navigationBlocked"
             @click="logout"
           >
             <LogOut :size="16" />
@@ -94,14 +126,14 @@ function switchShop(event: Event) {
         <h1>
           专注服务，
           <br />
-          有序处理每一份售后。
+          有序处理店铺的日常服务。
         </h1>
         <p>
-          查看获授权店铺的待审申请、记录审批依据，并跟进处理进度。买家咨询与商家管理使用独立入口。
+          根据员工权限处理售后或维护店铺知识。内容发布与业务审批分别授权，买家咨询与商家管理使用独立入口。
         </p>
         <div>
           <ShieldCheck :size="21" />
-          <span>店铺权限逐次核验 · 关键操作留痕 · 禁止申请人自审</span>
+          <span>店铺权限逐次核验 · 草稿与发布分离 · 关键操作留痕</span>
         </div>
       </section>
       <form
@@ -161,9 +193,15 @@ function switchShop(event: Event) {
     >
       <section class="merchant-workspace-heading">
         <div>
-          <p class="merchant-eyebrow">AFTER-SALES OPERATIONS</p>
-          <h1>店铺售后管理</h1>
-          <p>只处理当前账号已授权的店铺；批准后执行学习版模拟退款，不涉及真实资金。</p>
+          <p class="merchant-eyebrow">SHOP OPERATIONS</p>
+          <h1>{{ activeModule === 'knowledge' ? '店铺知识库管理' : '店铺售后管理' }}</h1>
+          <p>
+            {{
+              activeModule === 'knowledge'
+                ? '维护当前店铺的纯文本知识；草稿保存与发布分离，操作记录可追溯。'
+                : '只处理当前账号已授权的店铺；批准后执行学习版模拟退款，不涉及真实资金。'
+            }}
+          </p>
         </div>
         <label
           v-if="shops.length"
@@ -173,7 +211,7 @@ function switchShop(event: Event) {
           <select
             data-testid="merchant-shop-select"
             :value="shopId"
-            :disabled="submitting"
+            :disabled="navigationBlocked"
             @change="switchShop"
           >
             <option
@@ -193,7 +231,7 @@ function switchShop(event: Event) {
       >
         <ShieldCheck :size="38" />
         <h2>尚未获得店铺授权</h2>
-        <p>请联系管理员分配店铺。当前账号不能查看或处理任何店铺的售后申请。</p>
+        <p>请联系管理员分配店铺及管理权限。当前账号不能查看或处理店铺管理数据。</p>
       </div>
       <p
         v-if="submitting"
@@ -202,8 +240,34 @@ function switchShop(event: Event) {
       >
         正在提交操作，请等待结果后再切换店铺或退出。
       </p>
-      <ReviewPanel
+      <nav
         v-if="selectedShop"
+        class="merchant-modules"
+        aria-label="店铺管理分区"
+      >
+        <button
+          v-if="canReviewAfterSales"
+          type="button"
+          data-testid="merchant-tab-after-sales"
+          :aria-pressed="activeModule === 'after-sales'"
+          :disabled="navigationBlocked"
+          @click="switchModule('after-sales')"
+        >
+          售后管理
+        </button>
+        <button
+          v-if="canManageKnowledge"
+          type="button"
+          data-testid="merchant-tab-knowledge"
+          :aria-pressed="activeModule === 'knowledge'"
+          :disabled="navigationBlocked"
+          @click="switchModule('knowledge')"
+        >
+          知识库管理
+        </button>
+      </nav>
+      <ReviewPanel
+        v-if="selectedShop && canReviewAfterSales && activeModule === 'after-sales'"
         :key="shopId"
         embedded
         :shop-name="selectedShop.name"
@@ -217,6 +281,39 @@ function switchShop(event: Event) {
         @refresh="loadReviews"
         @decide="submitReview"
         @retry="retryExecution"
+      />
+      <KnowledgePanel
+        v-if="selectedShop && canManageKnowledge && activeModule === 'knowledge'"
+        :key="'knowledge-' + shopId"
+        v-model:title="knowledgeTitle"
+        v-model:keywords="knowledgeKeywords"
+        v-model:content="knowledgeContent"
+        :shop-name="selectedShop.name"
+        :articles="knowledgeArticles"
+        :selected="knowledgeSelected"
+        :editing="knowledgeEditing"
+        :loading="knowledgeLoading"
+        :detail-loading="knowledgeDetailLoading"
+        :audit-loading="knowledgeAuditLoading"
+        :submitting="submitting"
+        :error="knowledgeError"
+        :notice="knowledgeNotice"
+        :needs-verification="knowledgeNeedsVerification"
+        :dirty="knowledgeDirty"
+        :has-unpublished-changes="knowledgeHasUnpublishedChanges"
+        :more="knowledgeNextBeforeId !== null"
+        :audit="knowledgeAudit"
+        :audit-more="knowledgeNextAuditBeforeId !== null"
+        @refresh="loadKnowledge()"
+        @more="loadKnowledge(true)"
+        @open="openKnowledge"
+        @create="newKnowledge"
+        @cancel="cancelKnowledge"
+        @reload="reloadKnowledge"
+        @save="saveKnowledge"
+        @publish="publishKnowledge"
+        @offline="offlineKnowledge"
+        @audit-more="loadKnowledgeAudit(true)"
       />
     </main>
   </div>
@@ -396,6 +493,26 @@ function switchShop(event: Event) {
   font-size: 14px;
   color: #877593;
   line-height: 1.8;
+}
+.merchant-modules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 0 23px;
+}
+.merchant-modules button {
+  padding: 11px 20px;
+  border: 1px solid #dfd4e9;
+  color: #86699c;
+  background: #fff;
+  border-radius: 8px;
+  font: inherit;
+}
+.merchant-modules button[aria-pressed='true'] {
+  color: #725197;
+  border-color: #c5afd9;
+  background: #f1e9f9;
+  font-weight: 550;
 }
 .merchant-shop-switch {
   display: flex;

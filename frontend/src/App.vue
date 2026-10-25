@@ -22,6 +22,7 @@ import {
   X,
 } from '@lucide/vue'
 import OrderCard from './components/OrderCard.vue'
+import KnowledgeSources from './components/KnowledgeSources.vue'
 import AfterSalesPanel from './components/AfterSalesPanel.vue'
 import RefundDialog from './components/RefundDialog.vue'
 import ReceiptConfirmationDialog from './components/ReceiptConfirmationDialog.vue'
@@ -900,6 +901,11 @@ watch(
                   <div class="message-bubble">
                     <p>{{ message.text }}</p>
                   </div>
+                  <KnowledgeSources
+                    v-if="message.knowledge?.status === 'ANSWERED'"
+                    :knowledge="message.knowledge"
+                    :historical="message.historical"
+                  />
                   <div
                     v-if="message.orders?.length"
                     class="message-order-list"

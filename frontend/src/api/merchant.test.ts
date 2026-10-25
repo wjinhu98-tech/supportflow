@@ -34,15 +34,19 @@ const execution = {
 
 describe('merchant API boundaries', () => {
   it('reads current server identity without trusting account names or returning extra identity fields', async () => {
-    const request = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        json({ username: 'unpredictable-name', accountType: 'BUYER', buyerId: 200 }),
-      )
+    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      json({
+        username: 'unpredictable-name',
+        accountType: 'BUYER',
+        buyerId: 200,
+        capabilities: { reviewAfterSales: false, manageKnowledge: false },
+      }),
+    )
     const api = new ApiClient('unpredictable-name', 'test', request)
     expect(await api.currentAccount()).toEqual({
       username: 'unpredictable-name',
       accountType: 'BUYER',
+      capabilities: { reviewAfterSales: false, manageKnowledge: false },
     })
     expect(request.mock.calls[0]?.[0]).toBe('/api/v1/security/me')
     expect(request.mock.calls[0]?.[1]?.method).toBe('GET')
