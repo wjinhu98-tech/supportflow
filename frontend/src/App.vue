@@ -23,6 +23,7 @@ import {
 } from '@lucide/vue'
 import OrderCard from './components/OrderCard.vue'
 import KnowledgeSources from './components/KnowledgeSources.vue'
+import ConversationContextNotice from './components/ConversationContextNotice.vue'
 import AfterSalesPanel from './components/AfterSalesPanel.vue'
 import RefundDialog from './components/RefundDialog.vue'
 import ReceiptConfirmationDialog from './components/ReceiptConfirmationDialog.vue'
@@ -33,6 +34,10 @@ import type { Order } from './types'
 const {
   conversations,
   activeConversation,
+  conversationContext,
+  contextResetPending,
+  contextExpired,
+  clearConversationTopic,
   nextConversationBeforeId,
   nextMessageBeforeId,
   conversationsLoading,
@@ -737,6 +742,21 @@ watch(
             {{ conversationError }}
           </p>
 
+          <ConversationContextNotice
+            :context="conversationContext"
+            :pending-reset="contextResetPending"
+            :expired="contextExpired"
+            :disabled="
+              busy ||
+              historyLoading ||
+              conversationsLoading ||
+              refundSubmitting ||
+              receiptSubmitting ||
+              connecting
+            "
+            @clear="clearConversationTopic"
+          />
+
           <div
             v-if="selectedOrder"
             class="selected-context"
@@ -760,7 +780,13 @@ watch(
               type="button"
               class="icon-button"
               aria-label="取消选中订单"
-              :disabled="busy"
+              :disabled="
+                busy ||
+                historyLoading ||
+                conversationsLoading ||
+                refundSubmitting ||
+                receiptSubmitting
+              "
               @click="clearSelectedOrder"
             >
               <X
@@ -1120,7 +1146,13 @@ watch(
               class="icon-button"
               type="button"
               aria-label="关闭订单详情"
-              :disabled="busy"
+              :disabled="
+                busy ||
+                historyLoading ||
+                conversationsLoading ||
+                refundSubmitting ||
+                receiptSubmitting
+              "
               @click="clearSelectedOrder"
             >
               <X

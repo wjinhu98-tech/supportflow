@@ -14,8 +14,15 @@ public interface ConversationStore {
     void fail(long buyerId, long shopId, UUID conversationId, UUID clientMessageId);
 
     /** A successful cached turn is a read, never a second orchestration. */
-    record Reservation(ConversationTurnResponse cachedResponse) {
+    record Reservation(ConversationTurnResponse cachedResponse, ConversationContextRef context) {
+        public Reservation(ConversationTurnResponse cachedResponse) {
+            this(cachedResponse, ConversationContextRef.none());
+        }
+        public Reservation {
+            context = context == null ? ConversationContextRef.none() : context;
+        }
         public boolean cached() { return cachedResponse != null; }
         public static Reservation fresh() { return new Reservation(null); }
+        public static Reservation fresh(ConversationContextRef context) { return new Reservation(null, context); }
     }
 }

@@ -29,8 +29,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class DeepSeekOrderIntentRecognizerTest {
@@ -46,6 +49,21 @@ class DeepSeekOrderIntentRecognizerTest {
     void setUp() {
         httpClient = mock(HttpClient.class);
         recognizer = new DeepSeekOrderIntentRecognizer(httpClient, objectMapper, properties(Duration.ofSeconds(1)));
+    }
+
+    @Test
+    void shouldHideRequestSerializationFailureBeforeSendingAnyHttpRequest() {
+        String sensitiveMarker = "serialization-private-marker";
+        ObjectMapper failingMapper = spy(objectMapper);
+        doThrow(new IllegalStateException(sensitiveMarker + " " + API_KEY + " " + MESSAGE))
+                .when(failingMapper).writeValueAsString(any());
+        recognizer = new DeepSeekOrderIntentRecognizer(httpClient, failingMapper, properties(Duration.ofSeconds(1)));
+
+        assertThatThrownBy(() -> recognizer.recognize(MESSAGE)).isExactlyInstanceOf(ModelUnavailableException.class)
+                .hasNoCause().hasMessageNotContaining(sensitiveMarker)
+                .hasMessageNotContaining(API_KEY).hasMessageNotContaining(MESSAGE);
+
+        verifyNoInteractions(httpClient);
     }
 
     @Test
@@ -296,8 +314,7 @@ class DeepSeekOrderIntentRecognizerTest {
 
     @Test
     void shouldCollectBodyAtExactBound() {
-        DeepSeekOrderIntentRecognizer.LimitedBodySubscriber subscriber =
-                new DeepSeekOrderIntentRecognizer.LimitedBodySubscriber(8);
+        DeepSeekResponseBodySubscriber subscriber = new DeepSeekResponseBodySubscriber(8);
         subscriber.onSubscribe(mock(Flow.Subscription.class));
         subscriber.onNext(List.of(ByteBuffer.wrap(new byte[]{1, 2, 3}), ByteBuffer.wrap(new byte[]{4, 5})));
         subscriber.onNext(List.of(ByteBuffer.wrap(new byte[]{6, 7, 8})));
@@ -308,8 +325,7 @@ class DeepSeekOrderIntentRecognizerTest {
 
     @Test
     void shouldCancelBeforeCollectingResponsePastAccumulatedBound() {
-        DeepSeekOrderIntentRecognizer.LimitedBodySubscriber subscriber =
-                new DeepSeekOrderIntentRecognizer.LimitedBodySubscriber(8);
+        DeepSeekResponseBodySubscriber subscriber = new DeepSeekResponseBodySubscriber(8);
         Flow.Subscription subscription = mock(Flow.Subscription.class);
         subscriber.onSubscribe(subscription);
         subscriber.onNext(List.of(ByteBuffer.wrap(new byte[4])));

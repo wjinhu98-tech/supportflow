@@ -126,6 +126,26 @@ public class KnowledgeService {
         }
     }
 
+    /** Resolve one remembered public source against current scoped publications, never historical text. */
+    public KnowledgeAnswer followUpDetailed(long shopId, String message, List<String> sourceIds) {
+        if (!valid(message) || sourceIds == null || sourceIds.size() != 1
+                || sourceIds.getFirst() == null || !sourceIds.getFirst().matches("[a-z][a-z0-9-]{1,63}")) {
+            return renderDetailed(List.of());
+        }
+        if (isProtected(message)) return answerDetailed(shopId, message);
+        try {
+            String requested = sourceIds.getFirst();
+            List<KnowledgeDocument> current = requested.startsWith("kb-")
+                    ? managed == null ? List.of() : shopDocuments(shopId) : catalog;
+            var matches = current.stream().filter(document -> document.sourceId().equals(requested))
+                    .map(document -> new KnowledgeMatch(document.sourceId(), document.version(), document.title(),
+                            document.content(), 0, List.of("current-scoped-context-reference"))).toList();
+            return renderDetailed(matches);
+        } catch (RuntimeException unavailable) {
+            return unavailableAnswer();
+        }
+    }
+
     private static KnowledgeAnswer unavailableAnswer() {
         return new KnowledgeAnswer(UNAVAILABLE, new KnowledgeEvidence(KnowledgeStatus.UNAVAILABLE, List.of()));
     }

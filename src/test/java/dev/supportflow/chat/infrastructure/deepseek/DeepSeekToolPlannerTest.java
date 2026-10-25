@@ -29,8 +29,11 @@ import java.util.concurrent.Flow;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class DeepSeekToolPlannerTest {
@@ -45,6 +48,21 @@ class DeepSeekToolPlannerTest {
     void setUp() {
         client = mock(HttpClient.class);
         planner = new DeepSeekToolPlanner(client, mapper, properties(Duration.ofSeconds(1)));
+    }
+
+    @Test
+    void shouldHideRequestSerializationFailureBeforeSendingAnyHttpRequest() {
+        String sensitiveMarker = "serialization-private-marker";
+        ObjectMapper failingMapper = spy(mapper);
+        doThrow(new IllegalStateException(sensitiveMarker + " " + API_KEY + " " + MESSAGE))
+                .when(failingMapper).writeValueAsString(any());
+        planner = new DeepSeekToolPlanner(client, failingMapper, properties(Duration.ofSeconds(1)));
+
+        assertThatThrownBy(() -> planner.plan(ToolName.LOGISTICS_LOOKUP, MESSAGE, null))
+                .isExactlyInstanceOf(ModelUnavailableException.class).hasNoCause()
+                .hasMessageNotContaining(sensitiveMarker).hasMessageNotContaining(API_KEY).hasMessageNotContaining(MESSAGE);
+
+        verifyNoInteractions(client);
     }
 
     @Test

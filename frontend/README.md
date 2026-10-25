@@ -16,6 +16,10 @@ V10/V11增加店铺知识管理。在商家端选择“知识库”，可保存F
 
 知识回答新增结构化 `knowledge`：有依据、无依据和资料不可用分开表示。回答下方的“参考来源”显示标题与版本，默认折叠完整原文；展开只读取本次响应，不抓取当前文章或外部网址。恢复历史保留当时版本并显示历史快照提示。旧历史没有该字段时仍可阅读。支持有限的同义问法，不代表向量语义检索；细节与可复现评测见[知识质量说明](../docs/knowledge-quality-and-interview.md)。
 
+会话还会显示服务端返回的“当前话题”：订单号或知识来源引用，有效期 30 分钟。它只帮助解析受限追问，不代表订单现状、资料仍有效或操作权限。历史恢复只显示提示，不自动选择历史订单或打开退款表单。新追问由后端重新核验当前买家与店铺、读取实时订单或当前发布资料；旧来源原文仍作为历史快照展示。实现、调用链和面试取舍见[受控话题说明](../docs/conversation-context.md)。本次复用已有会话响应 JSON，不需要新增迁移或授权。
+
+点击“清除话题”或取消选中订单，不会立即向服务器发送请求。页面显示“下一条消息不沿用上次话题”，在下一条消息中携带 `resetContext=true`；只有该轮成功保存后才在服务器生效，失败或结果不明时保留待发送标记。发送前刷新页面、切换会话再返回，仍可能显示服务器保留的旧话题。账户、店铺和新会话不会共用这一标记。过期话题不继续自动携带旧选单，用户主动重选订单仍会重新查询。
+
 在 PowerShell 中另开终端：
 
 ```powershell
@@ -39,7 +43,7 @@ API_PROXY_TARGET=http://127.0.0.1:8080
 ## 已实现的操作
 
 - 当前店铺本人订单：自动加载、刷新、游标翻页、状态/金额/时间展示。
-- 选择订单并咨询；后续消息携带所选 `orderNo`，切店或取消选择后移除。
+- 选择订单并咨询；后续消息可携带本轮明确选中的 `orderNo`。切店、取消选择、话题过期或转为其他话题后移除旧选单；从历史话题引用恢复时不会自动选单。
 - 已发货且未记录收货时间的本人订单可点击「确认收货」，二次确认已经收到商品后提交。后台记录收货时间、订单变为已完成，并返回售后申请截止时间；列表、详情和聊天订单卡片同步更新。历史已完成但缺少收货时间的订单不会出现补填入口。
 - 自然语言提问、明确查单指令、回复中的可选订单卡片、订单详情。
 - 「服务规则」返回版本化文档及来源；「查物流」返回本项目实际录入的物流事件，无事件不会编造轨迹。
@@ -60,7 +64,7 @@ API_PROXY_TARGET=http://127.0.0.1:8080
 1. 用户点击连接，`ApiClient` 使用 UTF-8 HTTP Basic 请求 `GET /api/v1/security/csrf`。
 2. 浏览器保存后端的 HttpOnly 会话 Cookie；API 层只在内存中保存 Basic 凭证。当前后端认证可能轮换 CSRF token，因此每次 POST 前重新获取，不长期缓存。
 3. 加载订单通过 `POST /api/v1/shops/{shopId}/chat/messages` 发送 `{"message":"我的订单"}`，继续翻页发送 `我的订单 <原样游标>`。
-4. 咨询通过同一路径发送 `{"message":"咨询此订单","orderNo":"SF10001"}`，同时发送认证头、CSRF 请求头及同源 Cookie。
+4. 页面聊天使用 POST `/api/v1/shops/{shopId}/chat/conversations/{id}/messages`，发送 `clientMessageId`、`message`、可选 `orderNo` 和可选 `resetContext`（缺省为 `false`），同时发送认证头、CSRF 请求头及同源 Cookie。无状态聊天接口继续承担加载订单等兼容请求，不保存会话话题。
 5. 页面按响应的 `TEXT / ORDER_DETAILS / ORDER_SELECTION / AFTER_SALE_FORM` 展示文本、订单卡片或退款原因表单。表单指令最多携带一笔已验证归属的订单；空列表时必须先选订单。买家身份和订单归属始终由后端验证，前端不传 `buyerId/customerId`。
 6. 商家页 GET `/api/v1/merchant/shops/{shopId}/after-sales` 读取当前授权店铺最多50条待审，POST 同前缀 `/{uuid}/decision` 提交人工决定；保留 Basic、Cookie 与新 CSRF，不自动重试决定。
 7. 买家进度读取 GET `/api/v1/shops/{shopId}/after-sales`；商家进度读取 GET `/api/v1/merchant/shops/{shopId}/after-sales/history`。金额来自后端公开 DTO，前端不能修改退款金额。
@@ -80,17 +84,23 @@ API_PROXY_TARGET=http://127.0.0.1:8080
 点击「咨询此订单」
   → components/OrderCard.vue 发出 select 事件
   → App.vue 调用 selectOrder(order)
-  → composables/useSupportDesk.ts 更新选中订单，构造消息
+  → composables/useSupportDesk.ts 构造消息、显式订单与待发送 resetContext
   → api/client.ts 附加 Basic + CSRF + Cookie，发起 HTTP
-  → Java ChatController → ConversationOrchestrator / Router
+  → Java ConversationController → ConversationService
+      → JdbcConversationStore.reserve 校验会话归属，预留轮次并读取上次成功话题
+      → ConversationContextEngine 解析本轮目标，必要时澄清或重新核验引用
+      → ConversationOrchestrator / Router
       ├─ 知识问题 → 本地知识检索 → 带版本与来源的答复
       └─ Agent → 订单 / 物流 / 售后工具 → Java 归属与业务校验 → MySQL
-  → ChatResponse JSON
-  → useSupportDesk 更新 messages/selectedOrder
-  → Vue 自动更新聊天气泡和订单详情
+      → JdbcConversationStore.succeed 原子保存消息、响应快照与话题引用
+  → ConversationTurnResponse（双方消息，客服 response 内含 ChatResponse）
+  → useSupportDesk 更新 messages、当前话题和本轮新鲜订单选择
+  → Vue 更新聊天气泡、订单详情与 ConversationContextNotice
 ```
 
 `types.ts` 对应公开 DTO；`api/client.ts` 只管网络和协议；`useSupportDesk.ts` 组织页面状态和操作；组件只展示和响应用户事件。取消旧请求和检查上下文用于避免「旧店铺的结果跑到新店铺」。没有为单页工作台额外引入全局状态框架。
+
+`ConversationContextNotice.vue` 只显示订单/知识话题、过期状态和清除待发送提示，不查业务数据。`ApiClient` 校验 `NONE / ORDER / KNOWLEDGE` 引用结构、来源唯一性与到期时间格式，兼容旧回复缺失或为空的 `context`。`useSupportDesk` 在成功响应后更新提示，切换会话时中止旧请求，失败时保留待发送清除标记；这些界面处理不能替代后端归属与业务校验。
 
 `ReceiptConfirmationDialog.vue` 先解释确认收货的影响，用户第二次确认才发出操作事件。成功后保留结果面板展示后端记录的时间和售后期限。订单详情只为当前选中且有收货时间的订单按需读取期限，不对每张列表卡片单独发请求。切店或断开会丢弃迟到结果，确认过程中禁用关闭与重复点击。
 

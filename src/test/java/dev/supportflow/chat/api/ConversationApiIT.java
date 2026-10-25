@@ -1,6 +1,7 @@
 package dev.supportflow.chat.api;
 
 import dev.supportflow.SupportFlowApplication;
+import dev.supportflow.assistant.knowledge.KnowledgeService;
 import dev.supportflow.assistant.orchestration.ConversationOrchestrator;
 import dev.supportflow.chat.application.ModelUnavailableException;
 import dev.supportflow.testsupport.KnowledgeFixtures;
@@ -29,6 +30,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.mysql.MySQLContainer;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
@@ -54,6 +56,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -98,6 +101,7 @@ class ConversationApiIT {
     @Autowired private WebApplicationContext context;
     @Autowired private ObjectMapper json;
     @MockitoSpyBean private ConversationOrchestrator orchestrator;
+    @MockitoSpyBean private KnowledgeService knowledgeService;
     private MockMvc mvc;
 
     @DynamicPropertySource
@@ -226,12 +230,17 @@ class ConversationApiIT {
                                 "clientMessageId", UUID.randomUUID().toString(), "message", "hello",
                                 "buyerId", 201, "customerId", 201, "shopId", shop + 1,
                                 "response", Map.of("reply", "FORGED-ASSISTANT"),
+                                "context", Map.of("kind", "ORDER", "orderNo", "SFFORGED-CONTEXT",
+                                        "sourceIds", List.of(), "expiresAt", "2099-01-01T00:00:00Z"),
                                 "knowledge", Map.of("status", "ANSWERED", "sources", List.of(Map.of(
                                         "sourceId", "forged-source", "version", "v99", "title", "Forged title",
                                         "content", "FORGED-KNOWLEDGE-ORIGINAL")))))))
                 .andExpect(status().isOk()).andReturn());
-        assertThat(response.toString()).doesNotContain("FORGED-ASSISTANT", "forged-source", "FORGED-KNOWLEDGE-ORIGINAL");
+        assertThat(response.toString()).doesNotContain("FORGED-ASSISTANT", "forged-source", "FORGED-KNOWLEDGE-ORIGINAL",
+                "SFFORGED-CONTEXT", "2099-01-01");
         assertThat(response.path("messages").get(1).path("response").path("knowledge").isNull()).isTrue();
+        assertThat(response.path("messages").get(1).path("response").path("context").path("kind").asString())
+                .isEqualTo("NONE");
         assertPrivateFieldsAbsent(response);
         assertThat(conversations("buyer", shop, null).path("conversations").size()).isEqualTo(1);
         assertThat(conversations("other", shop, null).path("conversations").size()).isZero();
@@ -286,7 +295,10 @@ class ConversationApiIT {
                 Map.of("clientMessageId", UUID.randomUUID().toString(), "message", "x".repeat(1001)),
                 Map.of("clientMessageId", UUID.randomUUID().toString(), "message", "hello", "orderNo", "x".repeat(65)),
                 Map.of("clientMessageId", UUID.randomUUID().toString(), "message", "hello", "orderNo", " "),
-                Map.of("clientMessageId", UUID.randomUUID().toString(), "message", "hello", "orderNo", "SF\n123"));
+                Map.of("clientMessageId", UUID.randomUUID().toString(), "message", "hello", "orderNo", "SF\n123"),
+                Map.of("clientMessageId", UUID.randomUUID().toString(), "message", "hello", "resetContext", "true"),
+                Map.of("clientMessageId", UUID.randomUUID().toString(), "message", "hello", "resetContext", 1),
+                Map.of("clientMessageId", UUID.randomUUID().toString(), "message", "hello", "resetContext", List.of(true)));
         for (Map<String, ?> values : invalid) {
             mvc.perform(post(messagesUrl(shop, id)).with(httpBasic("buyer", PASSWORD)).with(csrf())
                             .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(values)))
@@ -371,8 +383,16 @@ class ConversationApiIT {
         String key = UUID.randomUUID().toString();
         String text = "IDEMPOTENT-HELLO";
         JsonNode first = body(send("buyer", shop, id, key, text, null).andExpect(status().isOk()).andReturn());
+        // The pre-context request format must keep the exact old persisted hash for existing client keys.
+        assertThat(count("SELECT COUNT(*) FROM support_chat_turn WHERE client_message_id=? "
+                + "AND request_hash=SHA2('16:IDEMPOTENT-HELLO|-',256)", key)).isEqualTo(1);
         JsonNode repeated = body(send("buyer", shop, id, key, text, null).andExpect(status().isOk()).andReturn());
         assertThat(repeated.path("messages")).isEqualTo(first.path("messages"));
+        JsonNode explicitlyFalse = body(mvc.perform(post(messagesUrl(shop, id))
+                        .with(httpBasic("buyer", PASSWORD)).with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("clientMessageId", key, "message", text, "resetContext", false))))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(explicitlyFalse.path("messages")).isEqualTo(first.path("messages"));
         send("buyer", shop, id, key, "CHANGED-HELLO", null).andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("CONVERSATION_CONFLICT"));
         send("buyer", shop, id, key, text, "SF-DIFFERENT").andExpect(status().isConflict());
@@ -510,7 +530,9 @@ class ConversationApiIT {
         assertKnowledgeSource(secondSnapshot, article, "v2", token, revised);
         JsonNode beforeOffline = history("buyer", shop, conversation, null).path("messages");
         assertThat(beforeOffline.get(1).path("response")).isEqualTo(firstSnapshot);
-        assertThat(beforeOffline.get(3).path("response")).isEqualTo(firstSnapshot);
+        assertThat(withoutContext(beforeOffline.get(3).path("response"))).isEqualTo(withoutContext(firstSnapshot));
+        assertThat(beforeOffline.get(3).path("response").path("context").path("sourceIds"))
+                .isEqualTo(firstSnapshot.path("context").path("sourceIds"));
         assertThat(beforeOffline.get(5).path("response")).isEqualTo(secondSnapshot);
 
         execute("""
@@ -527,7 +549,10 @@ class ConversationApiIT {
                 .andExpect(status().isOk()).andReturn());
         assertThat(replayed.path("messages")).isEqualTo(first.path("messages"));
         assertThat(messageCount(conversation)).isEqualTo(8);
-        verify(orchestrator, times(4)).reply(any(), eq(shop), eq(message), isNull());
+        // Current FAQ hits are resolved before the general orchestrator. Offline falls through once.
+        // History and idempotent replay must not add another retrieval or business/model invocation.
+        verify(knowledgeService, times(4)).tryAnswerDetailed(shop, message);
+        verify(orchestrator, times(1)).reply(any(), eq(shop), eq(message), isNull());
     }
 
     @Test
@@ -597,6 +622,249 @@ class ConversationApiIT {
         assertKnowledgeSource(other.path("messages").get(1).path("response"), ownArticle, "v1", token, ownText);
         assertThat(ids(other.path("messages"))).doesNotContainAnyElementsOf(ids(own.path("messages")));
         assertThat(messageCount(conversation)).isEqualTo(2);
+    }
+
+    @Test
+    void shouldRestoreAnOrderReferenceButReadCurrentStateAndHonorANewExplicitOrder() throws Exception {
+        long shop = SHOP.incrementAndGet();
+        Fixture firstOrder = order(shop, 200, "PAID");
+        Fixture secondOrder = order(shop, 200, "COMPLETED");
+        String conversation = create("buyer", shop).path("id").asString();
+        JsonNode first = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "查询此订单", firstOrder.number()).andExpect(status().isOk()).andReturn()));
+        assertOrderContext(first, firstOrder.number());
+        assertThat(first.path("orders").get(0).path("status").asString()).isEqualTo("PAID");
+        execute("UPDATE support_order SET status='SHIPPED' WHERE id=?", firstOrder.id());
+
+        JsonNode current = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "这单现在什么状态？", null).andExpect(status().isOk()).andReturn()));
+        assertOrderContext(current, firstOrder.number());
+        assertThat(current.path("orders").get(0).path("status").asString()).isEqualTo("SHIPPED");
+        JsonNode explicit = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "查询此订单", secondOrder.number()).andExpect(status().isOk()).andReturn()));
+        assertOrderContext(explicit, secondOrder.number());
+        JsonNode next = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "这单现在什么状态？", null).andExpect(status().isOk()).andReturn()));
+        assertOrderContext(next, secondOrder.number());
+        assertThat(next.path("orders").get(0).path("status").asString()).isEqualTo("COMPLETED");
+        assertThat(history("buyer", shop, conversation, null).path("messages").get(1).path("response"))
+                .isEqualTo(first);
+        assertThat(first.path("context").toString()).doesNotContain("PAID", "199.90", "buyerId", "shopId");
+    }
+
+    @Test
+    void shouldRecheckOwnershipBeforeUsingAnOldValidatedOrderReference() throws Exception {
+        long shop = SHOP.incrementAndGet();
+        Fixture order = order(shop, 200, "PAID");
+        String conversation = create("buyer", shop).path("id").asString();
+        JsonNode first = body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "查询此订单", order.number()).andExpect(status().isOk()).andReturn());
+        assertOrderContext(assistant(first), order.number());
+        execute("UPDATE support_order SET buyer_id=201 WHERE id=?", order.id());
+
+        send("buyer", shop, conversation, UUID.randomUUID().toString(), "这单现在什么状态？", null)
+                .andExpect(status().isNotFound());
+        assertThat(history("buyer", shop, conversation, null).path("messages")).isEqualTo(first.path("messages"));
+        assertThat(messageCount(conversation)).isEqualTo(2);
+    }
+
+    @Test
+    void shouldFollowAKnowledgePointerUsingOnlyTheCurrentPublicationAndKeepOldHistoryImmutable() throws Exception {
+        long shop = SHOP.incrementAndGet();
+        String keyword = "faq" + UUID.randomUUID().toString().replace("-", "");
+        String original = "填写说明 ORIGINAL-TOPIC " + keyword;
+        String revised = "填写说明 REVISED-TOPIC " + keyword;
+        String article = knowledge(shop, keyword, original);
+        String conversation = create("buyer", shop).path("id").asString();
+        JsonNode first = body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "知识库 " + keyword, null).andExpect(status().isOk()).andReturn());
+        assertKnowledgeSource(assistant(first), article, "v1", keyword, original);
+        assertKnowledgeContext(assistant(first), article);
+        execute("UPDATE support_knowledge_article SET content=?,version=2 WHERE id=?", revised, article);
+
+        JsonNode afterDraft = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "那怎么填写？", null).andExpect(status().isOk()).andReturn()));
+        assertKnowledgeSource(afterDraft, article, "v1", keyword, original);
+        republishKnowledge(article);
+        JsonNode afterPublish = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "那怎么填写？", null).andExpect(status().isOk()).andReturn()));
+        assertKnowledgeSource(afterPublish, article, "v2", keyword, revised);
+        assertKnowledgeContext(afterPublish, article);
+        execute("""
+                UPDATE support_knowledge_article SET status='OFFLINE',version=4,
+                    published_revision=NULL,publication_slot=NULL WHERE id=?
+                """, article);
+
+        JsonNode offline = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "那怎么填写？", null).andExpect(status().isOk()).andReturn()));
+        assertThat(offline.path("knowledge").path("status").asString()).isEqualTo("NO_MATCH");
+        assertThat(offline.path("knowledge").path("sources").size()).isZero();
+        assertThat(offline.path("context").path("kind").asString()).isEqualTo("NONE");
+        assertThat(offline.toString()).doesNotContain(original, revised, "kb-" + article);
+        JsonNode history = history("buyer", shop, conversation, null).path("messages");
+        assertThat(history.get(1).path("response")).isEqualTo(assistant(first));
+        assertThat(history.get(3).path("response")).isEqualTo(afterDraft);
+        assertThat(history.get(5).path("response")).isEqualTo(afterPublish);
+    }
+
+    @Test
+    void shouldClearContextExplicitlyAndIncludeThatDecisionInTheIdempotencyHash() throws Exception {
+        long shop = SHOP.incrementAndGet();
+        Fixture order = order(shop, 200, "PAID");
+        String conversation = create("buyer", shop).path("id").asString();
+        send("buyer", shop, conversation, UUID.randomUUID().toString(), "查询此订单", order.number())
+                .andExpect(status().isOk());
+        String clearKey = UUID.randomUUID().toString();
+        JsonNode cleared = body(send("buyer", shop, conversation, clearKey, "hello", null, true)
+                .andExpect(status().isOk()).andReturn());
+        assertEmptyContext(assistant(cleared));
+        JsonNode repeated = body(send("buyer", shop, conversation, clearKey, "hello", null, true)
+                .andExpect(status().isOk()).andReturn());
+        assertThat(repeated.path("messages")).isEqualTo(cleared.path("messages"));
+        send("buyer", shop, conversation, clearKey, "hello", null, false).andExpect(status().isConflict());
+        JsonNode followup = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "这单现在什么状态？", null).andExpect(status().isOk()).andReturn()));
+        assertEmptyContext(followup);
+        assertThat(followup.path("orders").size()).isZero();
+        assertThat(followup.path("reply").asString()).doesNotContain(order.number());
+        JsonNode newSelection = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "查询此订单", order.number(), true).andExpect(status().isOk()).andReturn()));
+        assertOrderContext(newSelection, order.number());
+    }
+
+    @Test
+    void shouldNotBorrowContextFromAnotherConversationBuyerOrShop() throws Exception {
+        long shop = SHOP.incrementAndGet();
+        Fixture order = order(shop, 200, "PAID");
+        String original = create("buyer", shop).path("id").asString();
+        send("buyer", shop, original, UUID.randomUUID().toString(), "查询此订单", order.number())
+                .andExpect(status().isOk());
+        String newConversation = create("buyer", shop).path("id").asString();
+        String otherBuyer = create("other", shop).path("id").asString();
+        long otherShop = SHOP.incrementAndGet();
+        String otherShopConversation = create("buyer", otherShop).path("id").asString();
+        for (ContextScope scope : List.of(new ContextScope("buyer", shop, newConversation),
+                new ContextScope("other", shop, otherBuyer), new ContextScope("buyer", otherShop, otherShopConversation))) {
+            JsonNode result = assistant(body(send(scope.username(), scope.shop(), scope.id(), UUID.randomUUID().toString(),
+                    "这单现在什么状态？", null).andExpect(status().isOk()).andReturn()));
+            assertEmptyContext(result);
+            assertThat(result.path("orders").size()).isZero();
+            assertThat(result.toString()).doesNotContain(order.number());
+        }
+        send("other", shop, original, UUID.randomUUID().toString(), "这单现在什么状态？", null)
+                .andExpect(status().isNotFound());
+        send("buyer", otherShop, original, UUID.randomUUID().toString(), "这单现在什么状态？", null)
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void shouldTreatExpiredOrLegacyReferencesAsEmptyWithoutInferringFromOldOrderCards() throws Exception {
+        long shop = SHOP.incrementAndGet();
+        Fixture order = order(shop, 200, "PAID");
+        for (boolean legacy : List.of(false, true)) {
+            String conversation = create("buyer", shop).path("id").asString();
+            JsonNode first = body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                    "查询此订单", order.number()).andExpect(status().isOk()).andReturn());
+            String assistantId = first.path("messages").get(1).path("id").asString();
+            if (legacy) {
+                execute("UPDATE support_chat_message SET response_json=JSON_REMOVE(response_json,'$.context') WHERE public_id=?",
+                        assistantId);
+                assertThat(storedResponse(assistantId).has("context")).isFalse();
+                JsonNode recovered = history("buyer", shop, conversation, null).path("messages").get(1).path("response");
+                assertThat(recovered.path("context").isNull()).isTrue();
+                assertThat(withoutContext(recovered)).isEqualTo(withoutContext(assistant(first)));
+            } else {
+                execute("UPDATE support_chat_message SET response_json=JSON_SET(response_json,'$.context.expiresAt',?) WHERE public_id=?",
+                        Instant.now().minusSeconds(5).toString(), assistantId);
+            }
+            JsonNode result = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                    "这单现在什么状态？", null).andExpect(status().isOk()).andReturn()));
+            assertEmptyContext(result);
+            assertThat(result.path("orders").size()).isZero();
+            assertThat(result.path("reply").asString()).doesNotContain(order.number());
+            if (legacy) assertThat(storedResponse(assistantId).has("context")).isFalse();
+        }
+    }
+
+    @Test
+    void shouldKeepTheNewestSuccessfulReferenceAfterFailureExpiredLeaseAndOldCachedReplay() throws Exception {
+        long shop = SHOP.incrementAndGet();
+        Fixture firstOrder = order(shop, 200, "PAID");
+        Fixture nextOrder = order(shop, 200, "SHIPPED");
+        String conversation = create("buyer", shop).path("id").asString();
+        String firstKey = UUID.randomUUID().toString();
+        JsonNode first = body(send("buyer", shop, conversation, firstKey, "查询此订单", firstOrder.number())
+                .andExpect(status().isOk()).andReturn());
+        String failingMessage = "CONTEXT-MODEL-FAILURE";
+        doThrow(new ModelUnavailableException()).when(orchestrator).reply(any(), eq(shop), eq(failingMessage), isNull());
+        send("buyer", shop, conversation, UUID.randomUUID().toString(), failingMessage, null)
+                .andExpect(status().isServiceUnavailable());
+        assertThat(history("buyer", shop, conversation, null).path("messages")).isEqualTo(first.path("messages"));
+        JsonNode newer = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "查询此订单", nextOrder.number()).andExpect(status().isOk()).andReturn()));
+        assertOrderContext(newer, nextOrder.number());
+        insertExpiredTurn(conversation);
+        JsonNode replay = body(send("buyer", shop, conversation, firstKey, "查询此订单", firstOrder.number())
+                .andExpect(status().isOk()).andReturn());
+        assertThat(replay.path("messages")).isEqualTo(first.path("messages"));
+        JsonNode current = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "这单现在什么状态？", null).andExpect(status().isOk()).andReturn()));
+        assertOrderContext(current, nextOrder.number());
+        assertThat(current.path("orders").get(0).path("status").asString()).isEqualTo("SHIPPED");
+        assertThat(messageCount(conversation)).isEqualTo(6);
+        assertThat(count("SELECT COUNT(*) FROM support_chat_turn turn JOIN support_chat_conversation conversation "
+                + "ON conversation.id=turn.conversation_id WHERE conversation.public_id=? AND turn.status='FAILED'", conversation))
+                .isEqualTo(2);
+    }
+
+    @Test
+    void shouldNeverTurnAnOrderContextOrAHistoricalConfirmationIntoARefundSubmission() throws Exception {
+        long shop = SHOP.incrementAndGet();
+        Fixture order = order(shop, 200, "PAID");
+        String conversation = create("buyer", shop).path("id").asString();
+        for (String request : List.of("申请退款", "申请售后 商品破损", "确认")) {
+            JsonNode selected = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                    "查询此订单", order.number()).andExpect(status().isOk()).andReturn()));
+            assertOrderContext(selected, order.number());
+            send("buyer", shop, conversation, UUID.randomUUID().toString(), request, null).andExpect(status().isOk());
+            assertThat(count("SELECT COUNT(*) FROM support_after_sale WHERE order_id=?", order.id())).isZero();
+        }
+    }
+
+    @Test
+    void shouldSerializeDifferentConcurrentMessagesWithoutPublishingAnUnfinishedContext() throws Exception {
+        long shop = SHOP.incrementAndGet();
+        Fixture order = order(shop, 200, "PAID");
+        String conversation = create("buyer", shop).path("id").asString();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch finish = new CountDownLatch(1);
+        doAnswer(call -> {
+            entered.countDown();
+            if (!finish.await(15, TimeUnit.SECONDS)) throw new IllegalStateException("Isolated orchestration hold timeout");
+            return call.callRealMethod();
+        }).when(orchestrator).reply(any(), eq(shop), eq("查询此订单"), eq(order.number()));
+        CompletableFuture<MvcResult> first = CompletableFuture.supplyAsync(() -> {
+            try {
+                return send("buyer", shop, conversation, UUID.randomUUID().toString(), "查询此订单", order.number()).andReturn();
+            } catch (Exception failure) {
+                throw new IllegalStateException("Isolated concurrent context test failed", failure);
+            }
+        });
+        try {
+            assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(history("buyer", shop, conversation, null).path("messages").size()).isZero();
+            send("buyer", shop, conversation, UUID.randomUUID().toString(), "这单现在什么状态？", null)
+                    .andExpect(status().isConflict());
+        } finally {
+            finish.countDown();
+        }
+        MvcResult completed = first.get(20, TimeUnit.SECONDS);
+        assertThat(completed.getResponse().getStatus()).isEqualTo(200);
+        assertOrderContext(assistant(body(completed)), order.number());
+        JsonNode followup = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "这单现在什么状态？", null).andExpect(status().isOk()).andReturn()));
+        assertOrderContext(followup, order.number());
+        assertThat(messageCount(conversation)).isEqualTo(4);
     }
 
     @Test
@@ -710,16 +978,74 @@ class ConversationApiIT {
 
     private ResultActions send(String username, long shop, String conversation, String clientId,
                                String message, String orderNo) throws Exception {
-        Map<String, String> values = new java.util.LinkedHashMap<>();
+        return send(username, shop, conversation, clientId, message, orderNo, false);
+    }
+
+    private ResultActions send(String username, long shop, String conversation, String clientId,
+                               String message, String orderNo, boolean resetContext) throws Exception {
+        Map<String, Object> values = new java.util.LinkedHashMap<>();
         values.put("clientMessageId", clientId);
         values.put("message", message);
         if (orderNo != null) values.put("orderNo", orderNo);
+        if (resetContext) values.put("resetContext", true);
         return mvc.perform(post(messagesUrl(shop, conversation)).with(httpBasic(username, PASSWORD)).with(csrf())
                 .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(values)));
     }
 
     private JsonNode body(MvcResult result) throws Exception {
         return json.readTree(result.getResponse().getContentAsString());
+    }
+
+    private JsonNode assistant(JsonNode turn) {
+        assertThat(turn.path("messages").size()).isEqualTo(2);
+        return turn.path("messages").get(1).path("response");
+    }
+
+    private JsonNode withoutContext(JsonNode response) {
+        ObjectNode copy = (ObjectNode) json.readTree(response.toString());
+        copy.remove("context");
+        return copy;
+    }
+
+    private void assertEmptyContext(JsonNode response) {
+        JsonNode reference = response.path("context");
+        assertThat(reference.path("kind").asString()).isEqualTo("NONE");
+        assertThat(reference.path("orderNo").isNull()).isTrue();
+        assertThat(reference.path("sourceIds").size()).isZero();
+        assertThat(reference.path("expiresAt").isNull()).isTrue();
+    }
+
+    private void assertOrderContext(JsonNode response, String orderNo) {
+        JsonNode reference = response.path("context");
+        assertThat(reference.path("kind").asString()).isEqualTo("ORDER");
+        assertThat(reference.path("orderNo").asString()).isEqualTo(orderNo);
+        assertThat(reference.path("sourceIds").size()).isZero();
+        assertThat(Instant.parse(reference.path("expiresAt").asString()))
+                .isAfter(Instant.now()).isBefore(Instant.now().plusSeconds(31 * 60));
+        assertPrivateFieldsAbsent(response);
+    }
+
+    private void assertKnowledgeContext(JsonNode response, String article) {
+        JsonNode reference = response.path("context");
+        assertThat(reference.path("kind").asString()).isEqualTo("KNOWLEDGE");
+        assertThat(reference.path("orderNo").isNull()).isTrue();
+        assertThat(reference.path("sourceIds").size()).isEqualTo(1);
+        assertThat(reference.path("sourceIds").get(0).asString()).isEqualTo("kb-" + article);
+        assertThat(Instant.parse(reference.path("expiresAt").asString()))
+                .isAfter(Instant.now()).isBefore(Instant.now().plusSeconds(31 * 60));
+    }
+
+    private void insertExpiredTurn(String conversation) throws SQLException {
+        try (Connection connection = admin(); PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO support_chat_turn (conversation_id,client_message_id,request_hash,status,expires_at)
+                SELECT id,?,?,'PROCESSING',TIMESTAMPADD(SECOND,-1,UTC_TIMESTAMP(3))
+                FROM support_chat_conversation WHERE public_id=?
+                """)) {
+            insert.setString(1, UUID.randomUUID().toString());
+            insert.setString(2, "0".repeat(64));
+            insert.setString(3, conversation);
+            assertThat(insert.executeUpdate()).isEqualTo(1);
+        }
     }
 
     private void assertKnowledgeSource(JsonNode response, String article, String version, String title, String content) {
@@ -867,4 +1193,5 @@ class ConversationApiIT {
     }
 
     private record Fixture(long id, String number) { }
+    private record ContextScope(String username, long shop, String id) { }
 }

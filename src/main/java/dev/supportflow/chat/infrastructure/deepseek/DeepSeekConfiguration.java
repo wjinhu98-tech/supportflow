@@ -19,9 +19,9 @@ public class DeepSeekConfiguration {
     @Bean
     @ConditionalOnProperty(prefix = "supportflow.ai.deepseek", name = "enabled", havingValue = "true")
     dev.supportflow.assistant.planning.ToolPlanner deepSeekToolPlanner(
-            @Qualifier("deepSeekHttpClient") HttpClient client,
+            DeepSeekCallExecutor executor,
             ObjectMapper mapper, DeepSeekProperties properties) {
-        return new DeepSeekToolPlanner(client, mapper, properties);
+        return new DeepSeekToolPlanner(executor, mapper, properties);
     }
 
     @Bean
@@ -41,12 +41,19 @@ public class DeepSeekConfiguration {
 
     @Bean
     @ConditionalOnProperty(prefix = "supportflow.ai.deepseek", name = "enabled", havingValue = "true")
+    DeepSeekCallExecutor deepSeekCallExecutor(
+            @Qualifier("deepSeekHttpClient") HttpClient client, DeepSeekProperties properties) {
+        return new DeepSeekCallExecutor(client, properties);
+    }
+
+    @Bean
+    @ConditionalOnProperty(prefix = "supportflow.ai.deepseek", name = "enabled", havingValue = "true")
     OrderIntentRecognizer deepSeekOrderIntentRecognizer(
-            @Qualifier("deepSeekHttpClient") HttpClient httpClient,
+            DeepSeekCallExecutor executor,
             DeepSeekProperties properties,
             ObjectMapper objectMapper
     ) {
-        return new DeepSeekOrderIntentRecognizer(httpClient, objectMapper, properties);
+        return new DeepSeekOrderIntentRecognizer(executor, objectMapper, properties);
     }
 
     @Bean

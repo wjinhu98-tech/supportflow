@@ -5,6 +5,7 @@ import type {
   AfterSaleTicket,
   ChatMessage,
   Conversation,
+  ConversationContextRef,
   StoredChatMessage,
   Order,
   ReceiptConfirmation,
@@ -25,6 +26,10 @@ export function useSupportDesk() {
   const messages = ref<ChatMessage[]>([])
   const conversations = ref<Conversation[]>([])
   const activeConversation = ref<Conversation | null>(null)
+  const conversationContext = ref<ConversationContextRef | null>(null)
+  const contextResetPending = ref(false)
+  const contextExpired = ref(false)
+  let contextExpiryTimer: ReturnType<typeof setTimeout> | null = null
   const nextConversationBeforeId = ref<string | null>(null)
   const nextMessageBeforeId = ref<string | null>(null)
   const conversationsLoading = ref(false)
@@ -62,7 +67,56 @@ export function useSupportDesk() {
   let context = new AbortController()
   let messageId = 0
 
+  function expireConversationContext() {
+    contextExpired.value = true
+    if (
+      conversationContext.value?.kind === 'ORDER' &&
+      selectedOrder.value?.orderNo === conversationContext.value.orderNo
+    )
+      selectedOrder.value = null
+  }
+
+  function setConversationContext(value: ConversationContextRef | null | undefined) {
+    if (contextExpiryTimer !== null) clearTimeout(contextExpiryTimer)
+    contextExpiryTimer = null
+    conversationContext.value = value ? { ...value, sourceIds: [...value.sourceIds] } : null
+    contextExpired.value = false
+    if (!value || value.kind === 'NONE' || !value.expiresAt) return
+    const remaining = Date.parse(value.expiresAt) - Date.now()
+    if (remaining <= 0) {
+      expireConversationContext()
+      return
+    }
+    contextExpiryTimer = setTimeout(
+      () => {
+        expireConversationContext()
+        contextExpiryTimer = null
+      },
+      Math.min(remaining, 30 * 60 * 1000),
+    )
+  }
+
+  function resetConversationContext() {
+    setConversationContext(null)
+    contextResetPending.value = false
+  }
+
+  function clearConversationTopic() {
+    if (
+      !connected.value ||
+      busy.value ||
+      historyLoading.value ||
+      conversationsLoading.value ||
+      businessWriteInProgress()
+    )
+      return
+    selectedOrder.value = null
+    setConversationContext(null)
+    contextResetPending.value = true
+  }
+
   function resetContext() {
+    resetConversationContext()
     conversationRequest.abort()
     conversationRequest = new AbortController()
     conversations.value = []
@@ -217,6 +271,7 @@ export function useSupportDesk() {
             type: message.response.type,
             orders: message.response.orders,
             knowledge: message.response.knowledge ?? null,
+            context: message.response.context ?? null,
           }
         : {}),
     }
@@ -296,6 +351,10 @@ export function useSupportDesk() {
       messages.value = Array.from(new Map(items.map((item) => [item.id, item])).values())
       activeConversation.value = result.conversation
       nextMessageBeforeId.value = result.nextBeforeId
+      if (!loadEarlier && !contextResetPending.value) {
+        const latest = result.messages.filter((message) => message.role === 'ASSISTANT').at(-1)
+        setConversationContext(latest?.response?.context)
+      }
       // Restoring replies never selects stale orders, reopens forms, or replays tools.
     } catch (failure) {
       if (!signal.aborted) {
@@ -324,6 +383,7 @@ export function useSupportDesk() {
     const signal = AbortSignal.any([context.signal, conversationRequest.signal])
     const activeShop = shopId.value
     const selected = orderNo ?? selectedOrder.value?.orderNo
+    const resetTopic = contextResetPending.value
     const clientMessageId = crypto.randomUUID()
     busy.value = true
     error.value = null
@@ -348,6 +408,7 @@ export function useSupportDesk() {
         message,
         selected,
         signal,
+        resetTopic,
       )
       if (signal.aborted) return
       messages.value = [
@@ -356,7 +417,15 @@ export function useSupportDesk() {
       ]
       upsertConversation(result.conversation)
       const response = result.messages.find((item) => item.role === 'ASSISTANT')!.response!
-      if (response.type === 'ORDER_DETAILS' && response.orders[0])
+      if (
+        response.context &&
+        (response.context.kind !== 'ORDER' ||
+          selectedOrder.value?.orderNo !== response.context.orderNo)
+      )
+        selectedOrder.value = null
+      setConversationContext(response.context)
+      contextResetPending.value = false
+      if (response.type === 'ORDER_DETAILS' && response.orders[0] && !contextExpired.value)
         selectedOrder.value = response.orders[0]
       if (response.type === 'AFTER_SALE_FORM') await openRefundForm(response.orders[0] ?? null)
     } catch (failure) {
@@ -385,11 +454,12 @@ export function useSupportDesk() {
   }
 
   function clearSelectedOrder() {
-    selectedOrder.value = null
+    clearConversationTopic()
   }
   function clearConversation() {
     // A pending refund or receipt confirmation must not lose its result.
     if (connecting.value || refundSubmitting.value || receiptSubmitting.value) return
+    resetConversationContext()
     resetReceiptConfirmation()
     closeRefundForm()
     detailRequest.abort()
@@ -676,6 +746,7 @@ export function useSupportDesk() {
     }
   }
   onScopeDispose(() => {
+    if (contextExpiryTimer !== null) clearTimeout(contextExpiryTimer)
     conversationRequest.abort()
     resetReceiptConfirmation()
     detailRequest.abort()
@@ -687,6 +758,10 @@ export function useSupportDesk() {
   return {
     conversations,
     activeConversation,
+    conversationContext,
+    contextResetPending,
+    contextExpired,
+    clearConversationTopic,
     nextConversationBeforeId,
     nextMessageBeforeId,
     conversationsLoading,

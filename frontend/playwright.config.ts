@@ -13,7 +13,9 @@ const channel = process.env.PLAYWRIGHT_CHANNEL ?? 'msedge'
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: liveBackend ? ['**/live.spec.ts', '**/knowledge-live.spec.ts'] : '**/app.spec.ts',
+  testMatch: liveBackend
+    ? ['**/live.spec.ts', '**/knowledge-live.spec.ts', '**/context-live.spec.ts']
+    : '**/app.spec.ts',
   outputDir: liveBackend ? 'test-results/live' : 'test-results/mock',
   fullyParallel: false,
   workers: 1,

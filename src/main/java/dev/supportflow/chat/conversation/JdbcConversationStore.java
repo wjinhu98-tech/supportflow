@@ -134,7 +134,8 @@ public class JdbcConversationStore implements ConversationStore {
                     """).param("conversation", conversation.storageId())
                     .param("clientId", request.clientMessageId().toString()).param("hash", hash(request))
                     .param("leaseSeconds", ConversationLimits.PROCESSING_SECONDS).update();
-            return ReserveDecision.ready(Reservation.fresh());
+            return ReserveDecision.ready(Reservation.fresh(request.resetContext()
+                    ? ConversationContextRef.none() : latestContext(conversation.storageId())));
         });
         // Return a conflict after committing lease expiry, rather than rolling that state change back.
         if (decision.conflictMessage() != null) throw ConversationException.conflict(decision.conflictMessage());
@@ -180,6 +181,21 @@ public class JdbcConversationStore implements ConversationStore {
                     """).param("conversation", conversation.storageId())
                     .param("client", clientMessageId.toString()).update();
         });
+    }
+
+    /** One successful snapshot pointer, read while the owned conversation row is locked. */
+    private ConversationContextRef latestContext(long conversationId) {
+        return jdbc.sql("""
+                SELECT JSON_EXTRACT(message.response_json, '$.context') AS context_json
+                FROM support_chat_message message
+                JOIN support_chat_turn turn ON turn.id=message.turn_id AND turn.conversation_id=message.conversation_id
+                WHERE message.conversation_id=:conversation AND message.role='ASSISTANT' AND turn.status='SUCCEEDED'
+                ORDER BY message.id DESC LIMIT 1
+                """).param("conversation", conversationId).query((row, ignored) -> {
+                    String value = row.getString("context_json");
+                    return value == null || value.equals("null") ? ConversationContextRef.none()
+                            : json.readValue(value, ConversationContextRef.class);
+                }).optional().orElseGet(ConversationContextRef::none);
     }
 
     private StoredConversation owned(long buyerId, long shopId, UUID id, boolean lock) {
@@ -233,7 +249,8 @@ public class JdbcConversationStore implements ConversationStore {
 
     static String hash(ConversationMessageRequest request) {
         String order = request.orderNo() == null ? "-" : request.orderNo().length() + ":" + request.orderNo();
-        String payload = request.message().length() + ":" + request.message() + "|" + order;
+        String payload = request.message().length() + ":" + request.message() + "|" + order
+                + (request.resetContext() ? "|reset-context:true" : "");
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                     .digest(payload.getBytes(StandardCharsets.UTF_8)));

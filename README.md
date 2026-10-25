@@ -9,6 +9,8 @@ Java / Spring Boot + Vue 店铺订单客服学习项目，包含店铺本人订�
 - 本地演示数据与订单号：[`docs/local-demo-data.md`](docs/local-demo-data.md)。
 - 售后执行与重启恢复：[`docs/after-sale-execution.md`](docs/after-sale-execution.md)。**本轮新增 V5；运行账号需追加任务与模拟回执表权限后重启后端。**
 - 会话与聊天记录：[`docs/conversation-history.md`](docs/conversation-history.md)，**新环境需要 V8 和会话表最小运行权限；恢复历史不重放业务操作。**
+- 受控会话话题：[`docs/conversation-context.md`](docs/conversation-context.md)，保存有限的订单号或知识来源引用，30 分钟过期；追问重新查实时订单或当前发布资料，写操作不继承历史订单。复用现有响应 JSON，无新增数据库迁移或授权。
+- 模型调用保护：[`docs/deepseek-call-protection.md`](docs/deepseek-call-protection.md)，两个 DeepSeek 入口共享单实例并发上限，容量满时立即拒绝；统一超时、响应大小限制、取消和安全分类日志，不自动重试。
 - 用户/商家双入口与店铺授权：[`docs/merchant-workspace.md`](docs/merchant-workspace.md)，**V9后用户端仍为根页面，商家管理端为 `/merchant`，审核必须有显式店铺授权。**
 - 商家店铺知识库：[`docs/shop-knowledge-management.md`](docs/shop-knowledge-management.md)，**V10支持独立知识维护权限、草稿/发布/下线、版本审计和当前店铺已发布资料检索。**
 - 知识问答质量与面试依据：[`docs/knowledge-quality-and-interview.md`](docs/knowledge-quality-and-interview.md)，有界同义检索、结构化引用、历史证据快照与可复现评测；不将词法检索包装成向量RAG。

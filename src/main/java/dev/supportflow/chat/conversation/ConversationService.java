@@ -1,6 +1,5 @@
 package dev.supportflow.chat.conversation;
 
-import dev.supportflow.assistant.orchestration.ConversationOrchestrator;
 import dev.supportflow.assistant.aftersale.AssistantBusinessException;
 import dev.supportflow.chat.api.response.ChatResponse;
 import dev.supportflow.chat.application.InvalidChatCommandException;
@@ -19,11 +18,11 @@ import java.util.UUID;
 public class ConversationService {
     private static final Logger LOG = LoggerFactory.getLogger(ConversationService.class);
     private final ConversationStore store;
-    private final ConversationOrchestrator orchestrator;
+    private final ConversationContextEngine engine;
 
-    public ConversationService(ConversationStore store, ConversationOrchestrator orchestrator) {
+    public ConversationService(ConversationStore store, ConversationContextEngine engine) {
         this.store = store;
-        this.orchestrator = orchestrator;
+        this.engine = engine;
     }
 
     public Conversation create(CustomerPrincipal principal, long shopId) {
@@ -46,8 +45,7 @@ public class ConversationService {
         if (reservation.cached()) return reservation.cachedResponse();
         try {
             // NOT_SUPPORTED suspends any caller transaction while the HTTP/model operation runs.
-            ChatResponse response = ChatResponse.from(orchestrator.reply(
-                    principal, shopId, request.message(), request.orderNo()));
+            ChatResponse response = engine.reply(principal, shopId, request, reservation.context());
             return store.succeed(buyerId, shopId, id, request, response);
         } catch (RuntimeException failure) {
             try {

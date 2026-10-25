@@ -8,6 +8,7 @@ public final class ConversationLimits {
     public static final int MAX_REPLY_LENGTH = 20000;
     public static final int MAX_SNAPSHOT_BYTES = 262144;
     public static final int PROCESSING_SECONDS = 120;
+    public static final int CONTEXT_TTL_SECONDS = 30 * 60;
 
     private ConversationLimits() { }
 }

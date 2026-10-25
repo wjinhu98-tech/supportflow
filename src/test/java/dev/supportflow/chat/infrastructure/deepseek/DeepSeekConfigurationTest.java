@@ -1,5 +1,6 @@
 package dev.supportflow.chat.infrastructure.deepseek;
 
+import dev.supportflow.assistant.planning.ToolPlanner;
 import dev.supportflow.chat.application.model.OrderIntent;
 import dev.supportflow.chat.application.port.OrderIntentRecognizer;
 import org.junit.jupiter.api.DisplayName;
@@ -8,6 +9,7 @@ import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.core.env.PropertySource;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.test.util.ReflectionTestUtils;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -31,6 +33,7 @@ class DeepSeekConfigurationTest {
         contextRunner.run(context -> {
             assertThat(context).hasNotFailed().hasSingleBean(OrderIntentRecognizer.class);
             assertThat(context).doesNotHaveBean("deepSeekHttpClient");
+            assertThat(context).doesNotHaveBean(DeepSeekCallExecutor.class);
             assertThat(context.getBean(OrderIntentRecognizer.class).recognize("你好"))
                     .isEqualTo(OrderIntent.other());
             DeepSeekProperties properties = context.getBean(DeepSeekProperties.class);
@@ -39,6 +42,7 @@ class DeepSeekConfigurationTest {
             assertThat(properties.model()).isEqualTo("deepseek-flash");
             assertThat(properties.connectTimeout()).isEqualTo(Duration.ofSeconds(3));
             assertThat(properties.requestTimeout()).isEqualTo(Duration.ofSeconds(15));
+            assertThat(properties.maxConcurrentRequests()).isEqualTo(4);
         });
     }
 
@@ -56,6 +60,8 @@ class DeepSeekConfigurationTest {
                     DeepSeekProperties properties = context.getBean(DeepSeekProperties.class);
                     assertThat(properties.enabled()).isFalse();
                     assertThat(properties.apiKey()).isEmpty();
+                    assertThat(properties.maxConcurrentRequests()).isEqualTo(4);
+                    assertThat(context).doesNotHaveBean(DeepSeekCallExecutor.class);
                     assertThat(context.getBean(OrderIntentRecognizer.class).recognize("你好"))
                             .isEqualTo(OrderIntent.other());
                 });
@@ -67,6 +73,8 @@ class DeepSeekConfigurationTest {
         contextRunner.withPropertyValues("supportflow.ai.deepseek.enabled=false")
                 .run(context -> {
                     assertThat(context).hasNotFailed().hasSingleBean(OrderIntentRecognizer.class);
+                    assertThat(context).doesNotHaveBean(DeepSeekCallExecutor.class)
+                            .doesNotHaveBean("deepSeekHttpClient");
                     assertThat(context.getBean(OrderIntentRecognizer.class))
                             .isNotInstanceOf(DeepSeekOrderIntentRecognizer.class);
                     assertThat(context.getBean(OrderIntentRecognizer.class).recognize("查一下我的订单"))
@@ -90,9 +98,16 @@ class DeepSeekConfigurationTest {
     @DisplayName("配置合法密钥时创建真实适配器，创建Bean不会调用远程接口")
     void shouldCreateNetworkAdapterOnlyWhenEnabledWithKey() {
         enabledContext().run(context -> {
-            assertThat(context).hasNotFailed().hasSingleBean(OrderIntentRecognizer.class);
-            assertThat(context.getBean(OrderIntentRecognizer.class))
+            assertThat(context).hasNotFailed().hasSingleBean(OrderIntentRecognizer.class)
+                    .hasSingleBean(ToolPlanner.class).hasSingleBean(DeepSeekCallExecutor.class);
+            OrderIntentRecognizer recognizer = context.getBean(OrderIntentRecognizer.class);
+            ToolPlanner planner = context.getBean(ToolPlanner.class);
+            DeepSeekCallExecutor executor = context.getBean(DeepSeekCallExecutor.class);
+            assertThat(recognizer)
                     .isInstanceOf(DeepSeekOrderIntentRecognizer.class);
+            assertThat(planner).isInstanceOf(DeepSeekToolPlanner.class);
+            assertThat(ReflectionTestUtils.getField(recognizer, "executor")).isSameAs(executor);
+            assertThat(ReflectionTestUtils.getField(planner, "executor")).isSameAs(executor);
         });
     }
 
@@ -174,12 +189,50 @@ class DeepSeekConfigurationTest {
     }
 
     @Test
+    void shouldBindConcurrentRequestCapacityAtBothSupportedBoundaries() {
+        for (int capacity : new int[]{1, 64}) {
+            enabledContext().withPropertyValues("supportflow.ai.deepseek.max-concurrent-requests=" + capacity)
+                    .run(context -> {
+                        assertThat(context).hasNotFailed().hasSingleBean(DeepSeekCallExecutor.class);
+                        assertThat(context.getBean(DeepSeekProperties.class).maxConcurrentRequests()).isEqualTo(capacity);
+                    });
+        }
+    }
+
+    @Test
+    void shouldRejectConcurrentRequestCapacityOutsideItsSupportedRange() {
+        for (int capacity : new int[]{-1, 0, 65, Integer.MAX_VALUE}) {
+            enabledContext().withPropertyValues("supportflow.ai.deepseek.max-concurrent-requests=" + capacity)
+                    .run(context -> {
+                        assertThat(context).hasFailed();
+                        assertThat(context.getStartupFailure()).hasRootCauseInstanceOf(IllegalArgumentException.class)
+                                .hasRootCauseMessage("DeepSeek max-concurrent-requests must be between 1 and 64");
+                    });
+        }
+    }
+
+    @Test
+    void shouldRejectNonIntegralOrUnrepresentableConcurrentRequestCapacity() {
+        for (String capacity : new String[]{"not-a-number", "1.5", "999999999999999999999"}) {
+            enabledContext().withPropertyValues("supportflow.ai.deepseek.max-concurrent-requests=" + capacity)
+                    .run(context -> assertThat(context).hasFailed());
+        }
+    }
+
+    @Test
+    void shouldKeepTheLegacyPropertiesConstructorAtDefaultCapacity() {
+        var properties = new DeepSeekProperties(false, "", "deepseek-flash",
+                Duration.ofSeconds(3), Duration.ofSeconds(15));
+        assertThat(properties.maxConcurrentRequests()).isEqualTo(4);
+    }
+
+    @Test
     @DisplayName("配置对象的字符串输出始终隐藏API密钥")
     void shouldRedactApiKeyFromToString() {
         enabledContext().run(context -> {
             assertThat(context).hasNotFailed();
             assertThat(context.getBean(DeepSeekProperties.class).toString())
-                    .contains("apiKey=[REDACTED]", "enabled=true", "model=deepseek-flash")
+                    .contains("apiKey=[REDACTED]", "enabled=true", "model=deepseek-flash", "maxConcurrentRequests=4")
                     .doesNotContain("fake-test-key");
         });
     }

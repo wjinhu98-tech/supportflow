@@ -5,6 +5,8 @@ import type {
   AfterSaleTicket,
   ChatResponse,
   Conversation,
+  ConversationContextRef,
+  ConversationMessages,
   ConversationMessagePage,
   StoredChatMessage,
   Order,
@@ -196,9 +198,285 @@ beforeEach(() => {
 })
 afterEach(() => {
   for (const scope of scopes.splice(0)) scope.stop()
+  vi.useRealTimers()
 })
 
 describe('useSupportDesk', () => {
+  const orderTopic = (orderNo = order.orderNo): ConversationContextRef => ({
+    kind: 'ORDER',
+    orderNo,
+    sourceIds: [],
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+  })
+  const knowledgeTopic = (): ConversationContextRef => ({
+    kind: 'KNOWLEDGE',
+    orderNo: null,
+    sourceIds: ['kb-gift'],
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+  })
+  const noTopic: ConversationContextRef = {
+    kind: 'NONE',
+    orderNo: null,
+    sourceIds: [],
+    expiresAt: null,
+  }
+
+  it('restores only the latest topic hint without selecting an old order or replaying a form', async () => {
+    const latestTopic = knowledgeTopic()
+    const latest = storedPair('latest', { ...textReply, context: latestTopic })
+    mocks.conversations.mockResolvedValueOnce({ conversations: [conversation], nextBeforeId: null })
+    mocks.conversationMessages
+      .mockResolvedValueOnce({ conversation, messages: latest, nextBeforeId: latest[0]!.id })
+      .mockResolvedValueOnce({
+        conversation,
+        messages: storedPair('old', {
+          ...textReply,
+          type: 'AFTER_SALE_FORM',
+          orders: [order],
+          context: orderTopic(),
+        }),
+        nextBeforeId: null,
+      })
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    expect(desk.conversationContext.value).toEqual(latestTopic)
+    await desk.loadEarlierMessages()
+    expect(desk.conversationContext.value).toEqual(latestTopic)
+    expect(desk.selectedOrder.value).toBeNull()
+    expect(desk.refundOpen.value).toBe(false)
+    expect(mocks.sendConversationMessage).not.toHaveBeenCalled()
+    expect(mocks.afterSaleEligibility).not.toHaveBeenCalled()
+  })
+
+  it.each([undefined, null, noTopic])(
+    'clears a previous topic when latest history has no topic: %s',
+    async (context) => {
+      const desk = createDesk()
+      await desk.connect('buyer', 'test')
+      mocks.reply.mockResolvedValueOnce({ ...textReply, context: orderTopic() })
+      await desk.sendMessage('first')
+      mocks.conversationMessages.mockResolvedValueOnce({
+        conversation,
+        messages: storedPair('last', {
+          ...textReply,
+          ...(context === undefined ? {} : { context }),
+        }),
+        nextBeforeId: null,
+      })
+      await desk.selectConversation(conversation.id)
+      expect(desk.conversationContext.value?.kind ?? 'NONE').toBe('NONE')
+      expect(desk.contextResetPending.value).toBe(false)
+      expect(desk.selectedOrder.value).toBeNull()
+    },
+  )
+
+  it('replaces an old selected order with a knowledge topic and sends its follow-up without the old order', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    mocks.reply.mockResolvedValueOnce({
+      ...textReply,
+      type: 'ORDER_DETAILS',
+      orders: [order],
+      context: orderTopic(),
+    })
+    await desk.selectOrder(order)
+    expect(desk.selectedOrder.value?.orderNo).toBe(order.orderNo)
+    const topic = knowledgeTopic()
+    mocks.reply.mockResolvedValueOnce({ ...textReply, context: topic })
+    await desk.sendMessage('gift packaging policy')
+    expect(desk.selectedOrder.value).toBeNull()
+    expect(desk.conversationContext.value).toEqual(topic)
+    await desk.sendMessage('tell me more')
+    expect(mocks.sendConversationMessage.mock.calls[2]?.[4]).toBeUndefined()
+  })
+
+  it.each(['NONE', 'ORDER'] as const)(
+    'drops stale selection for %s without selecting a pointer as a live order',
+    async (kind) => {
+      const desk = createDesk()
+      await desk.connect('buyer', 'test')
+      mocks.reply.mockResolvedValueOnce({
+        ...textReply,
+        type: 'ORDER_DETAILS',
+        orders: [order],
+        context: orderTopic(),
+      })
+      await desk.selectOrder(order)
+      const topic = kind === 'NONE' ? noTopic : orderTopic('SF10002')
+      mocks.reply.mockResolvedValueOnce({ ...textReply, context: topic })
+      await desk.sendMessage('different topic')
+      expect(desk.selectedOrder.value).toBeNull()
+      expect(desk.conversationContext.value).toEqual(topic)
+      expect(desk.refundOpen.value).toBe(false)
+    },
+  )
+
+  it.each([400, 500])(
+    'retains a pending clear through a %s failure until a successful message confirms it',
+    async (status) => {
+      const desk = createDesk()
+      await desk.connect('buyer', 'test')
+      mocks.reply.mockResolvedValueOnce({
+        ...textReply,
+        type: 'ORDER_DETAILS',
+        orders: [order],
+        context: orderTopic(),
+      })
+      await desk.selectOrder(order)
+      const beforeClear = mocks.sendConversationMessage.mock.calls.length
+      desk.clearSelectedOrder()
+      expect(desk.selectedOrder.value).toBeNull()
+      expect(desk.conversationContext.value).toBeNull()
+      expect(desk.contextResetPending.value).toBe(true)
+      expect(mocks.sendConversationMessage).toHaveBeenCalledTimes(beforeClear)
+      mocks.sendConversationMessage.mockRejectedValueOnce(new ApiError('failed', status))
+      await desk.sendMessage('new topic')
+      expect(mocks.sendConversationMessage.mock.lastCall?.[6]).toBe(true)
+      expect(desk.contextResetPending.value).toBe(true)
+      const topic = knowledgeTopic()
+      mocks.reply.mockResolvedValueOnce({ ...textReply, context: topic })
+      await desk.sendMessage('another topic')
+      expect(mocks.sendConversationMessage.mock.lastCall?.[6]).toBe(true)
+      expect(desk.contextResetPending.value).toBe(false)
+      expect(desk.conversationContext.value).toEqual(topic)
+      await desk.sendMessage('follow up')
+      expect(mocks.sendConversationMessage.mock.lastCall?.[6]).toBe(false)
+    },
+  )
+
+  it('keeps pending reset with an explicit newly selected order and accepts the fresh result', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    desk.clearConversationTopic()
+    const nextOrder = { ...order, orderNo: 'SF10002' }
+    mocks.reply.mockResolvedValueOnce({
+      ...textReply,
+      type: 'ORDER_DETAILS',
+      orders: [nextOrder],
+      context: orderTopic(nextOrder.orderNo),
+    })
+    await desk.selectOrder(nextOrder)
+    expect(mocks.sendConversationMessage.mock.lastCall?.[4]).toBe(nextOrder.orderNo)
+    expect(mocks.sendConversationMessage.mock.lastCall?.[6]).toBe(true)
+    expect(desk.contextResetPending.value).toBe(false)
+    expect(desk.selectedOrder.value).toEqual(nextOrder)
+  })
+
+  it('does not revive a cleared topic from a history refresh before the next message is sent', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const topic = orderTopic()
+    mocks.reply.mockResolvedValueOnce({ ...textReply, context: topic })
+    await desk.sendMessage('order')
+    desk.clearConversationTopic()
+    mocks.conversationMessages.mockResolvedValueOnce({
+      conversation,
+      messages: storedPair('old', { ...textReply, context: topic }),
+      nextBeforeId: null,
+    })
+    await desk.loadEarlierMessages(false)
+    expect(desk.contextResetPending.value).toBe(true)
+    expect(desk.conversationContext.value).toBeNull()
+    expect(mocks.sendConversationMessage).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    'busy',
+    'historyLoading',
+    'conversationsLoading',
+    'refundSubmitting',
+    'receiptSubmitting',
+  ] as const)('disables topic clearing while %s is active', async (state) => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const topic = knowledgeTopic()
+    mocks.reply.mockResolvedValueOnce({ ...textReply, context: topic })
+    await desk.sendMessage('question')
+    desk[state].value = true
+    desk.clearConversationTopic()
+    expect(desk.conversationContext.value).toEqual(topic)
+    expect(desk.contextResetPending.value).toBe(false)
+  })
+
+  it('marks the topic expired, stops carrying the old selection, and makes no automatic request', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-25T00:00:00Z'))
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    mocks.reply.mockResolvedValueOnce({
+      ...textReply,
+      type: 'ORDER_DETAILS',
+      orders: [order],
+      context: orderTopic(),
+    })
+    await desk.selectOrder(order)
+    expect(desk.contextExpired.value).toBe(false)
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000)
+    expect(desk.contextExpired.value).toBe(true)
+    expect(desk.selectedOrder.value).toBeNull()
+    expect(desk.contextResetPending.value).toBe(false)
+    expect(mocks.sendConversationMessage).toHaveBeenCalledOnce()
+    await desk.sendMessage('follow up')
+    expect(mocks.sendConversationMessage.mock.lastCall?.[4]).toBeUndefined()
+  })
+
+  it('does not carry pending reset or pointers across a new conversation, shop or account', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    mocks.reply.mockResolvedValueOnce({ ...textReply, context: knowledgeTopic() })
+    await desk.sendMessage('question')
+    desk.clearConversationTopic()
+    desk.clearConversation()
+    expect(desk.conversationContext.value).toBeNull()
+    expect(desk.contextResetPending.value).toBe(false)
+    desk.clearConversationTopic()
+    await desk.changeShop('101')
+    expect(desk.contextResetPending.value).toBe(false)
+    expect(desk.conversationContext.value).toBeNull()
+    desk.clearConversationTopic()
+    await desk.connect('another-buyer', 'test')
+    expect(desk.contextResetPending.value).toBe(false)
+    expect(desk.conversationContext.value).toBeNull()
+    desk.disconnect()
+    desk.clearConversationTopic()
+    expect(desk.contextResetPending.value).toBe(false)
+  })
+
+  it('discards an old in-flight context response after switching conversations', async () => {
+    const second = { ...conversation, id: '00000000-0000-4000-8000-000000000009' }
+    mocks.conversations.mockResolvedValueOnce({
+      conversations: [conversation, second],
+      nextBeforeId: null,
+    })
+    const topic = knowledgeTopic()
+    mocks.conversationMessages.mockResolvedValueOnce({
+      conversation,
+      messages: [],
+      nextBeforeId: null,
+    })
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const pending = deferred<ConversationMessages>()
+    mocks.sendConversationMessage.mockReturnValueOnce(pending.promise)
+    const sending = desk.sendMessage('old question')
+    const oldSignal = mocks.sendConversationMessage.mock.lastCall?.[5] as AbortSignal
+    mocks.conversationMessages.mockResolvedValueOnce({
+      conversation: second,
+      messages: storedPair('new question', { ...textReply, context: topic }),
+      nextBeforeId: null,
+    })
+    await desk.selectConversation(second.id)
+    expect(oldSignal.aborted).toBe(true)
+    pending.resolve({
+      conversation,
+      messages: storedPair('old question', { ...textReply, context: orderTopic() }),
+    })
+    await sending
+    expect(desk.activeConversation.value?.id).toBe(second.id)
+    expect(desk.conversationContext.value).toEqual(topic)
+    expect(desk.contextResetPending.value).toBe(false)
+  })
+
   const citedReply: ChatResponse = {
     ...textReply,
     reply: '可以搭配贺卡。',
@@ -311,6 +589,7 @@ describe('useSupportDesk', () => {
       '你好',
       undefined,
       expect.any(AbortSignal),
+      false,
     )
     expect(desk.messages.value).toHaveLength(2)
     expect(desk.messages.value.every((message) => !message.historical && !message.pending)).toBe(

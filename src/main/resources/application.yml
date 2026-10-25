@@ -20,4 +20,5 @@ supportflow:
       model: deepseek-flash
       connect-timeout: 3s
       request-timeout: 15s
+      max-concurrent-requests: 4
 

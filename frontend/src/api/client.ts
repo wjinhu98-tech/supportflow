@@ -4,6 +4,7 @@ import type {
   AfterSaleTicket,
   ChatResponse,
   ChatKnowledge,
+  ConversationContextRef,
   Conversation,
   ConversationPage,
   ConversationMessages,
@@ -91,6 +92,49 @@ function validChatKnowledge(value: unknown): value is ChatKnowledge | null {
   })
 }
 
+function isContextTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const parts =
+    /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.exec(
+      value,
+    )
+  if (!parts || !Number.isFinite(Date.parse(value))) return false
+  const year = Number(parts[1])
+  const month = Number(parts[2])
+  const day = Number(parts[3])
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  return day <= days[month - 1]!
+}
+
+function validConversationContext(value: unknown): value is ConversationContextRef | null {
+  if (value === null) return true
+  if (
+    !isRecord(value) ||
+    typeof value.kind !== 'string' ||
+    !['NONE', 'ORDER', 'KNOWLEDGE'].includes(value.kind) ||
+    !Array.isArray(value.sourceIds) ||
+    value.sourceIds.length > 2 ||
+    value.sourceIds.some(
+      (id) => typeof id !== 'string' || id.trim() !== id || !/^[a-z][a-z0-9-]{1,63}$/.test(id),
+    ) ||
+    new Set(value.sourceIds).size !== value.sourceIds.length
+  )
+    return false
+  if (value.kind === 'NONE')
+    return value.orderNo === null && value.sourceIds.length === 0 && value.expiresAt === null
+  if (!isContextTimestamp(value.expiresAt)) return false
+  if (value.kind === 'ORDER')
+    return (
+      typeof value.orderNo === 'string' &&
+      value.orderNo.length > 0 &&
+      value.orderNo.length <= 64 &&
+      !/[\s\p{Cc}]/u.test(value.orderNo) &&
+      value.sourceIds.length === 0
+    )
+  return value.orderNo === null && value.sourceIds.length >= 1
+}
+
 function parseChat(value: unknown, shopId: string): ChatResponse {
   if (
     !isRecord(value) ||
@@ -101,6 +145,7 @@ function parseChat(value: unknown, shopId: string): ChatResponse {
     !value.orders.every(validOrder) ||
     value.orders.some((order) => order.shopId !== Number(shopId)) ||
     (Object.hasOwn(value, 'knowledge') && !validChatKnowledge(value.knowledge)) ||
+    (Object.hasOwn(value, 'context') && !validConversationContext(value.context)) ||
     (value.knowledge != null &&
       (value.type !== 'TEXT' || value.orders.length !== 0 || value.nextAfterId !== null)) ||
     (value.type === 'AFTER_SALE_FORM' && (value.orders.length > 1 || value.nextAfterId !== null)) ||
@@ -128,6 +173,18 @@ function parseChat(value: unknown, shopId: string): ChatResponse {
           })),
         }
       : null,
+    ...(Object.hasOwn(response, 'context')
+      ? {
+          context: response.context
+            ? {
+                kind: response.context.kind,
+                orderNo: response.context.orderNo,
+                sourceIds: [...response.context.sourceIds],
+                expiresAt: response.context.expiresAt,
+              }
+            : null,
+        }
+      : {}),
   }
 }
 
@@ -634,11 +691,13 @@ export class ApiClient {
     message: string,
     orderNo?: string,
     signal?: AbortSignal,
+    resetContext = false,
   ): Promise<ConversationMessages> {
     const path = `${this.conversationPath(shopId)}/${this.validConversationId(conversationId)}/messages`
     this.validConversationId(clientMessageId)
     if (!message.trim() || message.length > 1000) throw new ApiError('请输入 1–1000 个字符的消息。')
     if (orderNo !== undefined) this.validateOrderTarget(shopId, orderNo)
+    if (typeof resetContext !== 'boolean') throw new ApiError('清除话题参数必须为布尔值。')
     return this.queued(async () => {
       if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
       const csrf = await this.getCsrf(signal)
@@ -647,7 +706,12 @@ export class ApiClient {
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', [csrf.headerName]: csrf.token },
-          body: JSON.stringify({ clientMessageId, message, ...(orderNo ? { orderNo } : {}) }),
+          body: JSON.stringify({
+            clientMessageId,
+            message,
+            ...(orderNo ? { orderNo } : {}),
+            ...(resetContext ? { resetContext: true } : {}),
+          }),
         },
         signal,
       )

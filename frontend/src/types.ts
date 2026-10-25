@@ -32,12 +32,22 @@ export interface ChatKnowledge {
   sources: ChatKnowledgeSource[]
 }
 
+/** Server-issued subject references, not authorization or reusable business facts. */
+export interface ConversationContextRef {
+  kind: 'NONE' | 'ORDER' | 'KNOWLEDGE'
+  orderNo: string | null
+  sourceIds: string[]
+  expiresAt: string | null
+}
+
 export interface ChatResponse {
   reply: string
   type: ChatReplyType
   orders: Order[]
   nextAfterId: number | null
   knowledge: ChatKnowledge | null
+  /** Optional for historical replies written before controlled context was introduced. */
+  context?: ConversationContextRef | null
 }
 
 export interface CsrfResponse {
@@ -54,6 +64,7 @@ export interface ChatMessage {
   type?: ChatReplyType
   orders?: Order[]
   knowledge?: ChatKnowledge | null
+  context?: ConversationContextRef | null
   /** Restored order cards are immutable historical snapshots, never current business state. */
   historical?: boolean
   pending?: boolean
