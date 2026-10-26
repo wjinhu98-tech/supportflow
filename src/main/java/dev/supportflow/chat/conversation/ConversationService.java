@@ -1,6 +1,7 @@
 package dev.supportflow.chat.conversation;
 
 import dev.supportflow.assistant.aftersale.AssistantBusinessException;
+import dev.supportflow.assistant.runtime.store.AgentRunKey;
 import dev.supportflow.chat.api.response.ChatResponse;
 import dev.supportflow.chat.application.InvalidChatCommandException;
 import dev.supportflow.chat.application.ModelUnavailableException;
@@ -45,11 +46,12 @@ public class ConversationService {
         if (reservation.cached()) return reservation.cachedResponse();
         try {
             // NOT_SUPPORTED suspends any caller transaction while the HTTP/model operation runs.
-            ChatResponse response = engine.reply(principal, shopId, request, reservation.context());
-            return store.succeed(buyerId, shopId, id, request, response);
+            ChatResponse response = engine.reply(principal, shopId, request, reservation.context(),
+                    new AgentRunKey(id, request.clientMessageId(), buyerId, shopId));
+            return store.succeed(buyerId, shopId, id, request, response, reservation.processingToken());
         } catch (RuntimeException failure) {
             try {
-                store.fail(buyerId, shopId, id, request.clientMessageId());
+                store.fail(buyerId, shopId, id, request.clientMessageId(), reservation.processingToken());
             } catch (RuntimeException markingFailure) {
                 // The processing lease remains bounded even when the failure marker cannot be saved.
                 LOG.error("Could not finalize a conversation turn failure: {}", markingFailure.getClass().getSimpleName());

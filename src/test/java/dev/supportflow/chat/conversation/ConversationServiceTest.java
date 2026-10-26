@@ -1,5 +1,6 @@
 package dev.supportflow.chat.conversation;
 
+import dev.supportflow.assistant.runtime.store.AgentRunKey;
 import dev.supportflow.chat.api.response.ChatResponse;
 import dev.supportflow.chat.application.ModelUnavailableException;
 import dev.supportflow.chat.application.model.ChatReply;
@@ -33,6 +34,7 @@ class ConversationServiceTest {
     private static final long BUYER = 200;
     private static final long SHOP = 100;
     private static final UUID ID = UUID.fromString("0a652a13-d780-4ce9-b2d5-9468b825f571");
+    private static final UUID PROCESSING_TOKEN = UUID.fromString("9516e2b0-c99d-4e36-b180-e29412c216ce");
     private final CustomerPrincipal principal = new CustomerPrincipal("test-buyer", "unused",
             new CustomerIdentity(BUYER), List.of(SecurityPermission.ORDER_READ));
     private ConversationStore store;
@@ -50,20 +52,20 @@ class ConversationServiceTest {
 
     @Test
     void newTurnReservesBeforeOrchestrationAndPersistsOnlyPublicResponse() {
-        when(store.reserve(BUYER, SHOP, ID, request)).thenReturn(ConversationStore.Reservation.fresh());
-        when(engine.reply(principal, SHOP, request, ConversationContextRef.none()))
+        when(store.reserve(BUYER, SHOP, ID, request)).thenReturn(fresh());
+        when(engine.reply(principal, SHOP, request, ConversationContextRef.none(), runKey()))
                 .thenReturn(ChatResponse.from(ChatReply.text("你好")));
         ChatResponse response = ChatResponse.from(ChatReply.text("你好"));
         ConversationTurnResponse expected = completed();
-        when(store.succeed(BUYER, SHOP, ID, request, response)).thenReturn(expected);
+        when(store.succeed(BUYER, SHOP, ID, request, response, PROCESSING_TOKEN)).thenReturn(expected);
 
         assertThat(service.send(principal, SHOP, ID, request)).isSameAs(expected);
 
         var order = inOrder(store, engine);
         order.verify(store).reserve(BUYER, SHOP, ID, request);
-        order.verify(engine).reply(principal, SHOP, request, ConversationContextRef.none());
-        order.verify(store).succeed(BUYER, SHOP, ID, request, response);
-        verify(store, never()).fail(eq(BUYER), eq(SHOP), any(), any());
+        order.verify(engine).reply(principal, SHOP, request, ConversationContextRef.none(), runKey());
+        order.verify(store).succeed(BUYER, SHOP, ID, request, response, PROCESSING_TOKEN);
+        verify(store, never()).fail(eq(BUYER), eq(SHOP), any(), any(), any());
     }
 
     @Test
@@ -74,24 +76,25 @@ class ConversationServiceTest {
         assertThat(service.send(principal, SHOP, ID, request)).isSameAs(cached);
 
         verifyNoInteractions(engine);
-        verify(store, never()).succeed(eq(BUYER), eq(SHOP), eq(ID), any(), any());
+        verify(store, never()).succeed(eq(BUYER), eq(SHOP), eq(ID), any(), any(), any());
     }
 
     @Test
     void aFreshTurnUsesTheContextFrozenByItsReservationAndPersistsTheEngineResult() {
         var previous = ConversationContextRef.order("SF10001", Instant.parse("2026-10-25T05:30:00Z"));
         var response = ChatResponse.from(ChatReply.text("current scoped reply")).withContext(previous);
-        when(store.reserve(BUYER, SHOP, ID, request)).thenReturn(ConversationStore.Reservation.fresh(previous));
-        when(engine.reply(principal, SHOP, request, previous)).thenReturn(response);
+        when(store.reserve(BUYER, SHOP, ID, request))
+                .thenReturn(ConversationStore.Reservation.fresh(previous, PROCESSING_TOKEN));
+        when(engine.reply(principal, SHOP, request, previous, runKey())).thenReturn(response);
         ConversationTurnResponse expected = completed();
-        when(store.succeed(BUYER, SHOP, ID, request, response)).thenReturn(expected);
+        when(store.succeed(BUYER, SHOP, ID, request, response, PROCESSING_TOKEN)).thenReturn(expected);
 
         assertThat(service.send(principal, SHOP, ID, request)).isSameAs(expected);
 
         var flow = inOrder(store, engine);
         flow.verify(store).reserve(BUYER, SHOP, ID, request);
-        flow.verify(engine).reply(principal, SHOP, request, previous);
-        flow.verify(store).succeed(BUYER, SHOP, ID, request, response);
+        flow.verify(engine).reply(principal, SHOP, request, previous, runKey());
+        flow.verify(store).succeed(BUYER, SHOP, ID, request, response, PROCESSING_TOKEN);
     }
 
     @Test
@@ -107,45 +110,45 @@ class ConversationServiceTest {
 
     @Test
     void modelFailureIsMarkedTerminalRatherThanRetried() {
-        when(store.reserve(BUYER, SHOP, ID, request)).thenReturn(ConversationStore.Reservation.fresh());
-        when(engine.reply(principal, SHOP, request, ConversationContextRef.none()))
+        when(store.reserve(BUYER, SHOP, ID, request)).thenReturn(fresh());
+        when(engine.reply(principal, SHOP, request, ConversationContextRef.none(), runKey()))
                 .thenThrow(new ModelUnavailableException());
 
         assertThatThrownBy(() -> service.send(principal, SHOP, ID, request))
                 .isInstanceOf(ModelUnavailableException.class);
 
-        verify(store).fail(BUYER, SHOP, ID, request.clientMessageId());
-        verify(store, never()).succeed(eq(BUYER), eq(SHOP), eq(ID), any(), any());
-        verify(engine).reply(principal, SHOP, request, ConversationContextRef.none());
+        verify(store).fail(BUYER, SHOP, ID, request.clientMessageId(), PROCESSING_TOKEN);
+        verify(store, never()).succeed(eq(BUYER), eq(SHOP), eq(ID), any(), any(), any());
+        verify(engine).reply(principal, SHOP, request, ConversationContextRef.none(), runKey());
     }
 
     @Test
     void snapshotFailureAfterBusinessExecutionNeverReplaysBusinessLogic() {
-        when(store.reserve(BUYER, SHOP, ID, request)).thenReturn(ConversationStore.Reservation.fresh());
-        when(engine.reply(principal, SHOP, request, ConversationContextRef.none()))
+        when(store.reserve(BUYER, SHOP, ID, request)).thenReturn(fresh());
+        when(engine.reply(principal, SHOP, request, ConversationContextRef.none(), runKey()))
                 .thenReturn(ChatResponse.from(ChatReply.text("已处理")));
-        when(store.succeed(eq(BUYER), eq(SHOP), eq(ID), eq(request), any()))
+        when(store.succeed(eq(BUYER), eq(SHOP), eq(ID), eq(request), any(), eq(PROCESSING_TOKEN)))
                 .thenThrow(new DataAccessResourceFailureException("database unavailable"));
 
         assertThatThrownBy(() -> service.send(principal, SHOP, ID, request))
                 .isInstanceOf(ConversationException.class).hasMessageContaining("核实处理结果");
 
-        verify(store).fail(BUYER, SHOP, ID, request.clientMessageId());
-        verify(engine).reply(principal, SHOP, request, ConversationContextRef.none());
+        verify(store).fail(BUYER, SHOP, ID, request.clientMessageId(), PROCESSING_TOKEN);
+        verify(engine).reply(principal, SHOP, request, ConversationContextRef.none(), runKey());
     }
 
     @Test
     void failureMarkerOutageReturnsBoundedFriendlyErrorInsteadOfRepeatingCall() {
-        when(store.reserve(BUYER, SHOP, ID, request)).thenReturn(ConversationStore.Reservation.fresh());
-        when(engine.reply(principal, SHOP, request, ConversationContextRef.none()))
+        when(store.reserve(BUYER, SHOP, ID, request)).thenReturn(fresh());
+        when(engine.reply(principal, SHOP, request, ConversationContextRef.none(), runKey()))
                 .thenThrow(new IllegalStateException("private internal error"));
         doThrow(new DataAccessResourceFailureException("unreachable"))
-                .when(store).fail(BUYER, SHOP, ID, request.clientMessageId());
+                .when(store).fail(BUYER, SHOP, ID, request.clientMessageId(), PROCESSING_TOKEN);
 
         assertThatThrownBy(() -> service.send(principal, SHOP, ID, request))
                 .isInstanceOf(ConversationException.class).hasMessageNotContaining("unreachable");
 
-        verify(engine).reply(principal, SHOP, request, ConversationContextRef.none());
+        verify(engine).reply(principal, SHOP, request, ConversationContextRef.none(), runKey());
     }
 
     @Test
@@ -189,6 +192,14 @@ class ConversationServiceTest {
                 .isEqualTo(JdbcConversationStore.hash(new ConversationMessageRequest(UUID.randomUUID(), "hello", null)))
                 .isNotEqualTo(JdbcConversationStore.hash(new ConversationMessageRequest(key, "hello ", null)))
                 .isNotEqualTo(JdbcConversationStore.hash(new ConversationMessageRequest(key, "hello", "-")));
+    }
+
+    private AgentRunKey runKey() {
+        return new AgentRunKey(ID, request.clientMessageId(), BUYER, SHOP);
+    }
+
+    private static ConversationStore.Reservation fresh() {
+        return ConversationStore.Reservation.fresh(ConversationContextRef.none(), PROCESSING_TOKEN);
     }
 
     private static ConversationTurnResponse completed() {

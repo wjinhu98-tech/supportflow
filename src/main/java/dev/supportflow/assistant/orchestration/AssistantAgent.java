@@ -1,6 +1,8 @@
 package dev.supportflow.assistant.orchestration;
 
 import dev.supportflow.assistant.planning.ToolName;
+import dev.supportflow.assistant.runtime.ReadOnlyAgentRuntime;
+import dev.supportflow.assistant.runtime.store.AgentRunInput;
 import dev.supportflow.assistant.planning.ToolPlanner;
 import dev.supportflow.assistant.planning.ExplicitOrderNumbers;
 import dev.supportflow.assistant.tool.AfterSaleTool;
@@ -11,10 +13,11 @@ import dev.supportflow.chat.application.ModelUnavailableException;
 import dev.supportflow.chat.application.model.ChatReply;
 import dev.supportflow.common.security.model.CustomerPrincipal;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.Set;
 
-/** A bounded plan -> validate -> one tool execution flow, not an unconstrained model loop. */
+/** Durable read-only logistics steps; business mutations retain the explicit approval flow. */
 @Service
 public class AssistantAgent {
     private final ToolPlanner planner;
@@ -22,14 +25,31 @@ public class AssistantAgent {
     private final LogisticsTool logistics;
     private final AfterSaleTool afterSale;
     private final ChatService legacyOrders;
+    private final ReadOnlyAgentRuntime runtime;
 
     public AssistantAgent(ToolPlanner planner, OrderTool orderTool, LogisticsTool logistics,
                           AfterSaleTool afterSale, ChatService legacyOrders) {
+        this(planner, orderTool, logistics, afterSale, legacyOrders, null);
+    }
+
+    @Autowired
+    public AssistantAgent(ToolPlanner planner, OrderTool orderTool, LogisticsTool logistics,
+                          AfterSaleTool afterSale, ChatService legacyOrders, ReadOnlyAgentRuntime runtime) {
         this.planner = planner;
         this.orderTool = orderTool;
         this.logistics = logistics;
         this.afterSale = afterSale;
         this.legacyOrders = legacyOrders;
+        this.runtime = runtime;
+    }
+
+    public ChatReply execute(AssistantRoute route, CustomerPrincipal principal, long shopId,
+                             String message, String selectedOrderNo, AgentRunInput input) {
+        if (route != AssistantRoute.LOGISTICS || input == null) {
+            return execute(route, principal, shopId, message, selectedOrderNo);
+        }
+        if (runtime == null) throw new IllegalStateException("Durable runtime is required for conversation runs");
+        return ChatReply.text(runtime.execute(principal, input).result());
     }
 
     public ChatReply execute(AssistantRoute route, CustomerPrincipal principal,

@@ -82,7 +82,7 @@ a {
   display: grid;
   grid-template-columns: 82px minmax(0, 1fr);
   height: 100dvh;
-  min-height: 680px;
+  min-height: 0;
   overflow: hidden;
 }
 .navigation-rail {
@@ -180,10 +180,10 @@ a {
   display: flex;
   flex-direction: column;
   height: 100dvh;
-  min-height: 680px;
+  min-height: 0;
 }
 .topbar {
-  height: 108px;
+  height: 80px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -364,14 +364,14 @@ a {
 /* Each panel owns its own scroll region, so the composer stays in reach. */
 .workspace {
   display: grid;
-  grid-template-columns: 294px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
-  margin: 0 25px;
+  margin: 0 25px 20px;
   min-height: 0;
   flex: 1;
 }
-.workspace.has-selection {
-  grid-template-columns: 280px minmax(0, 1fr) 258px;
+.workspace-orders.has-selection {
+  grid-template-columns: minmax(0, 1fr) 320px;
 }
 .surface {
   background: #fff;
@@ -384,6 +384,7 @@ a {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-height: 0;
 }
 .panel-heading {
   display: flex;
@@ -438,6 +439,19 @@ a {
   padding: 0 16px 8px;
   scrollbar-width: thin;
   scrollbar-color: #e6e0ed transparent;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  align-content: start;
+  gap: 12px;
+}
+.orders-scroll > .empty-state,
+.orders-scroll > .order-skeletons,
+.orders-scroll > .load-more,
+.orders-scroll > .list-end {
+  grid-column: 1 / -1;
+}
+.orders-scroll .order-card {
+  margin: 0;
 }
 .empty-state {
   text-align: center;
@@ -739,6 +753,9 @@ a {
   background: #faf7fe;
   padding: 10px 12px;
   flex-shrink: 0;
+  max-width: 900px;
+  width: calc(100% - 48px);
+  align-self: center;
 }
 .context-icon {
   display: grid;
@@ -755,6 +772,10 @@ a {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+.selected-context .text-button {
+  margin: 0;
+  flex-shrink: 0;
 }
 .context-label {
   font-size: 9px;
@@ -774,7 +795,7 @@ a {
   overflow: auto;
   flex: 1;
   min-height: 0;
-  padding: 0 28px 24px;
+  padding: 0 max(24px, calc((100% - 900px) / 2)) 24px;
   scrollbar-width: thin;
   scrollbar-color: #e6e0ed transparent;
   scroll-behavior: smooth;
@@ -790,65 +811,6 @@ a {
   justify-content: center;
   padding: 38px 10px 30px;
 }
-.welcome-orbit {
-  width: 112px;
-  height: 112px;
-  display: grid;
-  place-items: center;
-  position: relative;
-  margin-bottom: 21px;
-  border: 1px solid #eee8f5;
-  border-radius: 50%;
-}
-.welcome-orbit::before {
-  content: '';
-  position: absolute;
-  inset: -10px;
-  border: 1px dashed #f0eaf6;
-  border-radius: 50%;
-}
-.welcome-icon {
-  width: 76px;
-  height: 76px;
-  display: grid;
-  place-items: center;
-  background: linear-gradient(135deg, #f2eafa, #f9f6fd);
-  border: 1px solid #e9ddf3;
-  border-radius: 24px;
-  box-shadow: 0 7px 18px #8b68ae0c;
-  color: #9d7bc0;
-  transform: rotate(-6deg);
-}
-.welcome-icon svg {
-  transform: rotate(6deg);
-}
-.orbit-dot {
-  position: absolute;
-  border-radius: 50%;
-  height: 7px;
-  width: 7px;
-  z-index: 1;
-  border: 2px solid #fff;
-  background: #bba1d6;
-  box-shadow: 0 0 0 1px #e9e0f3;
-}
-.orbit-dot.one {
-  top: 14px;
-  right: 9px;
-}
-.orbit-dot.two {
-  bottom: 5px;
-  left: 19px;
-  background: #a6c4b3;
-  width: 6px;
-  height: 6px;
-}
-.welcome-kicker {
-  font-size: 10px;
-  letter-spacing: 2px;
-  color: #b3a4be;
-  margin-bottom: 10px;
-}
 .conversation-welcome h3 {
   font-size: 25px;
   font-weight: 550;
@@ -860,35 +822,6 @@ a {
   color: #a49aaa;
   line-height: 1.95;
   margin-top: 13px;
-}
-.welcome-features {
-  display: flex;
-  justify-content: center;
-  gap: 66px;
-  margin-top: 32px;
-}
-.welcome-features > div {
-  display: grid;
-  grid-template-columns: 30px auto;
-  grid-template-rows: auto auto;
-  text-align: left;
-  column-gap: 8px;
-  row-gap: 5px;
-}
-.welcome-features > div > span {
-  grid-row: 1/3;
-  display: grid;
-  place-items: center;
-  color: #bba8cd;
-}
-.welcome-features strong {
-  font-size: 11px;
-  font-weight: 500;
-  color: #96869f;
-}
-.welcome-features p {
-  font-size: 9px;
-  color: #b8aebf;
 }
 .welcome-connect {
   margin-top: 32px;
@@ -1029,37 +962,12 @@ a {
   margin-left: 6px;
 }
 .composer-area {
-  padding: 0 24px 13px;
+  padding: 0 24px 20px;
   flex-shrink: 0;
   background: #fff;
-}
-.quick-prompts {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-bottom: 12px;
-  flex-wrap: wrap;
-}
-.quick-prompts > span {
-  font-size: 9px;
-  color: #b4a7bd;
-  margin-right: 3px;
-}
-.quick-prompts button {
-  border: 1px solid #eee7f4;
-  background: #fdfbff;
-  border-radius: 5px;
-  font-size: 9px;
-  color: #ad99be;
-  padding: 6px 9px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.quick-prompts button:hover:not(:disabled) {
-  color: #81649e;
-  background: #f5eefc;
-  border-color: #dacbe9;
+  width: 100%;
+  max-width: 948px;
+  align-self: center;
 }
 .composer {
   border: 1px solid #e5dbef;
@@ -1148,44 +1056,6 @@ a {
   background: #e9e1f3;
   color: #b6a4cc;
 }
-.composer-disclaimer {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  color: #c0b4ca;
-  font-size: 8px;
-  margin-top: 10px;
-  line-height: 1.5;
-}
-.workspace-footer {
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 15px;
-  padding: 0 27px;
-  flex-shrink: 0;
-  color: #b8afc0;
-  font-size: 8px;
-}
-.footer-wordmark {
-  font-size: 12px;
-  font-weight: 550;
-  letter-spacing: -0.5px;
-  color: #a99bb4;
-}
-.footer-wordmark > span {
-  font-size: 7px;
-  vertical-align: super;
-  margin-left: 2px;
-}
-.footer-security {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
 .order-detail {
   display: flex;
   align-items: center;
@@ -1467,16 +1337,15 @@ a {
   }
 }
 
-/* Wide screens gain an order details column; small screens keep context inline. */
+/* Orders own their detail column; the conversation stays a single chat view. */
 @media (min-width: 1700px) {
   .workspace {
     margin-left: 34px;
     margin-right: 34px;
     gap: 22px;
-    grid-template-columns: 324px minmax(0, 1fr);
   }
-  .workspace.has-selection {
-    grid-template-columns: 304px minmax(0, 1fr) 286px;
+  .workspace-orders.has-selection {
+    grid-template-columns: minmax(0, 1fr) 350px;
   }
   .topbar {
     padding-left: 38px;
@@ -1485,66 +1354,34 @@ a {
   .conversation-heading {
     padding: 24px 30px;
   }
-  .message-list {
-    padding-left: 35px;
-    padding-right: 35px;
-  }
-  .composer-area {
-    padding: 0 30px 16px;
-  }
   .conversation-welcome h3 {
     font-size: 29px;
   }
   .welcome-description {
     font-size: 12px;
   }
-  .welcome-orbit {
-    width: 127px;
-    height: 127px;
-    margin-bottom: 26px;
-  }
-  .welcome-icon {
-    height: 86px;
-    width: 86px;
-  }
-  .welcome-features {
-    margin-top: 38px;
-    gap: 80px;
-  }
   .welcome-connect {
     margin-top: 37px;
-  }
-  .workspace-footer {
-    padding-left: 36px;
-    padding-right: 36px;
   }
 }
 
 @media (max-width: 1450px) {
-  .workspace.has-selection {
-    grid-template-columns: 280px minmax(0, 1fr);
-  }
-  .order-detail {
-    display: none;
-  }
   .topbar {
     padding: 0 26px;
-  }
-  .welcome-features {
-    gap: 46px;
   }
 }
 
 @media (max-width: 1100px) {
-  .workspace,
-  .workspace.has-selection {
-    grid-template-columns: 257px minmax(0, 1fr);
+  .workspace {
     gap: 13px;
-    margin: 0 18px;
+    margin: 0 18px 18px;
+  }
+  .workspace-orders.has-selection {
+    grid-template-columns: minmax(0, 1fr) 290px;
   }
   .topbar {
     padding: 0 21px;
-    height: 98px;
+    height: 80px;
   }
   .workspace-title h1 {
     font-size: 20px;
@@ -1580,27 +1417,11 @@ a {
   .composer-area {
     padding: 0 17px 12px;
   }
-  .welcome-features {
-    gap: 26px;
-  }
-  .welcome-features > div {
-    column-gap: 5px;
-    grid-template-columns: 25px auto;
-  }
-  .welcome-features strong {
-    font-size: 10px;
-  }
-  .welcome-features p {
-    font-size: 8px;
-  }
   .conversation-welcome h3 {
     font-size: 22px;
   }
   .context-description {
     margin-left: 0;
-  }
-  .workspace-footer {
-    padding: 0 20px;
   }
   .input-hint {
     font-size: 7px;
@@ -1612,9 +1433,6 @@ a {
 
 @media (max-width: 860px) {
   .app-shell {
-    height: auto;
-    min-height: 100dvh;
-    overflow: visible;
     grid-template-columns: 65px minmax(0, 1fr);
   }
   .navigation-rail {
@@ -1632,13 +1450,12 @@ a {
     font-size: 38px;
   }
   .main-workspace {
-    height: auto;
-    min-height: 100dvh;
+    min-height: 0;
   }
   .topbar {
     height: auto;
-    min-height: 98px;
-    padding: 20px;
+    min-height: 76px;
+    padding: 14px 20px;
     align-items: flex-start;
     gap: 20px;
     flex-wrap: wrap;
@@ -1677,17 +1494,21 @@ a {
   .connect-top-button svg {
     display: none;
   }
-  .workspace,
-  .workspace.has-selection {
+  .workspace {
+    gap: 16px;
+    margin: 0 18px 18px;
+  }
+  .workspace-orders.has-selection {
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    margin: 0 18px;
+    overflow: auto;
   }
-  .orders-panel {
-    min-height: 220px;
-    max-height: 350px;
-    scroll-margin-top: 15px;
+  .workspace-orders.has-selection .orders-panel {
+    flex: 1 0 380px;
+  }
+  .order-detail {
+    overflow: visible;
+    flex-shrink: 0;
   }
   .panel-heading {
     padding-top: 17px;
@@ -1698,21 +1519,6 @@ a {
   .orders-scope {
     margin-bottom: 12px;
     padding: 8px 10px;
-  }
-  .orders-scroll {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
-    overflow: auto;
-  }
-  .orders-scroll > .empty-state,
-  .orders-scroll > .order-skeletons,
-  .orders-scroll > .load-more,
-  .orders-scroll > .list-end {
-    grid-column: 1/-1;
-  }
-  .orders-scroll .order-card {
-    margin: 0;
   }
   .orders-scroll > .load-more {
     margin: 0 0 4px;
@@ -1748,36 +1554,14 @@ a {
   .orders-footer {
     min-height: 36px;
   }
-  .conversation-panel {
-    height: 690px;
-    min-height: 620px;
-  }
   .conversation-welcome {
     padding: 35px 10px;
-  }
-  .welcome-features {
-    gap: 45px;
-  }
-  .welcome-features strong {
-    font-size: 11px;
-  }
-  .welcome-features p {
-    font-size: 9px;
   }
   .message-content {
     max-width: 85%;
   }
   .message-order-list {
     min-width: 210px;
-  }
-  .workspace-footer {
-    min-height: 43px;
-    height: auto;
-    padding: 13px 20px;
-    font-size: 7px;
-  }
-  .footer-security {
-    display: none;
   }
   .global-notice {
     margin-left: 18px;
@@ -1796,7 +1580,8 @@ a {
 
 @media (max-width: 540px) {
   .app-shell {
-    display: block;
+    display: flex;
+    flex-direction: column;
   }
   .navigation-rail {
     position: static;
@@ -1804,6 +1589,11 @@ a {
     height: 63px;
     padding: 10px 19px;
     gap: 20px;
+    flex-shrink: 0;
+  }
+  .main-workspace {
+    height: auto;
+    flex: 1;
   }
   .brand-mark {
     width: 33px;
@@ -1847,9 +1637,9 @@ a {
     display: none;
   }
   .topbar {
-    padding: 19px 17px;
-    min-height: 112px;
-    gap: 15px;
+    padding: 12px 17px;
+    min-height: 92px;
+    gap: 8px;
   }
   .workspace-title h1 {
     font-size: 18px;
@@ -1904,17 +1694,12 @@ a {
     min-height: 29px;
     height: 29px;
   }
-  .workspace,
-  .workspace.has-selection {
-    margin: 0 12px;
+  .workspace {
+    margin: 0 12px 12px;
     gap: 12px;
   }
   .surface {
     border-radius: 10px;
-  }
-  .orders-panel {
-    min-height: 188px;
-    max-height: 360px;
   }
   .panel-heading {
     padding: 15px 16px 0;
@@ -1990,10 +1775,6 @@ a {
     font-size: 8px;
     min-height: 32px;
   }
-  .conversation-panel {
-    height: 690px;
-    min-height: 600px;
-  }
   .conversation-heading {
     padding: 15px 14px;
     gap: 8px;
@@ -2027,6 +1808,8 @@ a {
     margin: 10px 13px 0;
     padding: 8px 9px;
     gap: 7px;
+    width: calc(100% - 26px);
+    flex-wrap: wrap;
   }
   .context-icon {
     width: 27px;
@@ -2050,46 +1833,12 @@ a {
   .conversation-welcome {
     padding: 32px 3px 24px;
   }
-  .welcome-orbit {
-    width: 90px;
-    height: 90px;
-    margin-bottom: 21px;
-  }
-  .welcome-icon {
-    width: 62px;
-    height: 62px;
-    border-radius: 19px;
-  }
-  .welcome-icon svg {
-    width: 29px;
-  }
-  .welcome-kicker {
-    font-size: 9px;
-    letter-spacing: 1px;
-  }
   .conversation-welcome h3 {
     font-size: 21px;
   }
   .welcome-description {
     font-size: 10px;
     line-height: 2;
-  }
-  .welcome-features {
-    gap: 25px;
-    margin-top: 27px;
-  }
-  .welcome-features > div {
-    grid-template-columns: 21px auto;
-    column-gap: 5px;
-  }
-  .welcome-features > div > span svg {
-    width: 17px;
-  }
-  .welcome-features strong {
-    font-size: 9px;
-  }
-  .welcome-features p {
-    font-size: 8px;
   }
   .welcome-connect {
     font-size: 10px;
@@ -2143,19 +1892,6 @@ a {
   .composer-area {
     padding: 0 13px 11px;
   }
-  .quick-prompts {
-    gap: 5px;
-    margin-bottom: 10px;
-  }
-  .quick-prompts > span {
-    font-size: 8px;
-    margin-right: 2px;
-  }
-  .quick-prompts button {
-    padding: 5px 6px;
-    font-size: 8px;
-    gap: 4px;
-  }
   .composer textarea {
     font-size: 10px;
     padding: 12px 12px 4px;
@@ -2185,20 +1921,6 @@ a {
   }
   .send-button svg {
     width: 14px;
-  }
-  .composer-disclaimer {
-    font-size: 7px;
-    gap: 3px;
-  }
-  .composer-disclaimer svg {
-    width: 10px;
-  }
-  .workspace-footer {
-    padding: 15px;
-    gap: 10px;
-  }
-  .footer-wordmark {
-    font-size: 11px;
   }
   .global-notice {
     margin: 0 12px 12px;
@@ -2255,18 +1977,14 @@ a {
 .context-description,
 .message-byline,
 .message-byline time,
-.quick-prompts > span,
 .input-hint,
 .character-count,
-.composer-disclaimer,
-.workspace-footer,
 .detail-order-label,
 .order-facts > div,
 .detail-note p,
 .field-help,
 .connection-security,
 .help-footnote,
-.welcome-features p,
 .conversation-date {
   font-size: 11px;
   color: #756c80;
@@ -2291,7 +2009,6 @@ a {
 .load-more,
 .text-button,
 .clear-chat-button,
-.quick-prompts button,
 .send-button,
 .notice-action,
 .detail-query,
@@ -2300,7 +2017,6 @@ a {
   font-size: 12px;
   min-height: 32px;
 }
-.quick-prompts button,
 .text-button {
   color: #70558c;
 }
@@ -2314,8 +2030,7 @@ a {
   color: #756c80;
 }
 .field-label,
-.help-steps strong,
-.welcome-features strong {
+.help-steps strong {
   font-size: 13px;
 }
 .modal input {
@@ -2344,9 +2059,6 @@ a {
   .modal input {
     font-size: 16px;
   }
-  .quick-prompts {
-    flex-wrap: wrap;
-  }
   .selected-context > div {
     flex-wrap: wrap;
   }
@@ -2356,13 +2068,6 @@ a {
   }
   .composer-right {
     gap: 5px;
-  }
-  .conversation-panel {
-    min-height: 720px;
-    height: 760px;
-  }
-  .composer-disclaimer {
-    font-size: 10px;
   }
   .global-notice {
     flex-wrap: wrap;

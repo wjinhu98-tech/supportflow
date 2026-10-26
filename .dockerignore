@@ -1,0 +1,28 @@
+# Default-deny context: credentials and workstation artifacts never enter a build.
+**
+!target/
+!target/supportflow-backend-0.1.0-SNAPSHOT.jar
+!frontend/
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/index.html
+!frontend/tsconfig.json
+!frontend/vite.config.ts
+!frontend/src/
+!frontend/src/**
+!frontend/public/
+!frontend/public/**
+!deploy/
+!deploy/backend.Dockerfile
+!deploy/frontend.Dockerfile
+!deploy/nginx.conf
+
+# Keep these exclusions last, including unexpected nested copies.
+**/node_modules
+**/node_modules/**
+**/.local
+**/.local/**
+**/.git
+**/.git/**
+**/.env*
+**/http-client.private.env.json

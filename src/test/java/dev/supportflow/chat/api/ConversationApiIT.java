@@ -140,7 +140,7 @@ class ConversationApiIT {
                 grant.execute("GRANT SELECT ON " + DATABASE + "." + table + " TO 'conversation_runtime'@'%'");
             }
             for (String table : List.of("support_after_sale", "support_after_sale_execution",
-                    "support_chat_conversation", "support_chat_turn")) {
+                    "support_chat_conversation", "support_chat_turn", "support_agent_run", "support_agent_step")) {
                 grant.execute("GRANT SELECT, INSERT, UPDATE ON " + DATABASE + "." + table
                         + " TO 'conversation_runtime'@'%'");
             }

@@ -9,7 +9,22 @@ spring:
   flyway:
     enabled: false
 
+management:
+  endpoints:
+    access:
+      default: none
+    jmx:
+      exposure:
+        exclude: "*"
+    web:
+      exposure:
+        exclude: "*"
+
 supportflow:
+  agent:
+    runtime:
+      max-steps: 8
+      total-timeout-seconds: 90
   after-sale:
     execution:
       enabled: false

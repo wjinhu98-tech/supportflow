@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext } from '@playwright/test'
-import { connect, send, switchShop } from './helpers'
+import { connect, send, showChat, showOrders, switchShop } from './helpers'
 
 const mockBase = 'http://127.0.0.1:18080'
 type RecordedRequest = {
@@ -22,6 +22,108 @@ test.beforeEach(async ({ request, page }) => {
   await page.goto('/?shopId=100')
 })
 
+test('chat is the default view and order navigation opens a separate workspace', async ({
+  page,
+}) => {
+  const chatNavigation = page.getByRole('button', { name: '会话', exact: true })
+  const orderNavigation = page.getByRole('button', { name: '查看订单面板', exact: true })
+  await expect(chatNavigation).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByTestId('message-input')).toBeVisible()
+  await expect(page.getByTestId('orders-panel')).not.toBeVisible()
+  await expect(page.locator('.order-detail')).not.toBeVisible()
+  await showOrders(page)
+  await expect(chatNavigation).not.toHaveAttribute('aria-current', 'page')
+  await expect(page.getByTestId('message-input')).not.toBeVisible()
+  await showChat(page)
+  await expect(orderNavigation).not.toHaveAttribute('aria-current', 'page')
+  await expect(page.getByTestId('orders-panel')).not.toBeVisible()
+})
+
+test('switching workspaces preserves the draft and conversation without submitting again', async ({
+  page,
+  request,
+}) => {
+  await connect(page)
+  await send(page, '查订单 SF10001')
+  await expect(page.getByTestId('chat-message').last()).toContainText('SF10001')
+  const messageCount = await page.getByTestId('chat-message').count()
+  const postsBefore = (await recorded(request)).filter((entry) => entry.method === 'POST')
+  await page.getByTestId('message-input').fill('这笔订单什么时候送达？')
+  await showOrders(page)
+  await expect(page.getByTestId('orders-panel').getByTestId('order-card')).toHaveCount(20)
+  await showChat(page)
+  await expect(page.getByTestId('message-input')).toHaveValue('这笔订单什么时候送达？')
+  await expect(page.getByTestId('chat-message')).toHaveCount(messageCount)
+  await expect(page.getByTestId('chat-message').last()).toContainText('SF10001')
+  await expect(page.getByTestId('orders-panel')).not.toBeVisible()
+  await expect(page.locator('.order-detail')).not.toBeVisible()
+  expect((await recorded(request)).filter((entry) => entry.method === 'POST')).toEqual(postsBefore)
+})
+
+test('a reply received on the orders page is visible at the bottom when returning to chat', async ({
+  page,
+  request,
+}) => {
+  await connect(page)
+  for (let index = 1; index <= 7; index++) {
+    const message = `滚动铺垫${index}：${'请帮我了解店铺咨询服务与商品相关说明。'.repeat(6)}`
+    await send(page, message)
+    await expect(page.getByTestId('chat-message').last()).toContainText(`收到您的问题：${message}`)
+  }
+  const messageList = page.getByRole('log', { name: '客服对话', exact: true })
+  await expect
+    .poll(() => messageList.evaluate((element) => element.scrollHeight > element.clientHeight))
+    .toBe(true)
+  await messageList.evaluate((element) => {
+    element.scrollTop = 0
+  })
+
+  const message = '订单页后台回复滚动验收'
+  let releaseReply!: () => void
+  const replyGate = new Promise<void>((resolve) => {
+    releaseReply = resolve
+  })
+  await page.route('**/api/v1/shops/100/chat/conversations/*/messages', async (route) => {
+    if (route.request().postDataJSON()?.message !== message) {
+      await route.continue()
+      return
+    }
+    const response = await route.fetch()
+    await replyGate
+    await route.fulfill({ response })
+  })
+  const postsBefore = (await recorded(request)).filter((entry) => entry.method === 'POST')
+  try {
+    const replyReceived = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' &&
+        response.request().postDataJSON()?.message === message,
+    )
+    await send(page, message)
+    await expect
+      .poll(async () => (await recorded(request)).some((entry) => entry.body?.message === message))
+      .toBe(true)
+    await showOrders(page)
+    releaseReply()
+    await (await replyReceived).finished()
+    await expect(page.getByTestId('chat-message').last()).toContainText(`收到您的问题：${message}`)
+    await showChat(page)
+    await expect
+      .poll(() =>
+        messageList.evaluate(
+          (element) => element.scrollTop + element.clientHeight >= element.scrollHeight - 4,
+        ),
+      )
+      .toBe(true)
+    await expect(page.getByTestId('chat-message').last()).toBeInViewport()
+    const postsAfter = (await recorded(request)).filter((entry) => entry.method === 'POST')
+    expect(postsAfter).toHaveLength(postsBefore.length + 1)
+    expect(postsAfter.filter((entry) => entry.body?.message === message)).toHaveLength(1)
+  } finally {
+    releaseReply()
+  }
+})
+
 test('disconnected users cannot send, and invalid credentials do not connect', async ({ page }) => {
   await expect(page.getByTestId('send-button')).toBeDisabled()
   await page.getByRole('button', { name: '连接账号', exact: true }).first().click()
@@ -37,6 +139,7 @@ test('proxy forwards Basic authentication, HttpOnly session cookie and CSRF head
   request,
 }) => {
   await connect(page)
+  await showOrders(page)
   await expect(page.getByTestId('orders-panel').getByTestId('order-card')).toHaveCount(20)
   const posts = (await recorded(request)).filter((entry) => entry.method === 'POST')
   expect(posts.length).toBeGreaterThan(0)
@@ -72,6 +175,7 @@ test('pagination uses the opaque server cursor and appends without losing earlie
   request,
 }) => {
   await connect(page)
+  await showOrders(page)
   const cards = page.getByTestId('orders-panel').getByTestId('order-card')
   await expect(cards).toHaveCount(20)
   await page.getByTestId('load-more-orders').click()
@@ -88,10 +192,17 @@ test('order selection submits the scoped order and retains it for the next quest
   request,
 }, testInfo) => {
   await connect(page)
+  await showOrders(page)
   const firstCard = page.getByTestId('orders-panel').getByTestId('order-card').first()
   await expect(firstCard).toContainText('SF10001')
   await firstCard.getByRole('button', { name: /^咨询此订单/ }).click()
   await expect(page.getByTestId('selected-order')).toContainText('SF10001')
+  await expect(page.getByRole('button', { name: '会话', exact: true })).toHaveAttribute(
+    'aria-current',
+    'page',
+  )
+  await expect(page.getByTestId('orders-panel')).not.toBeVisible()
+  await expect(page.locator('.order-detail')).not.toBeVisible()
   await expect(page.getByTestId('chat-message').last()).toContainText('已发货')
   await send(page, '现在是什么状态？')
   await expect(page.getByTestId('chat-message').last()).toContainText('已发货')
@@ -121,6 +232,7 @@ test('shop switch clears old context and queries the same order number only in t
   request,
 }) => {
   await connect(page)
+  await showOrders(page)
   await page
     .getByTestId('orders-panel')
     .getByTestId('order-card')
@@ -132,6 +244,7 @@ test('shop switch clears old context and queries the same order number only in t
   await switchShop(page, '101')
   await expect(page.getByTestId('selected-order')).toHaveCount(0)
   await expect(page.getByTestId('chat-message').filter({ hasText: '已发货' })).toHaveCount(0)
+  await showOrders(page)
   const cards = page.getByTestId('orders-panel').getByTestId('order-card')
   await expect(cards).toHaveCount(1)
   await expect(cards.first()).toContainText('待发货')
@@ -147,6 +260,7 @@ test('shop switch clears old context and queries the same order number only in t
 test('empty shop has no invented order cards', async ({ page }) => {
   await connect(page)
   await switchShop(page, '102')
+  await showOrders(page)
   await expect(page.getByTestId('orders-panel').getByTestId('order-card')).toHaveCount(0)
   await expect(page.getByRole('heading', { name: '暂未加载到订单', exact: true })).toBeVisible()
 })
@@ -158,6 +272,7 @@ for (const [message, expectedMessage] of [
 ] as const) {
   test(`API error ${message} is visible and keeps the connected account`, async ({ page }) => {
     await connect(page)
+    await showOrders(page)
     await expect(page.getByTestId('orders-panel').getByTestId('order-card')).toHaveCount(20)
     await send(page, message)
     await expect(page.getByText(expectedMessage).last()).toBeVisible()
@@ -234,6 +349,7 @@ test('shop switch cannot display an earlier shop pending reply', async ({ page, 
     .poll(async () => (await recorded(request)).some((entry) => entry.body?.message === '延时回复'))
     .toBe(true)
   await switchShop(page, '101')
+  await showOrders(page)
   await expect(page.getByTestId('orders-panel').getByTestId('order-card')).toHaveCount(1)
   await page.waitForTimeout(1700)
   await expect(
@@ -257,6 +373,7 @@ test('mobile shop consultation works without document-level horizontal overflow'
 }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await connect(page)
+  await showOrders(page)
   await expect(page.getByTestId('orders-panel').getByTestId('order-card')).toHaveCount(20)
   await send(page, '查订单 SF10001')
   await expect(page.getByTestId('chat-message').last()).toContainText('已发货')
@@ -268,4 +385,40 @@ test('mobile shop consultation works without document-level horizontal overflow'
   }))
   expect(dimensions.content).toBeLessThanOrEqual(dimensions.viewport + 1)
   await page.screenshot({ path: testInfo.outputPath('mobile.png'), fullPage: true })
+})
+
+test('mobile navigation separates orders from chat and keeps the composer reachable', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.getByTestId('conversation-panel')).toBeVisible()
+  await expect(page.getByTestId('orders-panel')).not.toBeVisible()
+  await expect(page.locator('.order-detail')).not.toBeVisible()
+  await expect(page.locator('.quick-prompts')).toHaveCount(0)
+  await expect(page.getByTestId('message-input')).toBeInViewport()
+  await expect(page.getByTestId('send-button')).toBeInViewport()
+  await connect(page)
+  await page.getByTestId('message-input').fill('查订单 SF10001')
+  await showOrders(page)
+  await expect(page.getByTestId('conversation-panel')).not.toBeVisible()
+  await expect(page.getByTestId('message-input')).not.toBeVisible()
+  await expect(page.getByTestId('orders-panel').getByTestId('order-card')).toHaveCount(20)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(
+    true,
+  )
+  await page.screenshot({ path: testInfo.outputPath('mobile-orders.png'), fullPage: true })
+  await showChat(page)
+  await expect(page.getByTestId('orders-panel')).not.toBeVisible()
+  await expect(page.getByTestId('message-input')).toHaveValue('查订单 SF10001')
+  await expect(page.getByTestId('message-input')).toBeInViewport()
+  await expect(page.getByTestId('send-button')).toBeInViewport()
+  await expect(page.getByTestId('send-button')).toBeEnabled()
+  await page.getByTestId('send-button').click()
+  await expect(page.getByTestId('chat-message').last()).toContainText('已发货')
+  await expect(page.getByTestId('message-input')).toBeInViewport()
+  await expect(page.getByTestId('send-button')).toBeInViewport()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(
+    true,
+  )
+  await page.screenshot({ path: testInfo.outputPath('mobile-chat-only.png'), fullPage: true })
 })

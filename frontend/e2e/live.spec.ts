@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { connect, send, switchShop } from './helpers'
+import { connect, send, showChat, showOrders, switchShop } from './helpers'
 import type {
   AfterSaleEligibility,
   AfterSaleTicket,
@@ -49,12 +49,18 @@ async function chat(page: Page, message: string) {
 }
 
 async function selectOrder(page: Page, orderNo: string) {
+  await showOrders(page)
   const card = page
     .getByTestId('orders-panel')
     .getByTestId('order-card')
     .filter({ hasText: new RegExp(`\\b${orderNo}\\b`) })
   await expect(card).toHaveCount(1)
   await card.getByRole('button', { name: /^咨询此订单/ }).click()
+  await expect(page.getByRole('button', { name: '会话', exact: true })).toHaveAttribute(
+    'aria-current',
+    'page',
+  )
+  await expect(page.getByTestId('orders-panel')).not.toBeVisible()
   await expect(page.getByTestId('chat-message').last()).toContainText(orderNo)
   await expect(page.getByTestId('send-button')).toBeDisabled()
   // Wait for the selected-order POST before submitting another message.
@@ -62,6 +68,7 @@ async function selectOrder(page: Page, orderNo: string) {
 }
 
 async function selectFreshAfterSaleOrder(page: Page) {
+  await showOrders(page)
   const usedOrderNos = new Set((await ownedTickets(page)).map((ticket) => ticket.orderNo))
   const cards = page.getByTestId('orders-panel').getByTestId('order-card')
   const available = await cards.allTextContents()
@@ -275,6 +282,7 @@ test('real history uses bounded pages for both conversations and older messages'
 
 test('real Spring Security CSRF and real MySQL owned-order selection', async ({ page }) => {
   await connect(page, 'frontend-buyer', 'Frontend-Test-Only!')
+  await showOrders(page)
   const panel = page.getByTestId('orders-panel')
   await expect(panel.getByTestId('order-card')).toHaveCount(20)
   const order = panel.getByTestId('order-card').filter({ hasText: 'SF10001' })
@@ -284,6 +292,7 @@ test('real Spring Security CSRF and real MySQL owned-order selection', async ({ 
   await expect(page.getByTestId('chat-message').last()).toContainText('199.90')
   const cookie = (await page.context().cookies()).find((item) => item.name === 'JSESSIONID')
   expect(cookie?.httpOnly).toBe(true)
+  await showOrders(page)
   await page.getByTestId('load-more-orders').click()
   await expect(panel.getByTestId('order-card')).toHaveCount(24)
 })
@@ -291,9 +300,9 @@ test('real Spring Security CSRF and real MySQL owned-order selection', async ({ 
 test('receipt confirmation needs explicit consent and persists the server receipt and refund deadline', async ({
   page,
 }) => {
-  // The existing layout shows its order-detail sidebar only above 1450px.
   await page.setViewportSize({ width: 1600, height: 1000 })
   await connect(page, 'frontend-buyer', password)
+  await showOrders(page)
   await page.getByTestId('load-more-orders').click()
   const panel = page.getByTestId('orders-panel')
   await expect(panel.getByTestId('order-card')).toHaveCount(24)
@@ -303,6 +312,7 @@ test('receipt confirmation needs explicit consent and persists the server receip
     historic.getByRole('button', { name: '确认收货 PAGE-021', exact: true }),
   ).toHaveCount(0)
   await selectOrder(page, 'SFRECEIPT01')
+  await showOrders(page)
   const card = panel.getByTestId('order-card').filter({ hasText: 'SFRECEIPT01' })
   const requests: string[] = []
   page.on('request', (request) => {
@@ -350,6 +360,13 @@ test('receipt confirmation needs explicit consent and persists the server receip
   await expect(card.locator('[data-status="COMPLETED"]')).toBeVisible()
   await expect(page.getByTestId('order-received-at')).toBeVisible()
   await expect(page.getByTestId('order-after-sale-deadline')).toBeVisible()
+  expect(requests).toHaveLength(1)
+  await page.screenshot({ path: 'test-results/receipt-confirmation.png', fullPage: true })
+  await dialog.getByRole('button', { name: '完成', exact: true }).click()
+  await expect(card.getByRole('button', { name: '确认收货 SFRECEIPT01', exact: true })).toHaveCount(
+    0,
+  )
+  await showChat(page)
   await expect(
     page
       .getByTestId('chat-message')
@@ -357,12 +374,6 @@ test('receipt confirmation needs explicit consent and persists the server receip
       .getByTestId('order-card')
       .locator('[data-status="COMPLETED"]'),
   ).toBeVisible()
-  expect(requests).toHaveLength(1)
-  await page.screenshot({ path: 'test-results/receipt-confirmation.png', fullPage: true })
-  await dialog.getByRole('button', { name: '完成', exact: true }).click()
-  await expect(card.getByRole('button', { name: '确认收货 SFRECEIPT01', exact: true })).toHaveCount(
-    0,
-  )
 
   // Deliberately repeat via the isolated public test account, never a business database.
   const csrfResponse = await page.request.get('/api/v1/security/csrf', { headers: buyerHeaders })
@@ -384,9 +395,11 @@ test('receipt confirmation needs explicit consent and persists the server receip
   expect(eligibility.deadlineAt).toBe(result.eligibility.deadlineAt)
   await page.reload()
   await connect(page, 'frontend-buyer', password)
+  await showOrders(page)
   await page.getByTestId('load-more-orders').click()
   await expect(panel.getByTestId('order-card')).toHaveCount(24)
   await selectOrder(page, 'SFRECEIPT01')
+  await showOrders(page)
   await expect(page.getByTestId('order-after-sale-deadline')).toBeVisible()
   await expect(card.getByRole('button', { name: '确认收货 SFRECEIPT01', exact: true })).toHaveCount(
     0,
@@ -398,6 +411,7 @@ test('real API keeps same-number orders scoped to the active shop and rejects a 
 }) => {
   await connect(page, 'frontend-buyer', 'Frontend-Test-Only!')
   await switchShop(page, '101')
+  await showOrders(page)
   const panel = page.getByTestId('orders-panel')
   await expect(panel.getByTestId('order-card')).toHaveCount(1)
   await panel.getByRole('button', { name: /^咨询此订单/ }).click()
@@ -410,6 +424,7 @@ test('real API keeps same-number orders scoped to the active shop and rejects a 
 
 test('real API does not reveal another buyer owned-order details', async ({ page }) => {
   await connect(page, 'frontend-other', 'Frontend-Test-Only!')
+  await showOrders(page)
   const cards = page.getByTestId('orders-panel').getByTestId('order-card')
   await expect(cards).toHaveCount(1)
   await expect(cards.first()).toContainText('SF20001')
@@ -704,6 +719,7 @@ test('real approved request executes a durable simulated refund and both progres
   expect(naturalProgress.reply).toContain('演示处理完成')
   expect(naturalProgress.reply).not.toContain('SUCCEEDED')
   expect(naturalProgress.reply).toContain(reference!)
+  await showOrders(page)
   const ownedResponse = page.waitForResponse(
     (response) =>
       response.request().method() === 'GET' &&
@@ -752,6 +768,7 @@ test('real approved request executes a durable simulated refund and both progres
   })
   await page.keyboard.press('Escape')
   await switchShop(page, '101')
+  await showOrders(page)
   await page.getByTestId('open-after-sales').click()
   await expect(page.getByTestId('after-sales-panel')).toBeVisible()
   await expect(page.getByTestId('after-sale-card').filter({ hasText: ticketId! })).toHaveCount(0)

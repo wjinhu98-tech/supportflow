@@ -6,6 +6,8 @@ import dev.supportflow.assistant.orchestration.ConversationOrchestrator;
 import dev.supportflow.assistant.orchestration.ConversationRouter;
 import dev.supportflow.assistant.orchestration.AssistantRoute;
 import dev.supportflow.assistant.planning.ExplicitOrderNumbers;
+import dev.supportflow.assistant.runtime.store.AgentRunKey;
+import dev.supportflow.assistant.runtime.store.AgentRunInput;
 import dev.supportflow.chat.api.response.ChatResponse;
 import dev.supportflow.chat.application.model.ChatReply;
 import dev.supportflow.chat.application.model.ChatReplyType;
@@ -67,13 +69,18 @@ public class ConversationContextEngine {
 
     public ChatResponse reply(CustomerPrincipal principal, long shopId, ConversationMessageRequest request,
                               ConversationContextRef previous) {
+        return reply(principal, shopId, request, previous, null);
+    }
+
+    public ChatResponse reply(CustomerPrincipal principal, long shopId, ConversationMessageRequest request,
+                              ConversationContextRef previous, AgentRunKey runKey) {
         Instant now = clock.instant();
         var context = request.resetContext() || previous == null || !previous.activeAt(now)
                 ? ConversationContextRef.none() : previous;
         String message = request.message().strip();
         // Sensitive/write intent keeps the original explicit-input path. A remembered subject is never consent.
         if (NO_INHERITED_ARGUMENTS.matcher(message).find()) {
-            return enrich(orchestrate(principal, shopId, request.message(), request.orderNo()),
+            return enrich(orchestrate(principal, shopId, request.message(), request.orderNo(), runKey, request),
                     ConversationContextRef.none(), now, shopId);
         }
         Set<String> explicit = ExplicitOrderNumbers.extract(message);
@@ -109,7 +116,7 @@ public class ConversationContextEngine {
             // The reference itself grants nothing. Recheck the current authenticated buyer and shop first.
             orders.getOwnedOrder(principal.getIdentity(), shopId, number);
             String command = LOGISTICS_SUBJECT.matcher(message).find() ? "查物流" : "查询此订单";
-            ChatResponse response = orchestrate(principal, shopId, command, number);
+            ChatResponse response = orchestrate(principal, shopId, command, number, runKey, request);
             return response.withContext(ConversationContextRef.order(number, expiry(now)));
         }
 
@@ -134,11 +141,16 @@ public class ConversationContextEngine {
             var current = knowledge.tryAnswerDetailed(shopId, request.message());
             if (current.isPresent()) return knowledgeResponse(current.get(), now, shopId);
         }
-        ChatResponse response = orchestrate(principal, shopId, request.message(), explicitOrder);
+        ChatResponse response = orchestrate(principal, shopId, request.message(), explicitOrder, runKey, request);
         return enrich(response, context, now, shopId);
     }
 
-    private ChatResponse orchestrate(CustomerPrincipal principal, long shopId, String message, String orderNo) {
+    private ChatResponse orchestrate(CustomerPrincipal principal, long shopId, String message, String orderNo,
+                                     AgentRunKey runKey, ConversationMessageRequest request) {
+        if (runKey != null && router.route(message) == AssistantRoute.LOGISTICS) {
+            return ChatResponse.from(orchestrator.reply(principal, shopId, message, orderNo,
+                    new AgentRunInput(runKey, request, message, orderNo)));
+        }
         return ChatResponse.from(orchestrator.reply(principal, shopId, message, orderNo));
     }
 

@@ -1,0 +1,90 @@
+# Isolated, loopback-published teaching deployment. It never imports .local business configuration.
+spring:
+  config:
+    import: "configtree:/run/secrets/"
+  datasource:
+    url: "jdbc:mysql://mysql:3306/supportflow_lab?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true&allowPublicKeyRetrieval=true&sslMode=DISABLED"
+    username: lab_app
+    password: "${lab_app_password}"
+    hikari:
+      maximum-pool-size: 8
+      minimum-idle: 2
+      connection-timeout: 2000
+      validation-timeout: 1000
+  flyway:
+    enabled: false
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+server:
+  address: 0.0.0.0
+  port: 8080
+  shutdown: graceful
+  servlet:
+    session:
+      cookie:
+        name: SF_LAB_SESSION
+        http-only: true
+        same-site: lax
+
+management:
+  server:
+    address: 0.0.0.0
+    port: 9091
+  endpoints:
+    access:
+      default: none
+      max-permitted: read-only
+    web:
+      exposure:
+        include: health,prometheus,metrics
+        exclude: ""
+  endpoint:
+    health:
+      access: read-only
+      show-details: never
+      show-components: never
+      probes:
+        enabled: true
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,db
+    prometheus:
+      access: read-only
+    metrics:
+      access: read-only
+  metrics:
+    tags:
+      application: supportflow-lab
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+
+supportflow:
+  ai:
+    deepseek:
+      enabled: false
+      api-key: ""
+  operations:
+    enabled: true
+    username: lab-ops
+    password-hash: "${lab_ops_hash}"
+  after-sale:
+    execution:
+      enabled: true
+  security:
+    local:
+      accounts:
+        - username: lab-buyer
+          password-hash: "${lab_buyer_hash}"
+          identity:
+            buyer-id: 200
+          permissions: [ORDER_READ, ORDER_CONFIRM_RECEIPT]
+        - username: lab-merchant
+          password-hash: "${lab_merchant_hash}"
+          account-type: MERCHANT_STAFF
+          identity:
+            buyer-id: 999
+          permissions: [ORDER_READ, AFTER_SALE_REVIEW, KNOWLEDGE_MANAGE]

@@ -30,7 +30,7 @@ import java.util.Arrays;
  * <p>认证上下文不保存在 session，CSRF token 仍可使用 session 保存。</p>
  */
 @Configuration(proxyBeanMethods = false)
-@Profile("local")
+@Profile({"local", "lab"})
 @EnableMethodSecurity
 public class ApiSecurityConfiguration {
 
@@ -83,6 +83,12 @@ public class ApiSecurityConfiguration {
                         .requestMatchers(
                                 HttpMethod.GET, "/api/v1/security/csrf", "/api/v1/security/me"
                         ).authenticated()
+                        .requestMatchers(HttpMethod.GET,
+                                "/api/v1/shops/*/chat/conversations/*/runs/*")
+                        .access(accountAccess(AccountType.BUYER, SecurityPermission.ORDER_READ))
+                        .requestMatchers(HttpMethod.POST,
+                                "/api/v1/shops/*/chat/conversations/*/runs/*/resume")
+                        .access(accountAccess(AccountType.BUYER, SecurityPermission.ORDER_READ))
                         .requestMatchers(HttpMethod.GET,
                                 "/api/v1/shops/*/chat/conversations",
                                 "/api/v1/shops/*/chat/conversations/*/messages")

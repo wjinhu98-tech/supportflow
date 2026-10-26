@@ -13,10 +13,10 @@ import org.springframework.security.crypto.factory.PasswordEncoderFactories;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 /**
- * 仅在 local 环境启用的开发账号认证组件。
+ * 仅在 local 与隔离 lab 环境启用的教学账号认证组件。
  */
 @Configuration(proxyBeanMethods = false)
-@Profile("local")
+@Profile({"local", "lab"})
 @EnableConfigurationProperties(LocalCustomerAccountsProperties.class)
 public class LocalAuthenticationConfiguration {
 

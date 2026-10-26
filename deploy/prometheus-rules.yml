@@ -1,0 +1,12 @@
+groups:
+  - name: supportflow-lab-availability
+    rules:
+      - alert: SupportFlowLabScrapeUnavailable
+        expr: up{job="supportflow-backend"} == 0
+        for: 1m
+        labels:
+          severity: warning
+          environment: isolated-lab
+        annotations:
+          summary: Isolated lab backend metrics cannot be scraped
+          description: Check backend readiness and the dedicated ops credential; this lab rule is not a production SLO.

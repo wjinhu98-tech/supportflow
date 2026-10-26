@@ -106,12 +106,14 @@ const shopDialog = ref<HTMLDialogElement | null>(null)
 const helpDialog = ref<HTMLDialogElement | null>(null)
 const messageInput = ref<HTMLTextAreaElement | null>(null)
 const messageList = ref<HTMLDivElement | null>(null)
-const ordersPanel = ref<HTMLElement | null>(null)
+type WorkspaceView = 'chat' | 'orders'
+const activeView = ref<WorkspaceView>('chat')
 const compositionActive = ref(false)
 const showAfterSales = ref(false)
 const loadingEarlier = ref(false)
 let retryAction: (() => Promise<void>) | null = null
 let uiContextVersion = 0
+let conversationScrollPending = false
 
 const canSend = computed(
   () =>
@@ -201,6 +203,7 @@ async function requestOrders(loadMore = false) {
 
 async function consultOrder(order: Order) {
   retryAction = refreshConversation
+  await focusConversation()
   await selectOrder(order)
 }
 
@@ -257,14 +260,18 @@ function closeOnBackdrop(event: MouseEvent, dialog: HTMLDialogElement | null) {
   else dialog?.close()
 }
 
-function focusConversation() {
+async function focusConversation() {
+  activeView.value = 'chat'
+  await nextTick()
+  if (conversationScrollPending && messageList.value) {
+    messageList.value.scrollTop = messageList.value.scrollHeight
+    conversationScrollPending = false
+  }
   messageInput.value?.focus()
-  messageInput.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
 }
 
-function prefillShippingQuestion() {
-  messageDraft.value = '我的订单发货了吗？'
-  messageInput.value?.focus()
+function showOrders() {
+  activeView.value = 'orders'
 }
 
 async function openAfterSales() {
@@ -283,6 +290,11 @@ function clearLocalConversation() {
 watch([() => messages.value.length, busy], async () => {
   if (loadingEarlier.value) return
   await nextTick()
+  // Hidden panels have no scroll height. Follow new replies once chat is visible again.
+  if (activeView.value !== 'chat') {
+    conversationScrollPending = true
+    return
+  }
   const element = messageList.value
   if (element) element.scrollTop = element.scrollHeight
 })
@@ -324,10 +336,11 @@ watch(
       <div class="rail-divider"></div>
       <nav class="rail-links">
         <button
-          class="rail-link is-active"
+          class="rail-link"
+          :class="{ 'is-active': activeView === 'chat' }"
           type="button"
           aria-label="会话"
-          aria-current="page"
+          :aria-current="activeView === 'chat' ? 'page' : undefined"
           @click="focusConversation"
         >
           <MessageSquare
@@ -339,9 +352,11 @@ watch(
         </button>
         <button
           class="rail-link"
+          :class="{ 'is-active': activeView === 'orders' }"
           type="button"
           aria-label="查看订单面板"
-          @click="ordersPanel?.scrollIntoView({ behavior: 'smooth', block: 'start' })"
+          :aria-current="activeView === 'orders' ? 'page' : undefined"
+          @click="showOrders"
         >
           <ShoppingBag
             :size="21"
@@ -377,19 +392,11 @@ watch(
     <main class="main-workspace">
       <header class="topbar">
         <div class="workspace-title">
-          <p class="eyebrow">
-            SUPPORTFLOW
-            <span>/</span>
-            CUSTOMER DESK
-          </p>
-          <h1>
-            店铺客服工作台
-            <span class="title-dot">.</span>
-          </h1>
+          <h1>{{ activeView === 'chat' ? '店铺客服' : '我的订单' }}</h1>
         </div>
         <div class="topbar-actions">
           <button
-            v-if="connected"
+            v-if="connected && activeView === 'orders'"
             type="button"
             class="button button-secondary"
             data-testid="open-after-sales"
@@ -486,10 +493,14 @@ watch(
 
       <div
         class="workspace"
-        :class="{ 'has-selection': selectedOrder }"
+        :class="{
+          'workspace-chat': activeView === 'chat',
+          'workspace-orders': activeView === 'orders',
+          'has-selection': activeView === 'orders' && selectedOrder,
+        }"
       >
         <section
-          ref="ordersPanel"
+          v-show="activeView === 'orders'"
           class="orders-panel surface"
           data-testid="orders-panel"
           aria-labelledby="orders-heading"
@@ -655,7 +666,9 @@ watch(
         </section>
 
         <section
+          v-show="activeView === 'chat'"
           class="conversation-panel surface"
+          data-testid="conversation-panel"
           aria-labelledby="conversation-heading"
         >
           <header class="conversation-heading">
@@ -668,13 +681,10 @@ watch(
                 />
               </span>
               <div>
-                <h2 id="conversation-heading">
-                  店铺智能客服
-                  <span class="assistant-label">AI 助手</span>
-                </h2>
+                <h2 id="conversation-heading">店铺智能客服</h2>
                 <p>
                   <span :class="['small-status-dot', { active: connected }]"></span>
-                  {{ connected ? '已连接 · 根据真实订单信息回复' : '尚未连接账号' }}
+                  {{ connected ? `店铺 ${shopId} · 在线` : '尚未连接账号' }}
                 </p>
               </div>
             </div>
@@ -778,6 +788,20 @@ watch(
             </div>
             <button
               type="button"
+              class="text-button"
+              :disabled="
+                busy ||
+                historyLoading ||
+                conversationsLoading ||
+                refundSubmitting ||
+                receiptSubmitting
+              "
+              @click="openRefundForm()"
+            >
+              申请退款
+            </button>
+            <button
+              type="button"
               class="icon-button"
               aria-label="取消选中订单"
               :disabled="
@@ -825,54 +849,14 @@ watch(
               v-if="!messages.length && !historyLoading"
               class="conversation-welcome"
             >
-              <div
-                class="welcome-orbit"
-                aria-hidden="true"
-              >
-                <span class="orbit-dot one"></span>
-                <span class="orbit-dot two"></span>
-                <div class="welcome-icon">
-                  <MessageSquare
-                    :size="35"
-                    :stroke-width="1.4"
-                  />
-                </div>
-              </div>
-              <p class="welcome-kicker">每一笔订单，都有答案</p>
               <h3>{{ connected ? '你好，有什么可以帮你？' : '从一段对话开始' }}</h3>
               <p class="welcome-description">
                 {{
                   connected
-                    ? '选一笔订单，或直接说出你想了解的内容。'
-                    : '连接账号后，查询订单、了解状态，让咨询更简单。'
+                    ? '直接输入问题，也可以从「订单」选择一笔订单咨询。'
+                    : '连接账号后，就可以开始聊天。'
                 }}
-                <br />
-                所有查询都在当前店铺内进行。
               </p>
-              <div class="welcome-features">
-                <div>
-                  <span>
-                    <ShoppingBag
-                      :size="19"
-                      :stroke-width="1.7"
-                      aria-hidden="true"
-                    />
-                  </span>
-                  <strong>找到你的订单</strong>
-                  <p>当前店铺 · 本人可见</p>
-                </div>
-                <div>
-                  <span>
-                    <MessageSquare
-                      :size="19"
-                      :stroke-width="1.7"
-                      aria-hidden="true"
-                    />
-                  </span>
-                  <strong>自然地提问</strong>
-                  <p>说出订单号，直接咨询</p>
-                </div>
-              </div>
               <button
                 v-if="!connected"
                 type="button"
@@ -882,19 +866,6 @@ watch(
                 连接账号，开始咨询
                 <ArrowUpRight
                   :size="16"
-                  aria-hidden="true"
-                />
-              </button>
-              <button
-                v-else
-                type="button"
-                class="button button-secondary welcome-connect"
-                :disabled="busy"
-                @click="submitMessage('我的订单')"
-              >
-                查看我的订单
-                <ArrowRight
-                  :size="15"
                   aria-hidden="true"
                 />
               </button>
@@ -991,73 +962,6 @@ watch(
           </div>
 
           <div class="composer-area">
-            <div class="quick-prompts">
-              <button
-                type="button"
-                :disabled="!connected || busy"
-                @click="submitMessage('售后审批规则')"
-              >
-                服务规则
-              </button>
-              <button
-                type="button"
-                :disabled="!connected || busy"
-                @click="submitMessage('查物流')"
-              >
-                查物流
-              </button>
-              <button
-                type="button"
-                :disabled="!connected || busy"
-                @click="submitMessage('我的售后')"
-              >
-                我的售后
-              </button>
-              <button
-                v-if="selectedOrder"
-                type="button"
-                :disabled="!connected || busy"
-                @click="openRefundForm()"
-              >
-                申请退款
-              </button>
-              <span>试试这样问</span>
-              <button
-                type="button"
-                :disabled="!connected || busy"
-                @click="submitMessage('我的订单')"
-              >
-                我的订单
-                <ArrowUpRight
-                  :size="12"
-                  aria-hidden="true"
-                />
-              </button>
-              <button
-                v-if="selectedOrder"
-                type="button"
-                :disabled="!connected || busy"
-                @click="submitMessage('查询此订单')"
-              >
-                查询此订单
-                <ArrowUpRight
-                  :size="12"
-                  aria-hidden="true"
-                />
-              </button>
-              <button
-                v-else
-                type="button"
-                :disabled="!connected || busy"
-                @click="prefillShippingQuestion"
-              >
-                订单发货了吗？
-                <Plus
-                  :size="12"
-                  aria-hidden="true"
-                />
-              </button>
-            </div>
             <form
               class="composer"
               :class="{ 'is-disabled': !connected }"
@@ -1125,18 +1029,11 @@ watch(
                 </div>
               </div>
             </form>
-            <p class="composer-disclaimer">
-              <ShieldCheck
-                :size="12"
-                aria-hidden="true"
-              />
-              <span>咨询记录按账号和店铺保存 · 刷新后重新连接账号可恢复</span>
-            </p>
           </div>
         </section>
 
         <aside
-          v-if="selectedOrder"
+          v-if="activeView === 'orders' && selectedOrder"
           class="order-detail surface"
           aria-labelledby="detail-heading"
         >
@@ -1243,7 +1140,7 @@ watch(
             class="button button-secondary detail-query"
             type="button"
             :disabled="busy"
-            @click="submitMessage('查询此订单')"
+            @click="consultOrder(selectedOrder)"
           >
             <RefreshCw
               :size="14"
@@ -1253,17 +1150,6 @@ watch(
           </button>
         </aside>
       </div>
-      <footer class="workspace-footer">
-        <span class="footer-wordmark">supportflow</span>
-        <span>让每一次咨询，都更清楚一点。</span>
-        <span class="footer-security">
-          <ShieldCheck
-            :size="12"
-            aria-hidden="true"
-          />
-          身份校验 · 真实订单
-        </span>
-      </footer>
     </main>
     <dialog
       ref="loginDialog"
@@ -1502,7 +1388,7 @@ watch(
             <span>02</span>
             <div>
               <strong>确认当前店铺</strong>
-              <p>左侧只展示你在这家店铺的订单，不会查询其他客户的订单。</p>
+              <p>点击「订单」查看你在这家店铺的订单，再点击「会话」返回聊天。</p>
             </div>
           </li>
           <li>

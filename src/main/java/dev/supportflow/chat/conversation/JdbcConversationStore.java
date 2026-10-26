@@ -126,16 +126,18 @@ public class JdbcConversationStore implements ConversationStore {
                     SELECT COUNT(*) FROM support_chat_turn WHERE conversation_id=:conversation AND status='PROCESSING'
                     """).param("conversation", conversation.storageId()).query(Long.class).single();
             if (active != 0) return ReserveDecision.conflict("该会话仍有消息正在处理，请稍后再发送");
+            UUID token = UUID.randomUUID();
             jdbc.sql("""
                     INSERT INTO support_chat_turn
-                      (conversation_id, client_message_id, request_hash, status, expires_at)
+                      (conversation_id, client_message_id, request_hash, status, expires_at, processing_token)
                     VALUES (:conversation, :clientId, :hash, 'PROCESSING',
-                            TIMESTAMPADD(SECOND, :leaseSeconds, UTC_TIMESTAMP(3)))
+                            TIMESTAMPADD(SECOND, :leaseSeconds, UTC_TIMESTAMP(3)), :token)
                     """).param("conversation", conversation.storageId())
                     .param("clientId", request.clientMessageId().toString()).param("hash", hash(request))
-                    .param("leaseSeconds", ConversationLimits.PROCESSING_SECONDS).update();
+                    .param("leaseSeconds", ConversationLimits.PROCESSING_SECONDS)
+                    .param("token", token.toString()).update();
             return ReserveDecision.ready(Reservation.fresh(request.resetContext()
-                    ? ConversationContextRef.none() : latestContext(conversation.storageId())));
+                    ? ConversationContextRef.none() : latestContext(conversation.storageId()), token));
         });
         // Return a conflict after committing lease expiry, rather than rolling that state change back.
         if (decision.conflictMessage() != null) throw ConversationException.conflict(decision.conflictMessage());
@@ -145,6 +147,12 @@ public class JdbcConversationStore implements ConversationStore {
     @Override
     public ConversationTurnResponse succeed(long buyerId, long shopId, UUID id,
                                             ConversationMessageRequest request, ChatResponse response) {
+        return succeed(buyerId, shopId, id, request, response, null);
+    }
+
+    @Override
+    public ConversationTurnResponse succeed(long buyerId, long shopId, UUID id,
+                                            ConversationMessageRequest request, ChatResponse response, UUID processingToken) {
         String snapshot = json.writeValueAsString(response);
         if (response.reply() == null || response.reply().isBlank()
                 || response.reply().length() > ConversationLimits.MAX_REPLY_LENGTH
@@ -161,7 +169,9 @@ public class JdbcConversationStore implements ConversationStore {
             int changed = jdbc.sql("""
                     UPDATE support_chat_turn SET status='SUCCEEDED', updated_at=UTC_TIMESTAMP(3)
                     WHERE id=:id AND status='PROCESSING' AND expires_at>UTC_TIMESTAMP(3)
-                    """).param("id", turn.storageId()).update();
+                      AND (processing_token=:token OR (processing_token IS NULL AND :token IS NULL))
+                    """).param("id", turn.storageId())
+                    .param("token", processingToken == null ? null : processingToken.toString(), Types.VARCHAR).update();
             if (changed != 1) throw ConversationException.conflict("本次回复处理超时，请先核实已有结果");
             insertMessage(conversation.storageId(), turn.storageId(), ConversationRole.USER, request.message(), null);
             insertMessage(conversation.storageId(), turn.storageId(), ConversationRole.ASSISTANT, response.reply(), snapshot);
@@ -173,13 +183,80 @@ public class JdbcConversationStore implements ConversationStore {
 
     @Override
     public void fail(long buyerId, long shopId, UUID id, UUID clientMessageId) {
+        fail(buyerId, shopId, id, clientMessageId, null);
+    }
+
+    @Override
+    public void fail(long buyerId, long shopId, UUID id, UUID clientMessageId, UUID processingToken) {
         transaction.executeWithoutResult(status -> {
             StoredConversation conversation = owned(buyerId, shopId, id, true);
             jdbc.sql("""
                     UPDATE support_chat_turn SET status='FAILED', updated_at=UTC_TIMESTAMP(3)
                     WHERE conversation_id=:conversation AND client_message_id=:client AND status='PROCESSING'
+                      AND (processing_token=:token OR (processing_token IS NULL AND :token IS NULL))
                     """).param("conversation", conversation.storageId())
-                    .param("client", clientMessageId.toString()).update();
+                    .param("client", clientMessageId.toString())
+                    .param("token", processingToken == null ? null : processingToken.toString(), Types.VARCHAR).update();
+        });
+    }
+
+    @Override
+    public boolean completed(long buyerId, long shopId, UUID id, UUID clientMessageId) {
+        StoredConversation conversation = owned(buyerId, shopId, id, false);
+        return turns(conversation.storageId(), clientMessageId).stream()
+                .anyMatch(turn -> turn.status() == ConversationTurnStatus.SUCCEEDED);
+    }
+
+    @Override
+    public boolean latest(long buyerId, long shopId, UUID id, UUID clientMessageId) {
+        StoredConversation conversation = owned(buyerId, shopId, id, false);
+        return jdbc.sql("""
+                SELECT client_message_id FROM support_chat_turn
+                WHERE conversation_id=:conversation ORDER BY id DESC LIMIT 1
+                """).param("conversation", conversation.storageId()).query(String.class).optional()
+                .map(clientMessageId.toString()::equals).orElse(false);
+    }
+
+    @Override
+    public boolean recoverable(long buyerId, long shopId, UUID id, UUID clientMessageId, boolean reclaimProcessing) {
+        StoredConversation conversation = owned(buyerId, shopId, id, false);
+        return jdbc.sql("""
+                SELECT COUNT(*) FROM support_chat_turn
+                WHERE conversation_id=:conversation AND client_message_id=:client
+                  AND (status='FAILED' OR (status='PROCESSING' AND (expires_at<=UTC_TIMESTAMP(3) OR :reclaim=1)))
+                """).param("conversation", conversation.storageId()).param("client", clientMessageId.toString())
+                .param("reclaim", reclaimProcessing ? 1 : 0).query(Long.class).single() == 1;
+    }
+
+    @Override
+    public Reservation reserveResume(long buyerId, long shopId, UUID id, ConversationMessageRequest request,
+                                     boolean reclaimProcessing) {
+        return transaction.execute(status -> {
+            StoredConversation conversation = owned(buyerId, shopId, id, true);
+            StoredTurn turn = turns(conversation.storageId(), request.clientMessageId()).stream()
+                    .findFirst().orElseThrow(ConversationException::notFound);
+            if (!turn.requestHash().equals(hash(request))) {
+                throw ConversationException.conflict("原消息内容不一致，无法恢复");
+            }
+            if (turn.status() == ConversationTurnStatus.SUCCEEDED) {
+                return new Reservation(completed(conversation, turn.storageId()));
+            }
+            long latest = jdbc.sql("SELECT MAX(id) FROM support_chat_turn WHERE conversation_id=:conversation")
+                    .param("conversation", conversation.storageId()).query(Long.class).single();
+            if (turn.storageId() != latest) {
+                throw ConversationException.conflict("这条咨询已有后续消息，请使用新消息继续查询");
+            }
+            UUID token = UUID.randomUUID();
+            int changed = jdbc.sql("""
+                    UPDATE support_chat_turn SET status='PROCESSING', processing_token=:token,
+                      expires_at=TIMESTAMPADD(SECOND, :seconds, UTC_TIMESTAMP(3)), updated_at=UTC_TIMESTAMP(3)
+                    WHERE id=:id AND (status='FAILED' OR
+                      (status='PROCESSING' AND (expires_at<=UTC_TIMESTAMP(3) OR :reclaim=1)))
+                    """).param("id", turn.storageId()).param("token", token.toString())
+                    .param("seconds", ConversationLimits.PROCESSING_SECONDS)
+                    .param("reclaim", reclaimProcessing ? 1 : 0).update();
+            if (changed != 1) throw ConversationException.conflict("该消息仍在处理中，请稍后刷新记录");
+            return Reservation.fresh(ConversationContextRef.none(), token);
         });
     }
 

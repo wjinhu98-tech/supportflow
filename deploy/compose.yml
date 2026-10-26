@@ -1,0 +1,223 @@
+name: supportflow-lab
+
+x-backend-image: &backend-image
+  image: supportflow-lab-backend:0.1.0-SNAPSHOT
+  build:
+    context: ..
+    dockerfile: deploy/backend.Dockerfile
+
+x-java-tool: &java-tool
+  <<: *backend-image
+  entrypoint:
+    - java
+    - -XX:MaxRAMPercentage=60.0
+    - -Dloader.main=dev.supportflow.deployment.LabDeploymentTool
+    - -cp
+    - /app/app.jar
+    - org.springframework.boot.loader.launch.PropertiesLauncher
+  restart: "no"
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  networks: [database]
+  cpus: 1.0
+  mem_limit: 512m
+  pids_limit: 128
+  secrets: [lab_migrator_password]
+
+services:
+  mysql:
+    image: mysql:8.0.45
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/lab_root_password
+      MYSQL_ROOT_HOST: "%"
+      TZ: UTC
+    command:
+      - --default-time-zone=+00:00
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_as_cs
+      - --partial-revokes=OFF
+      - --innodb-buffer-pool-size=134217728
+      - --max-connections=50
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./sql/init-lab.sh:/docker-entrypoint-initdb.d/10-lab.sh:ro
+    secrets: [lab_root_password, lab_app_password, lab_migrator_password]
+    networks: [database]
+    healthcheck:
+      # TCP remains unavailable during the entrypoint's temporary initialization server.
+      test: [CMD, mysqladmin, ping, --protocol=TCP, --host=127.0.0.1, --silent]
+      interval: 3s
+      timeout: 3s
+      retries: 50
+      start_period: 30s
+    restart: unless-stopped
+    cpus: 1.0
+    mem_limit: 768m
+    pids_limit: 256
+
+  migrate:
+    <<: *java-tool
+    command: [migrate]
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  grant:
+    image: mysql:8.0.45
+    entrypoint: [/bin/sh, /lab/init-lab.sh, grant]
+    user: "999:999"
+    volumes:
+      - ./sql/init-lab.sh:/lab/init-lab.sh:ro
+    secrets: [lab_root_password]
+    networks: [database]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=4m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 0.5
+    mem_limit: 128m
+    pids_limit: 64
+
+  seed:
+    <<: *java-tool
+    command: [seed]
+    depends_on:
+      grant:
+        condition: service_completed_successfully
+
+  backend:
+    <<: *backend-image
+    environment:
+      SPRING_PROFILES_ACTIVE: lab
+      SPRING_FLYWAY_ENABLED: "false"
+      SERVER_PORT: "8080"
+      SERVER_FORWARD_HEADERS_STRATEGY: framework
+      MANAGEMENT_SERVER_PORT: "9091"
+      TZ: UTC
+    secrets:
+      - lab_app_password
+      - lab_buyer_hash
+      - lab_merchant_hash
+      - lab_ops_hash
+    ports:
+      - 127.0.0.1:18091:9091
+    networks: [database, web, monitoring]
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -ec
+        - |
+          exec 3<>/dev/tcp/127.0.0.1/9091
+          printf 'GET /actuator/health/readiness HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3
+          read -r protocol status rest <&3
+          [ "$$status" = 200 ]
+          grep -q '"status":"UP"' <&3
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 1.0
+    mem_limit: 768m
+    pids_limit: 256
+    stop_grace_period: 45s
+
+  frontend:
+    image: supportflow-lab-frontend:0.1.0-SNAPSHOT
+    build:
+      context: ..
+      dockerfile: deploy/frontend.Dockerfile
+    ports:
+      - 127.0.0.1:18090:8080
+    networks: [web]
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 0.5
+    mem_limit: 128m
+    pids_limit: 128
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=24h
+      - --storage.tsdb.retention.size=128MB
+      - --web.listen-address=0.0.0.0:9090
+    ports:
+      - 127.0.0.1:19090:9090
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-rules.yml:/etc/prometheus/prometheus-rules.yml:ro
+      - prometheus-data:/prometheus
+    secrets: [lab_ops_password]
+    networks: [monitoring]
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 0.5
+    mem_limit: 256m
+    pids_limit: 128
+
+networks:
+  database:
+    internal: true
+  web:
+    driver: bridge
+  monitoring:
+    driver: bridge
+
+volumes:
+  mysql-data:
+  prometheus-data:
+
+secrets:
+  lab_root_password:
+    file: ../.local/deployment-lab/lab_root_password
+  lab_app_password:
+    file: ../.local/deployment-lab/lab_app_password
+  lab_migrator_password:
+    file: ../.local/deployment-lab/lab_migrator_password
+  lab_buyer_hash:
+    file: ../.local/deployment-lab/lab_buyer_hash
+  lab_merchant_hash:
+    file: ../.local/deployment-lab/lab_merchant_hash
+  lab_ops_hash:
+    file: ../.local/deployment-lab/lab_ops_hash
+  lab_ops_password:
+    file: ../.local/deployment-lab/lab_ops_password

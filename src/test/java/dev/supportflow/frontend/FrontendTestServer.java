@@ -177,6 +177,10 @@ public final class FrontendTestServer {
                     + ".support_chat_conversation TO 'frontend_reader'@'%'");
             statement.execute("GRANT SELECT, INSERT, UPDATE ON " + DATABASE_NAME
                     + ".support_chat_turn TO 'frontend_reader'@'%'");
+            for (String table : List.of("support_agent_run", "support_agent_step")) {
+                statement.execute("GRANT SELECT, INSERT, UPDATE ON " + DATABASE_NAME + "." + table
+                        + " TO 'frontend_reader'@'%'");
+            }
             statement.execute("GRANT SELECT, INSERT ON " + DATABASE_NAME
                     + ".support_chat_message TO 'frontend_reader'@'%'");
             for (String table : List.of("support_merchant", "support_merchant_shop",

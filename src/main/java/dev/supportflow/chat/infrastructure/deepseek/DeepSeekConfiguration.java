@@ -2,6 +2,9 @@ package dev.supportflow.chat.infrastructure.deepseek;
 
 import dev.supportflow.chat.application.model.OrderIntent;
 import dev.supportflow.chat.application.port.OrderIntentRecognizer;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -42,8 +45,9 @@ public class DeepSeekConfiguration {
     @Bean
     @ConditionalOnProperty(prefix = "supportflow.ai.deepseek", name = "enabled", havingValue = "true")
     DeepSeekCallExecutor deepSeekCallExecutor(
-            @Qualifier("deepSeekHttpClient") HttpClient client, DeepSeekProperties properties) {
-        return new DeepSeekCallExecutor(client, properties);
+            @Qualifier("deepSeekHttpClient") HttpClient client, DeepSeekProperties properties,
+            ObjectProvider<MeterRegistry> registries) {
+        return new DeepSeekCallExecutor(client, properties, registries.getIfAvailable(SimpleMeterRegistry::new));
     }
 
     @Bean

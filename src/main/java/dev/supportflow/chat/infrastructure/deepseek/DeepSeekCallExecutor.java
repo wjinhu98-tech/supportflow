@@ -1,6 +1,8 @@
 package dev.supportflow.chat.infrastructure.deepseek;
 
 import dev.supportflow.chat.application.ModelUnavailableException;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,11 +29,17 @@ public final class DeepSeekCallExecutor {
     private final HttpClient client;
     private final DeepSeekProperties properties;
     private final Semaphore slots;
+    private final DeepSeekCallMetrics metrics;
 
     public DeepSeekCallExecutor(HttpClient client, DeepSeekProperties properties) {
+        this(client, properties, new SimpleMeterRegistry());
+    }
+
+    public DeepSeekCallExecutor(HttpClient client, DeepSeekProperties properties, MeterRegistry registry) {
         this.client = Objects.requireNonNull(client, "HTTP client is required");
         this.properties = Objects.requireNonNull(properties, "DeepSeek configuration is required");
         slots = new Semaphore(properties.maxConcurrentRequests());
+        metrics = new DeepSeekCallMetrics(registry, slots, properties.maxConcurrentRequests());
     }
 
     public <T> T execute(DeepSeekCallOperation operation, String requestBody, Function<byte[], T> parser) {
@@ -120,7 +128,9 @@ public final class DeepSeekCallExecutor {
     }
 
     private void record(DeepSeekCallOperation operation, DeepSeekCallOutcome outcome, long started, int httpStatus) {
-        long millis = TimeUnit.NANOSECONDS.toMillis(Math.max(0, System.nanoTime() - started));
+        long elapsedNanos = Math.max(0, System.nanoTime() - started);
+        metrics.record(operation, outcome, elapsedNanos);
+        long millis = TimeUnit.NANOSECONDS.toMillis(elapsedNanos);
         LOG.info("deepseek_call operation={} outcome={} durationMs={} inFlight={} limit={} httpStatus={}",
                 operation, outcome, millis, properties.maxConcurrentRequests() - slots.availablePermits(),
                 properties.maxConcurrentRequests(), httpStatus);

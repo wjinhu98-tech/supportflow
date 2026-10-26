@@ -7,7 +7,7 @@ const knowledgeBase = '/api/v1/merchant/shops/100/knowledge'
 
 async function editor(): Promise<APIRequestContext> {
   return request.newContext({
-    baseURL: 'http://127.0.0.1:5173',
+    baseURL: test.info().project.use.baseURL,
     extraHTTPHeaders: {
       Authorization: `Basic ${Buffer.from(`frontend-editor:${password}`).toString('base64')}`,
     },

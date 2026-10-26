@@ -10,6 +10,11 @@ if (
   throw new Error('Browser integration tests may only target an isolated loopback HTTP backend.')
 }
 const channel = process.env.PLAYWRIGHT_CHANNEL ?? 'msedge'
+const frontendPort = Number(process.env.E2E_FRONTEND_PORT ?? '5173')
+if (!Number.isInteger(frontendPort) || frontendPort < 1 || frontendPort > 65535) {
+  throw new Error('E2E_FRONTEND_PORT must be a valid local TCP port.')
+}
+const frontend = `http://127.0.0.1:${frontendPort}`
 
 export default defineConfig({
   testDir: './e2e',
@@ -25,7 +30,7 @@ export default defineConfig({
   expect: { timeout: 7_000 },
   reporter: 'list',
   use: {
-    baseURL: 'http://127.0.0.1:5173',
+    baseURL: frontend,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     headless: true,
@@ -49,8 +54,8 @@ export default defineConfig({
         ]
       : []),
     {
-      command: 'npm run dev -- --host 127.0.0.1 --port 5173 --strictPort',
-      url: 'http://127.0.0.1:5173',
+      command: `npm run dev -- --host 127.0.0.1 --port ${frontendPort} --strictPort`,
+      url: frontend,
       env: { API_PROXY_TARGET: backend },
       reuseExistingServer: false,
       timeout: 30_000,

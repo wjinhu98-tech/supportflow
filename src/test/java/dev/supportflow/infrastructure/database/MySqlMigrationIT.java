@@ -74,7 +74,7 @@ class MySqlMigrationIT {
         MigrateResult firstMigration = flyway.migrate();
 
         assertThat(firstMigration.success).isTrue();
-        assertThat(firstMigration.migrationsExecuted).isEqualTo(10);
+        assertThat(firstMigration.migrationsExecuted).isEqualTo(11);
 
         MigrateResult secondMigration = flyway.migrate();
 
@@ -165,7 +165,7 @@ class MySqlMigrationIT {
                     FROM flyway_schema_history
                     ORDER BY installed_rank
                     """)) {
-                for (String version : List.of("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11")) {
+                for (String version : List.of("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")) {
                     assertThat(history.next()).isTrue();
                     assertThat(history.getString("version")).isEqualTo(version);
                     assertThat(history.getBoolean("success")).isTrue();

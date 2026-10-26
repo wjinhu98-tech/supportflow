@@ -12,8 +12,23 @@ export async function connect(page: Page, username = 'buyer-demo', password = 'b
 }
 
 export async function send(page: Page, message: string) {
+  await showChat(page)
   await page.getByTestId('message-input').fill(message)
   await page.getByTestId('send-button').click()
+}
+
+export async function showOrders(page: Page) {
+  const navigation = page.getByRole('button', { name: '查看订单面板', exact: true })
+  await navigation.click()
+  await expect(navigation).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByTestId('orders-panel')).toBeVisible()
+}
+
+export async function showChat(page: Page) {
+  const navigation = page.getByRole('button', { name: '会话', exact: true })
+  await navigation.click()
+  await expect(navigation).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByTestId('message-input')).toBeVisible()
 }
 
 export async function switchShop(page: Page, shopId: string) {
