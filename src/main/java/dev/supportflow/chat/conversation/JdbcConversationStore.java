@@ -47,6 +47,86 @@ public class JdbcConversationStore implements ConversationStore {
     }
 
     @Override
+    public Conversation openWindow(long buyerId, long shopId) {
+        return transaction.execute(status -> {
+            jdbc.sql("""
+                    INSERT INTO support_chat_conversation (public_id,buyer_id,tenant_id,window_slot)
+                    VALUES (:id,:buyer,:shop,1) ON DUPLICATE KEY UPDATE id=id
+                    """).param("id", UUID.randomUUID().toString()).param("buyer", buyerId).param("shop", shopId).update();
+            return currentWindow(buyerId, shopId).value();
+        });
+    }
+
+    @Override
+    public ShopConversationWindow window(long buyerId, long shopId, UUID beforeId) {
+        // A read never creates or reopens a deleted window.
+        List<StoredConversation> windows = jdbc.sql("SELECT " + CONVERSATION_COLUMNS + " " + """
+                FROM support_chat_conversation
+                WHERE buyer_id=:buyer AND tenant_id=:shop AND window_slot=1 AND deleted_at IS NULL
+                """).param("buyer", buyerId).param("shop", shopId).query(CONVERSATION_MAPPER).list();
+        Long before = beforeId == null ? null : jdbc.sql("""
+                SELECT message.id FROM support_chat_message message
+                JOIN support_chat_conversation conversation ON conversation.id=message.conversation_id
+                WHERE message.public_id=:before AND conversation.buyer_id=:buyer AND conversation.tenant_id=:shop
+                  AND conversation.deleted_at IS NULL
+                """).param("before", beforeId.toString()).param("buyer", buyerId).param("shop", shopId)
+                .query(Long.class).optional().orElseThrow(ConversationException::notFound);
+        List<ConversationMessage> rows = jdbc.sql("""
+                SELECT message.id, message.public_id, message.role, message.text, message.response_json, message.created_at
+                FROM support_chat_message message
+                JOIN support_chat_conversation conversation ON conversation.id=message.conversation_id
+                WHERE conversation.buyer_id=:buyer AND conversation.tenant_id=:shop AND conversation.deleted_at IS NULL
+                """ + (before == null ? "" : " AND message.id < :before") + " ORDER BY message.id DESC LIMIT :limit")
+                .params(before == null ? java.util.Map.of("buyer", buyerId, "shop", shopId,
+                                "limit", ConversationLimits.MESSAGES_PER_PAGE + 1)
+                        : java.util.Map.of("buyer", buyerId, "shop", shopId, "before", before,
+                                "limit", ConversationLimits.MESSAGES_PER_PAGE + 1))
+                .query(this::message).list();
+        List<ConversationMessage> page = new ArrayList<>(rows.stream().limit(ConversationLimits.MESSAGES_PER_PAGE).toList());
+        Collections.reverse(page);
+        StoredConversation active = windows.isEmpty() ? null : windows.getFirst();
+        return new ShopConversationWindow(shopId, active == null ? null : active.value(), page,
+                rows.size() > ConversationLimits.MESSAGES_PER_PAGE ? page.getFirst().id() : null,
+                active == null ? ConversationContextRef.none() : latestContext(active.storageId()));
+    }
+
+    @Override
+    public void deleteWindow(long buyerId, long shopId, UUID id) {
+        transaction.executeWithoutResult(status -> {
+            var target = jdbc.sql("""
+                    SELECT deleted_at, window_slot FROM support_chat_conversation
+                    WHERE public_id=:id AND buyer_id=:buyer AND tenant_id=:shop FOR UPDATE
+                    """).param("id", id.toString()).param("buyer", buyerId).param("shop", shopId)
+                    .query((row, ignored) -> new WindowDeletion(row.getObject("deleted_at", LocalDateTime.class),
+                            row.getObject("window_slot", Integer.class))).optional().orElseThrow(ConversationException::notFound);
+            if (target.deletedAt() != null) return; // A lost response cannot delete a subsequently created window.
+            if (!Integer.valueOf(1).equals(target.slot())) throw ConversationException.notFound();
+            jdbc.sql("""
+                    SELECT id FROM support_chat_conversation
+                    WHERE buyer_id=:buyer AND tenant_id=:shop AND deleted_at IS NULL ORDER BY id FOR UPDATE
+                    """).param("buyer", buyerId).param("shop", shopId).query(Long.class).list();
+            long active = jdbc.sql("""
+                    SELECT COUNT(*) FROM support_chat_turn turn
+                    JOIN support_chat_conversation conversation ON conversation.id=turn.conversation_id
+                    WHERE conversation.buyer_id=:buyer AND conversation.tenant_id=:shop AND conversation.deleted_at IS NULL
+                      AND turn.status='PROCESSING' AND turn.expires_at>UTC_TIMESTAMP(3)
+                    """).param("buyer", buyerId).param("shop", shopId).query(Long.class).single();
+            if (active != 0) throw ConversationException.conflict("当前店铺仍有消息正在处理，请完成后再删除对话。");
+            jdbc.sql("""
+                    UPDATE support_chat_conversation SET deleted_at=UTC_TIMESTAMP(3), window_slot=NULL, updated_at=UTC_TIMESTAMP(3)
+                    WHERE buyer_id=:buyer AND tenant_id=:shop AND deleted_at IS NULL
+                    """).param("buyer", buyerId).param("shop", shopId).update();
+        });
+    }
+
+    private StoredConversation currentWindow(long buyerId, long shopId) {
+        return jdbc.sql("SELECT " + CONVERSATION_COLUMNS + " " + """
+                FROM support_chat_conversation WHERE buyer_id=:buyer AND tenant_id=:shop AND window_slot=1 AND deleted_at IS NULL
+                """).param("buyer", buyerId).param("shop", shopId).query(CONVERSATION_MAPPER)
+                .optional().orElseThrow(ConversationException::notFound);
+    }
+
+    @Override
     public Conversation create(long buyerId, long shopId) {
         UUID id = UUID.randomUUID();
         return transaction.execute(status -> {
@@ -63,7 +143,7 @@ public class JdbcConversationStore implements ConversationStore {
         Long before = beforeId == null ? null : owned(buyerId, shopId, beforeId, false).storageId();
         List<StoredConversation> rows = jdbc.sql("SELECT " + CONVERSATION_COLUMNS + """
                  FROM support_chat_conversation
-                 WHERE buyer_id=:buyer AND tenant_id=:shop
+                 WHERE buyer_id=:buyer AND tenant_id=:shop AND deleted_at IS NULL
                 """ + (before == null ? "" : " AND id < :before") + " ORDER BY id DESC LIMIT :limit")
                 .params(before == null
                         ? java.util.Map.of("buyer", buyerId, "shop", shopId,
@@ -277,7 +357,7 @@ public class JdbcConversationStore implements ConversationStore {
 
     private StoredConversation owned(long buyerId, long shopId, UUID id, boolean lock) {
         return jdbc.sql("SELECT " + CONVERSATION_COLUMNS + """
-                 FROM support_chat_conversation WHERE public_id=:id AND buyer_id=:buyer AND tenant_id=:shop
+                 FROM support_chat_conversation WHERE public_id=:id AND buyer_id=:buyer AND tenant_id=:shop AND deleted_at IS NULL
                 """ + (lock ? " FOR UPDATE" : ""))
                 .param("id", id.toString()).param("buyer", buyerId).param("shop", shopId)
                 .query(CONVERSATION_MAPPER).optional().orElseThrow(ConversationException::notFound);
@@ -338,6 +418,7 @@ public class JdbcConversationStore implements ConversationStore {
 
     private record StoredConversation(long storageId, Conversation value) { }
     private record StoredTurn(long storageId, String requestHash, ConversationTurnStatus status) { }
+    private record WindowDeletion(LocalDateTime deletedAt, Integer slot) { }
     private record ReserveDecision(Reservation reservation, String conflictMessage) {
         static ReserveDecision ready(Reservation reservation) { return new ReserveDecision(reservation, null); }
         static ReserveDecision conflict(String message) { return new ReserveDecision(null, message); }

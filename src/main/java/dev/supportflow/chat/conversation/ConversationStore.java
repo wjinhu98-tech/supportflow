@@ -5,6 +5,9 @@ import java.util.UUID;
 
 /** Each mutation owns a short transaction; remote/model execution must remain outside it. */
 public interface ConversationStore {
+    Conversation openWindow(long buyerId, long shopId);
+    ShopConversationWindow window(long buyerId, long shopId, UUID beforeId);
+    void deleteWindow(long buyerId, long shopId, UUID conversationId);
     Conversation create(long buyerId, long shopId);
     ConversationPage list(long buyerId, long shopId, UUID beforeId);
     ConversationMessages messages(long buyerId, long shopId, UUID conversationId, UUID beforeId);

@@ -10,3 +10,21 @@ groups:
         annotations:
           summary: Isolated lab backend metrics cannot be scraped
           description: Check backend readiness and the dedicated ops credential; this lab rule is not a production SLO.
+      - alert: SupportFlowModelCircuitOpen
+        expr: supportflow_ai_circuit_state{job="supportflow-backend"} == 1
+        for: 30s
+        labels:
+          severity: warning
+          environment: isolated-lab
+        annotations:
+          summary: The local model circuit is open
+          description: Model calls are failing fast; check bounded outcome counters and provider availability without logging credentials or chat content.
+      - alert: SupportFlowReadRetriesStopped
+        expr: sum(increase(supportflow_agent_retry_decisions_total{failure=~"MODEL_TIMEOUT|MODEL_TRANSPORT|MODEL_TEMPORARY|TOOL_TRANSIENT",outcome="STOPPED"}[5m])) >= 5
+        for: 1m
+        labels:
+          severity: warning
+          environment: isolated-lab
+        annotations:
+          summary: Read-only Agent steps repeatedly stopped after transient failures
+          description: Inspect step, time and model-budget limits; this learning-environment threshold is not a production SLO.

@@ -22,9 +22,20 @@ management:
 
 supportflow:
   agent:
+    retry:
+      max-read-retries: 1
+      delay: 250ms
     runtime:
       max-steps: 8
       total-timeout-seconds: 90
+      max-total-tokens: 60000
+      max-cost-usd: 0.05
+      input-token-allowance: 16384
+      output-token-allowance: 512
+      # Conservative configured USD rates, frozen per run; not a provider invoice guarantee.
+      pricing-model: deepseek-flash
+      input-usd-per-million: 0.30
+      output-usd-per-million: 1.20
   after-sale:
     execution:
       enabled: false
@@ -36,4 +47,7 @@ supportflow:
       connect-timeout: 3s
       request-timeout: 15s
       max-concurrent-requests: 4
+      circuit:
+        failure-threshold: 5
+        open-duration: 30s
 

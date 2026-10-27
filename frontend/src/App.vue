@@ -12,7 +12,7 @@ import {
   LoaderCircle,
   LogOut,
   MessageSquare,
-  Plus,
+  Trash2,
   RefreshCw,
   Send,
   ShieldCheck,
@@ -32,19 +32,20 @@ import { useSupportDesk } from './composables/useSupportDesk'
 import type { Order } from './types'
 
 const {
-  conversations,
   activeConversation,
+  shopOptions,
+  shopDirectoryError,
+  deletingConversation,
+  deleteCurrentConversation,
   conversationContext,
   contextResetPending,
   contextExpired,
   clearConversationTopic,
-  nextConversationBeforeId,
   nextMessageBeforeId,
   conversationsLoading,
   historyLoading,
   conversationError,
   loadConversations,
-  selectConversation,
   loadEarlierMessages,
   receiptOpen,
   receiptOrder,
@@ -91,7 +92,6 @@ const {
   selectOrder,
   clearSelectedOrder,
   sendMessage,
-  clearConversation,
   dismissError,
 } = useSupportDesk()
 
@@ -104,6 +104,8 @@ const shopChanging = ref(false)
 const loginDialog = ref<HTMLDialogElement | null>(null)
 const shopDialog = ref<HTMLDialogElement | null>(null)
 const helpDialog = ref<HTMLDialogElement | null>(null)
+const deleteDialog = ref<HTMLDialogElement | null>(null)
+const deleteError = ref('')
 const messageInput = ref<HTMLTextAreaElement | null>(null)
 const messageList = ref<HTMLDivElement | null>(null)
 type WorkspaceView = 'chat' | 'orders'
@@ -121,6 +123,7 @@ const canSend = computed(
     !busy.value &&
     !historyLoading.value &&
     !conversationsLoading.value &&
+    !deletingConversation.value &&
     messageDraft.value.trim().length > 0,
 )
 const orderCountLabel = computed(
@@ -184,6 +187,11 @@ async function submitShop() {
   }
 }
 
+async function enterShop(id: number) {
+  shopDraft.value = String(id)
+  await submitShop()
+}
+
 async function submitMessage(text = messageDraft.value) {
   if (!connected.value || busy.value || !text.trim()) return
   const actionContext = uiContextVersion
@@ -211,18 +219,6 @@ async function refreshConversation() {
   dismissError()
   if (activeConversation.value) await loadEarlierMessages(false)
   else await loadConversations()
-}
-
-async function chooseConversation(event: Event) {
-  const id = (event.target as HTMLSelectElement).value
-  if (!id) {
-    clearLocalConversation()
-    return
-  }
-  messageDraft.value = ''
-  retryAction = null
-  uiContextVersion++
-  await selectConversation(id)
 }
 
 async function readEarlierMessages() {
@@ -256,6 +252,7 @@ function onComposerKeydown(event: KeyboardEvent) {
 
 function closeOnBackdrop(event: MouseEvent, dialog: HTMLDialogElement | null) {
   if (event.target !== dialog) return
+  if (dialog === deleteDialog.value && deletingConversation.value) return
   if (dialog === loginDialog.value) closeLogin()
   else dialog?.close()
 }
@@ -279,12 +276,19 @@ async function openAfterSales() {
   await loadOwnedAfterSales()
 }
 
-function clearLocalConversation() {
-  if (refundSubmitting.value || receiptSubmitting.value) return
-  clearConversation()
-  uiContextVersion++
-  messageDraft.value = ''
-  retryAction = null
+function openDeleteConversation() {
+  deleteError.value = ''
+  deleteDialog.value?.showModal()
+}
+
+async function confirmDeleteConversation() {
+  deleteError.value = ''
+  if (await deleteCurrentConversation()) {
+    uiContextVersion++
+    messageDraft.value = ''
+    retryAction = null
+    deleteDialog.value?.close()
+  } else deleteError.value = error.value ?? '暂时无法删除对话，请稍后重试。'
 }
 
 watch([() => messages.value.length, busy], async () => {
@@ -303,6 +307,8 @@ watch(
   [connected, shopId],
   ([isConnected, activeShop], [, previousShop]) => {
     if (!isConnected || activeShop !== previousShop) {
+      deleteDialog.value?.close()
+      deleteError.value = ''
       showAfterSales.value = false
       uiContextVersion++
       messageDraft.value = ''
@@ -408,6 +414,7 @@ watch(
             class="shop-switch"
             type="button"
             aria-label="切换店铺"
+            :disabled="deletingConversation"
             @click="openShop"
           >
             <span class="shop-switch-icon">
@@ -690,60 +697,31 @@ watch(
             </div>
             <button
               type="button"
-              class="clear-chat-button"
-              data-testid="new-conversation"
-              :disabled="!connected || connecting || refundSubmitting || receiptSubmitting"
-              title="开始新的咨询，历史记录会保留"
-              @click="clearLocalConversation"
+              class="clear-chat-button delete-chat-button"
+              data-testid="delete-conversation"
+              :disabled="
+                !connected ||
+                !activeConversation ||
+                !messages.length ||
+                connecting ||
+                busy ||
+                historyLoading ||
+                conversationsLoading ||
+                refundSubmitting ||
+                receiptSubmitting ||
+                deletingConversation
+              "
+              title="删除当前店铺的对话"
+              @click="openDeleteConversation"
             >
-              <Plus
+              <Trash2
                 :size="14"
                 aria-hidden="true"
               />
-              <span>新会话</span>
+              <span>删除对话</span>
             </button>
           </header>
 
-          <div
-            v-if="connected"
-            class="conversation-history-toolbar"
-          >
-            <label for="conversation-select">历史咨询</label>
-            <select
-              id="conversation-select"
-              data-testid="conversation-select"
-              :value="activeConversation?.id ?? ''"
-              :disabled="refundSubmitting || receiptSubmitting"
-              @change="chooseConversation"
-            >
-              <option value="">新的咨询</option>
-              <option
-                v-for="conversation in conversations"
-                :key="conversation.id"
-                :value="conversation.id"
-              >
-                {{ formatDate(conversation.createdAt, true) }} · {{ conversation.id.slice(-6) }}
-              </option>
-            </select>
-            <button
-              type="button"
-              class="text-button"
-              :disabled="conversationsLoading || historyLoading || busy"
-              @click="refreshConversation"
-            >
-              {{ conversationsLoading || historyLoading ? '加载中…' : '刷新记录' }}
-            </button>
-            <button
-              v-if="nextConversationBeforeId"
-              type="button"
-              class="text-button"
-              data-testid="load-more-conversations"
-              :disabled="conversationsLoading"
-              @click="loadConversations(true)"
-            >
-              更多会话
-            </button>
-          </div>
           <p
             v-if="conversationError"
             class="history-notice"
@@ -1301,6 +1279,30 @@ watch(
           <br />
           切换后载入目标店铺的咨询记录，已选订单将取消。
         </p>
+        <div
+          v-if="shopOptions.length"
+          class="shop-options"
+          aria-label="选择店铺"
+        >
+          <button
+            v-for="shop in shopOptions"
+            :key="shop.shopId"
+            type="button"
+            :data-testid="`shop-option-${shop.shopId}`"
+            :class="['shop-option', { active: String(shop.shopId) === shopId }]"
+            :disabled="shopChanging"
+            @click="enterShop(shop.shopId)"
+          >
+            <strong>{{ shop.name }}</strong>
+            <span>店铺 {{ shop.shopId }}</span>
+          </button>
+        </div>
+        <p
+          v-if="shopDirectoryError"
+          class="field-help"
+        >
+          {{ shopDirectoryError }}
+        </p>
         <label
           class="field-label"
           for="shop-id"
@@ -1326,7 +1328,7 @@ watch(
         >
           {{ shopError }}
         </p>
-        <p class="field-help">这里只切换查询范围，不创建店铺或订单。</p>
+        <p class="field-help">每家店铺保留一个对话窗口，切换回来即可继续聊天。</p>
         <button
           type="submit"
           class="button button-primary modal-submit"
@@ -1346,6 +1348,50 @@ watch(
             aria-hidden="true"
           />
         </button>
+      </form>
+    </dialog>
+
+    <dialog
+      ref="deleteDialog"
+      class="modal"
+      aria-labelledby="delete-conversation-title"
+      @click="closeOnBackdrop($event, deleteDialog)"
+      @cancel="deletingConversation && $event.preventDefault()"
+    >
+      <form
+        class="modal-content"
+        @submit.prevent="confirmDeleteConversation"
+      >
+        <h2 id="delete-conversation-title">删除该店铺对话？</h2>
+        <p class="modal-intro">
+          将删除你在店铺
+          {{ shopId }} 的全部聊天记录，包括以前的咨询。其他店铺的聊天、订单和售后申请不受影响。
+        </p>
+        <p
+          v-if="deleteError"
+          class="inline-error"
+          role="alert"
+        >
+          {{ deleteError }}
+        </p>
+        <div class="conversation-delete-actions">
+          <button
+            type="button"
+            class="button"
+            :disabled="deletingConversation"
+            @click="deleteDialog?.close()"
+          >
+            取消
+          </button>
+          <button
+            type="submit"
+            class="button button-danger"
+            data-testid="confirm-delete-conversation"
+            :disabled="deletingConversation"
+          >
+            {{ deletingConversation ? '正在删除…' : '确认删除' }}
+          </button>
+        </div>
       </form>
     </dialog>
 

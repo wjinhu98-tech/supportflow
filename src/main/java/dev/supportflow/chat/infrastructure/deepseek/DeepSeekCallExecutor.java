@@ -1,6 +1,7 @@
 package dev.supportflow.chat.infrastructure.deepseek;
 
 import dev.supportflow.chat.application.ModelUnavailableException;
+import dev.supportflow.chat.application.ModelFailureKind;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.slf4j.Logger;
@@ -12,6 +13,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.util.Objects;
+import java.time.Duration;
+import java.io.IOException;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -20,7 +23,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 
-/** One per application instance: bounded calls, no waiting queue, no retry and no raw provider logging. */
+/** Shared admission and circuit. Each invocation makes at most one HTTP request; retries belong to the durable runtime. */
 public final class DeepSeekCallExecutor {
     private static final Logger LOG = LoggerFactory.getLogger(DeepSeekCallExecutor.class);
     private static final URI ENDPOINT = URI.create("https://api.deepseek.com/chat/completions");
@@ -30,6 +33,7 @@ public final class DeepSeekCallExecutor {
     private final DeepSeekProperties properties;
     private final Semaphore slots;
     private final DeepSeekCallMetrics metrics;
+    private final DeepSeekCircuitBreaker circuit;
 
     public DeepSeekCallExecutor(HttpClient client, DeepSeekProperties properties) {
         this(client, properties, new SimpleMeterRegistry());
@@ -40,24 +44,38 @@ public final class DeepSeekCallExecutor {
         this.properties = Objects.requireNonNull(properties, "DeepSeek configuration is required");
         slots = new Semaphore(properties.maxConcurrentRequests());
         metrics = new DeepSeekCallMetrics(registry, slots, properties.maxConcurrentRequests());
+        circuit = new DeepSeekCircuitBreaker(properties.circuit(), registry, System::nanoTime);
     }
 
     public <T> T execute(DeepSeekCallOperation operation, String requestBody, Function<byte[], T> parser) {
+        return execute(operation, requestBody, parser, properties.requestTimeout());
+    }
+
+    public <T> T execute(DeepSeekCallOperation operation, String requestBody, Function<byte[], T> parser, Duration remainingTime) {
         Objects.requireNonNull(operation, "Operation is required");
         Objects.requireNonNull(requestBody, "Request body is required");
         Objects.requireNonNull(parser, "Response parser is required");
+        if (remainingTime == null || remainingTime.isNegative() || remainingTime.isZero())
+            throw new IllegalArgumentException("A positive call deadline is required");
+        Duration effectiveTimeout = remainingTime.compareTo(properties.requestTimeout()) < 0 ? remainingTime : properties.requestTimeout();
         long started = System.nanoTime();
         if (!slots.tryAcquire()) {
             record(operation, DeepSeekCallOutcome.BUSY, started, 0);
-            throw new ModelUnavailableException();
+            throw new ModelUnavailableException(ModelFailureKind.BUSY);
         }
 
         CompletableFuture<HttpResponse<byte[]>> pending = null;
         DeepSeekCallOutcome outcome = DeepSeekCallOutcome.TRANSPORT_ERROR;
         int httpStatus = 0;
+        DeepSeekCircuitBreaker.Permit permit = null;
         try {
+            permit = circuit.tryAcquire();
+            if (permit == null) {
+                outcome = DeepSeekCallOutcome.CIRCUIT_OPEN;
+                throw new ModelUnavailableException();
+            }
             HttpRequest request = HttpRequest.newBuilder(ENDPOINT)
-                    .timeout(properties.requestTimeout())
+                    .timeout(effectiveTimeout)
                     .header("Authorization", "Bearer " + properties.apiKey())
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
@@ -65,7 +83,7 @@ public final class DeepSeekCallExecutor {
                     .build();
             pending = client.sendAsync(request, ignored -> new DeepSeekResponseBodySubscriber(MAX_RESPONSE_BYTES));
             // Bound headers AND the entire body, including a peer that stalls after sending headers.
-            long remaining = properties.requestTimeout().toNanos() - (System.nanoTime() - started);
+            long remaining = effectiveTimeout.toNanos() - (System.nanoTime() - started);
             if (remaining <= 0) throw new TimeoutException();
             HttpResponse<byte[]> response = pending.get(remaining, TimeUnit.NANOSECONDS);
             outcome = DeepSeekCallOutcome.INVALID_RESPONSE;
@@ -88,29 +106,58 @@ public final class DeepSeekCallExecutor {
         } catch (InterruptedException interrupted) {
             outcome = DeepSeekCallOutcome.INTERRUPTED;
             Thread.currentThread().interrupt();
-            throw new ModelUnavailableException();
+            throw new ModelUnavailableException(ModelFailureKind.INTERRUPTED);
         } catch (TimeoutException timeout) {
             outcome = DeepSeekCallOutcome.TIMEOUT;
-            throw new ModelUnavailableException();
+            throw new ModelUnavailableException(ModelFailureKind.TIMEOUT);
         } catch (CancellationException cancelled) {
             outcome = DeepSeekCallOutcome.CANCELLED;
-            throw new ModelUnavailableException();
+            throw new ModelUnavailableException(ModelFailureKind.CANCELLED);
         } catch (ExecutionException failure) {
             outcome = classifyFailure(failure.getCause());
-            throw new ModelUnavailableException();
+            ModelFailureKind kind = outcome == DeepSeekCallOutcome.TRANSPORT_ERROR && !causedByIo(failure.getCause())
+                    ? ModelFailureKind.UNCLASSIFIED : kind(outcome, httpStatus);
+            throw new ModelUnavailableException(kind);
         } catch (RuntimeException failure) {
             // Never attach a provider/parser exception: even its message may contain credentials or data.
-            throw new ModelUnavailableException();
+            throw new ModelUnavailableException(outcome == DeepSeekCallOutcome.TRANSPORT_ERROR
+                    ? ModelFailureKind.UNCLASSIFIED : kind(outcome, httpStatus));
         } finally {
             try {
                 if (outcome != DeepSeekCallOutcome.SUCCESS && pending != null) pending.cancel(true);
             } catch (RuntimeException ignored) {
                 // Cancellation is best effort; a broken transport must not leak application capacity.
             } finally {
-                slots.release();
-                record(operation, outcome, started, httpStatus);
+                try { circuit.complete(permit, outcome); }
+                finally {
+                    slots.release();
+                    record(operation, outcome, started, httpStatus);
+                }
             }
         }
+    }
+
+    private static ModelFailureKind kind(DeepSeekCallOutcome outcome, int status) {
+        return switch (outcome) {
+            case TIMEOUT -> ModelFailureKind.TIMEOUT;
+            case TRANSPORT_ERROR -> ModelFailureKind.TRANSPORT;
+            case PROVIDER_RATE_LIMITED -> ModelFailureKind.RATE_LIMITED;
+            case PROVIDER_ERROR -> status == 500 || status == 502 || status == 503 || status == 504
+                    ? ModelFailureKind.PROVIDER_TEMPORARY : ModelFailureKind.PROVIDER_REJECTED;
+            case INVALID_RESPONSE -> ModelFailureKind.INVALID_RESPONSE;
+            case CIRCUIT_OPEN -> ModelFailureKind.CIRCUIT_OPEN;
+            case CANCELLED -> ModelFailureKind.CANCELLED;
+            case INTERRUPTED -> ModelFailureKind.INTERRUPTED;
+            case BUSY -> ModelFailureKind.BUSY;
+            default -> ModelFailureKind.UNCLASSIFIED;
+        };
+    }
+
+    private static boolean causedByIo(Throwable failure) {
+        for (int depth = 0; failure != null && depth < 8; depth++, failure = failure.getCause()) {
+            if (failure instanceof IOException) return true;
+        }
+        return false;
     }
 
     private static DeepSeekCallOutcome classifyFailure(Throwable failure) {

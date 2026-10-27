@@ -15,10 +15,16 @@ public record DeepSeekProperties(
         @DefaultValue("deepseek-flash") String model,
         @DefaultValue("3s") Duration connectTimeout,
         @DefaultValue("15s") Duration requestTimeout,
-        @DefaultValue("4") int maxConcurrentRequests
+        @DefaultValue("4") int maxConcurrentRequests,
+        @DefaultValue DeepSeekCircuitProperties circuit
 ) {
 
     private static final Pattern MODEL_NAME = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,127}");
+
+    public DeepSeekProperties(boolean enabled, String apiKey, String model,
+                              Duration connectTimeout, Duration requestTimeout, int maxConcurrentRequests) {
+        this(enabled, apiKey, model, connectTimeout, requestTimeout, maxConcurrentRequests, DeepSeekCircuitProperties.defaults());
+    }
 
     public DeepSeekProperties(boolean enabled, String apiKey, String model,
                               Duration connectTimeout, Duration requestTimeout) {
@@ -43,6 +49,7 @@ public record DeepSeekProperties(
         if (maxConcurrentRequests < 1 || maxConcurrentRequests > 64) {
             throw new IllegalArgumentException("DeepSeek max-concurrent-requests must be between 1 and 64");
         }
+        java.util.Objects.requireNonNull(circuit, "Circuit configuration is required");
     }
 
     private static void requireTimeout(Duration value, Duration minimum, Duration maximum, String name) {
@@ -55,6 +62,6 @@ public record DeepSeekProperties(
     public String toString() {
         return "DeepSeekProperties[enabled=" + enabled + ", apiKey=[REDACTED], model=" + model
                 + ", connectTimeout=" + connectTimeout + ", requestTimeout=" + requestTimeout
-                + ", maxConcurrentRequests=" + maxConcurrentRequests + "]";
+                + ", maxConcurrentRequests=" + maxConcurrentRequests + ", circuit=" + circuit + "]";
     }
 }

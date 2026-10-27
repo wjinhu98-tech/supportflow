@@ -36,6 +36,7 @@ public final class LabDeploymentTool {
                 case "prepare" -> prepare(Path.of(".local", "deployment-lab").toAbsolutePath().normalize());
                 case "migrate" -> migrate();
                 case "seed" -> seed();
+                case "seed-shops" -> seedShops();
                 case "verify" -> verifyRuntime();
                 default -> throw new IllegalArgumentException("Unknown lab command");
             }
@@ -163,6 +164,22 @@ public final class LabDeploymentTool {
                 WHERE tenant_id=100 AND buyer_id=200 AND order_no='LAB-000001'
                 """); ResultSet row = check.executeQuery()) {
             if (!row.next() || row.getLong(1) != 1) throw new SQLException("Existing data is not the expected lab fixture");
+        }
+    }
+
+    private static void seedShops() throws IOException, SQLException {
+        try (Connection connection = DriverManager.getConnection(JDBC_URL, "lab_migrator", migrationPassword())) {
+            connection.setAutoCommit(false);
+            try {
+                verifyExistingFixture(connection);
+                var seeded = DemoShopData.seed(connection);
+                connection.commit();
+                System.out.println("LAB_DEMO_SHOPS_READY ids=102,103 shopsInserted=" + seeded.shopsInserted()
+                        + " ordersInserted=" + seeded.ordersInserted() + " staffGrantsChanged=0");
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            }
         }
     }
 

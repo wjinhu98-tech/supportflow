@@ -21,6 +21,19 @@ public class DeepSeekConfiguration {
 
     @Bean
     @ConditionalOnProperty(prefix = "supportflow.ai.deepseek", name = "enabled", havingValue = "true")
+    dev.supportflow.assistant.runtime.planning.AgentDecisionPlanner deepSeekAgentDecisionPlanner(
+            DeepSeekCallExecutor executor, ObjectMapper mapper, DeepSeekProperties properties) {
+        return new DeepSeekAgentDecisionPlanner(executor, mapper, properties);
+    }
+
+    @Bean
+    @ConditionalOnProperty(prefix = "supportflow.ai.deepseek", name = "enabled", havingValue = "false", matchIfMissing = true)
+    dev.supportflow.assistant.runtime.planning.AgentDecisionPlanner localAgentDecisionPlanner() {
+        return new dev.supportflow.assistant.runtime.planning.RuleBasedAgentDecisionPlanner();
+    }
+
+    @Bean
+    @ConditionalOnProperty(prefix = "supportflow.ai.deepseek", name = "enabled", havingValue = "true")
     dev.supportflow.assistant.planning.ToolPlanner deepSeekToolPlanner(
             DeepSeekCallExecutor executor,
             ObjectMapper mapper, DeepSeekProperties properties) {

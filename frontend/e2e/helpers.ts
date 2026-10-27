@@ -38,3 +38,14 @@ export async function switchShop(page: Page, shopId: string) {
   await expect(page).toHaveURL(new RegExp(`[?&]shopId=${shopId}(?:&|$)`))
   await expect(page.getByTestId('shop-confirm')).not.toBeVisible()
 }
+
+export async function clearShopConversation(page: Page) {
+  await showChat(page)
+  await expect(page.getByTestId('message-input')).toBeEnabled()
+  if ((await page.getByTestId('chat-message').count()) === 0) return
+  await page.getByTestId('delete-conversation').click()
+  await expect(page.getByRole('dialog', { name: '删除该店铺对话？' })).toBeVisible()
+  await page.getByTestId('confirm-delete-conversation').click()
+  await expect(page.getByRole('dialog', { name: '删除该店铺对话？' })).not.toBeVisible()
+  await expect(page.getByTestId('chat-message')).toHaveCount(0)
+}

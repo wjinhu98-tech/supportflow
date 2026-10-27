@@ -28,7 +28,15 @@ const finalPage = [makeOrder(100, 'SF10021')]
 const otherShopOrders = [
   makeOrder(101, 'SF10001', { status: 'PAID', statusDescription: '待发货', totalAmount: 899 }),
 ]
-const allOrders = [...firstPage, ...finalPage, ...otherShopOrders]
+const allOrders = [
+  ...firstPage,
+  ...finalPage,
+  ...otherShopOrders,
+  makeOrder(102, 'SF102001'),
+  makeOrder(102, 'SF102002', { status: 'PAID', statusDescription: '待发货' }),
+  makeOrder(103, 'SF103001'),
+  makeOrder(103, 'SF103002', { status: 'PAID', statusDescription: '待发货' }),
+]
 
 function respond(response, status, value) {
   if (response.destroyed || response.writableEnded) return
@@ -134,17 +142,94 @@ const server = http.createServer(async (request, response) => {
     return respond(response, 200, { headerName: 'X-CSRF-TOKEN', parameterName: '_csrf', token })
   }
 
+  const owner = request.headers.authorization === slowAuthorization ? 'slow-buyer' : MOCK_USERNAME
+  if (url.pathname === '/api/v1/shops' && request.method === 'GET') {
+    record.accepted = true
+    return respond(response, 200, [
+      { shopId: 100, name: '演示店铺100' },
+      { shopId: 101, name: '演示店铺101' },
+      { shopId: 102, name: '数码优选店' },
+      { shopId: 103, name: '生活家居店' },
+    ])
+  }
+  const windowMatch = /^\/api\/v1\/shops\/([1-9][0-9]*)\/chat\/window(?:\/([a-f0-9-]+))?$/.exec(
+    url.pathname,
+  )
+  if (windowMatch) {
+    const shopId = Number(windowMatch[1])
+    const visible = [...conversations.values()].filter(
+      (entry) => !entry.deleted && entry.owner === owner && entry.conversation.shopId === shopId,
+    )
+    const current = visible.find((entry) => entry.window)
+    if (request.method === 'GET' && !windowMatch[2]) {
+      const messages = visible
+        .flatMap((entry) => entry.messages)
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      const cursor = url.searchParams.get('beforeId')
+      const end = cursor ? messages.findIndex((message) => message.id === cursor) : messages.length
+      if (end < 0) return failure(response, 404, 'CONVERSATION_NOT_FOUND', '未找到该历史记录。')
+      const page = messages.slice(Math.max(0, end - 40), end)
+      record.accepted = true
+      return respond(response, 200, {
+        shopId,
+        conversation: current?.conversation ?? null,
+        messages: page,
+        nextBeforeId: end > 40 ? page[0].id : null,
+        context:
+          current?.messages.filter((message) => message.role === 'ASSISTANT').at(-1)?.response
+            ?.context ?? null,
+      })
+    }
+    if (!hasCsrf) return failure(response, 403, 'ACCESS_DENIED', '请求安全校验未通过。')
+    session.token = randomUUID()
+    if (request.method === 'POST' && !windowMatch[2]) {
+      record.accepted = true
+      if (current) return respond(response, 200, current.conversation)
+      const conversation = {
+        id: randomUUID(),
+        shopId,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }
+      conversations.set(conversation.id, {
+        owner,
+        window: true,
+        deleted: false,
+        conversation,
+        messages: [],
+        results: new Map(),
+      })
+      return respond(response, 200, conversation)
+    }
+    if (request.method === 'DELETE' && windowMatch[2]) {
+      const target = conversations.get(windowMatch[2])
+      if (
+        !target ||
+        target.owner !== owner ||
+        target.conversation.shopId !== shopId ||
+        !target.window
+      )
+        return failure(response, 404, 'CONVERSATION_NOT_FOUND', '未找到该店铺对话。')
+      if (!target.deleted) for (const entry of visible) entry.deleted = true
+      record.accepted = true
+      response.statusCode = 204
+      return response.end()
+    }
+    return failure(response, 404, 'NOT_FOUND', '接口不存在。')
+  }
   const conversationMatch =
     /^\/api\/v1\/shops\/([1-9][0-9]*)\/chat\/conversations(?:\/([a-f0-9-]+)\/messages)?$/.exec(
       url.pathname,
     )
-  const owner = request.headers.authorization === slowAuthorization ? 'slow-buyer' : MOCK_USERNAME
   let stored
   if (conversationMatch) {
     const shopId = Number(conversationMatch[1])
     const id = conversationMatch[2]
     stored = id ? conversations.get(id) : null
-    if (id && (!stored || stored.owner !== owner || stored.conversation.shopId !== shopId))
+    if (
+      id &&
+      (!stored || stored.deleted || stored.owner !== owner || stored.conversation.shopId !== shopId)
+    )
       return failure(response, 404, 'CONVERSATION_NOT_FOUND', '未找到该会话。')
     if (request.method === 'GET') {
       record.accepted = true
@@ -162,7 +247,10 @@ const server = http.createServer(async (request, response) => {
         })
       }
       const owned = [...conversations.values()]
-        .filter((entry) => entry.owner === owner && entry.conversation.shopId === shopId)
+        .filter(
+          (entry) =>
+            !entry.deleted && entry.owner === owner && entry.conversation.shopId === shopId,
+        )
         .reverse()
       const start = beforeId
         ? owned.findIndex((entry) => entry.conversation.id === beforeId) + 1
@@ -232,6 +320,8 @@ const server = http.createServer(async (request, response) => {
     return failure(response, 404, 'ORDER_NOT_FOUND', '未找到属于您的订单。')
   if (message === '触发503')
     return failure(response, 503, 'AI_UNAVAILABLE', '智能服务暂时不可用，请稍后重试。')
+  if (message === '触发模型503')
+    return failure(response, 503, 'MODEL_UNAVAILABLE', 'private-provider-detail-marker')
   if (message === '延时回复') {
     await new Promise((resolve) => setTimeout(resolve, 1500))
     return respond(response, 200, {
@@ -262,7 +352,7 @@ const server = http.createServer(async (request, response) => {
           : finalPage
         : shopId === 101
           ? otherShopOrders
-          : []
+          : allOrders.filter((order) => order.shopId === shopId)
     return respond(response, 200, {
       reply: orders.length
         ? `请选择当前店铺的一笔订单（${orders.length}笔）。`

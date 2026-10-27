@@ -65,6 +65,7 @@ import static org.springframework.security.test.web.servlet.request.SecurityMock
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -113,6 +114,8 @@ class ConversationApiIT {
         account(registry, 0, "buyer", 200, "ORDER_READ");
         account(registry, 1, "other", 201, "ORDER_READ");
         account(registry, 2, "no-order-permission", 202, "");
+        account(registry, 3, "merchant", 999, "ORDER_READ");
+        registry.add("supportflow.security.local.accounts[3].account-type", () -> "MERCHANT_STAFF");
     }
 
     private static void account(DynamicPropertyRegistry registry, int index, String username,
@@ -137,6 +140,9 @@ class ConversationApiIT {
             create.execute();
             KnowledgeFixtures.grantRead(connection, DATABASE, "conversation_runtime");
             for (String table : List.of("support_order", "support_shipment_event")) {
+                grant.execute("GRANT SELECT ON " + DATABASE + "." + table + " TO 'conversation_runtime'@'%'");
+            }
+            for (String table : List.of("support_merchant", "support_merchant_shop")) {
                 grant.execute("GRANT SELECT ON " + DATABASE + "." + table + " TO 'conversation_runtime'@'%'");
             }
             for (String table : List.of("support_after_sale", "support_after_sale_execution",
@@ -1058,6 +1064,105 @@ class ConversationApiIT {
         assertThat(source.path("title").asString()).isEqualTo(title);
         assertThat(source.path("content").asString()).isEqualTo(content);
         assertPrivateFieldsAbsent(response);
+    }
+
+    @Test void fixedShopWindowOpeningIsIdempotentAndRequiresBuyerAuthenticationAndCsrf() throws Exception {
+        long shop = SHOP.incrementAndGet();
+        String path = windowUrl(shop);
+        mvc.perform(get(path)).andExpect(status().isUnauthorized());
+        mvc.perform(post(path).with(csrf())).andExpect(status().isUnauthorized());
+        mvc.perform(post(path).with(httpBasic("buyer", PASSWORD))).andExpect(status().isForbidden());
+        mvc.perform(post(path).with(httpBasic("merchant", PASSWORD)).with(csrf())).andExpect(status().isForbidden());
+        JsonNode first = openWindow("buyer", shop);
+        assertThat(openWindow("buyer", shop).path("id").asString()).isEqualTo(first.path("id").asString());
+        assertThat(openWindow("other", shop).path("id").asString()).isNotEqualTo(first.path("id").asString());
+        assertThat(openWindow("buyer", shop + 100000).path("id").asString()).isNotEqualTo(first.path("id").asString());
+        mvc.perform(delete(path + "/" + first.path("id").asString()).with(httpBasic("buyer", PASSWORD)))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test void oneShopWindowShowsEarlierSessionsWithoutReplayingThemOrMixingBuyers() throws Exception {
+        long shop = SHOP.incrementAndGet();
+        String old = create("buyer", shop).path("id").asString();
+        send("buyer", shop, old, UUID.randomUUID().toString(), "以前的店铺咨询", null).andExpect(status().isOk());
+        String foreign = create("other", shop).path("id").asString();
+        send("other", shop, foreign, UUID.randomUUID().toString(), "另一买家的咨询", null).andExpect(status().isOk());
+        String current = openWindow("buyer", shop).path("id").asString();
+        send("buyer", shop, current, UUID.randomUUID().toString(), "在原店铺继续咨询", null).andExpect(status().isOk());
+        JsonNode history = body(mvc.perform(get(windowUrl(shop)).with(httpBasic("buyer", PASSWORD)))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(history.path("conversation").path("id").asString()).isEqualTo(current);
+        assertThat(history.path("messages").size()).isEqualTo(4);
+        assertThat(history.toString()).contains("以前的店铺咨询", "在原店铺继续咨询").doesNotContain("另一买家的咨询");
+        assertPrivateFieldsAbsent(history);
+        verify(orchestrator, times(1)).reply(any(), eq(shop), eq("以前的店铺咨询"), isNull());
+    }
+
+    @Test void deletingOneShopConversationIsScopedAndRetryCannotEraseTheNextWindow() throws Exception {
+        long shop = SHOP.incrementAndGet();
+        String id = openWindow("buyer", shop).path("id").asString();
+        send("buyer", shop, id, UUID.randomUUID().toString(), "主动删除的咨询", null).andExpect(status().isOk());
+        String path = windowUrl(shop) + "/" + id;
+        mvc.perform(delete(path).with(httpBasic("other", PASSWORD)).with(csrf())).andExpect(status().isNotFound());
+        mvc.perform(delete(windowUrl(shop + 1) + "/" + id).with(httpBasic("buyer", PASSWORD)).with(csrf()))
+                .andExpect(status().isNotFound());
+        mvc.perform(delete(path).with(httpBasic("merchant", PASSWORD)).with(csrf())).andExpect(status().isForbidden());
+        mvc.perform(delete(path).with(httpBasic("buyer", PASSWORD)).with(csrf())).andExpect(status().isNoContent());
+        mvc.perform(get(messagesUrl(shop, id)).with(httpBasic("buyer", PASSWORD))).andExpect(status().isNotFound());
+        JsonNode empty = body(mvc.perform(get(windowUrl(shop)).with(httpBasic("buyer", PASSWORD)))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(empty.path("conversation").isNull()).isTrue();
+        assertThat(empty.path("messages").size()).isZero();
+        String fresh = openWindow("buyer", shop).path("id").asString();
+        assertThat(fresh).isNotEqualTo(id);
+        send("buyer", shop, fresh, UUID.randomUUID().toString(), "删除后新咨询", null).andExpect(status().isOk());
+        mvc.perform(delete(path).with(httpBasic("buyer", PASSWORD)).with(csrf())).andExpect(status().isNoContent());
+        JsonNode kept = body(mvc.perform(get(windowUrl(shop)).with(httpBasic("buyer", PASSWORD)))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(kept.toString()).contains("删除后新咨询").doesNotContain("主动删除的咨询");
+        send("buyer", shop, id, UUID.randomUUID().toString(), "旧窗口不能复活", null).andExpect(status().isNotFound());
+    }
+
+    @Test void windowDeletionRefusesAnActiveTurnAndHistoryRejectsForeignAndMalformedCursors() throws Exception {
+        long shop = SHOP.incrementAndGet();
+        String id = openWindow("buyer", shop).path("id").asString();
+        String client = UUID.randomUUID().toString();
+        execute("""
+                INSERT INTO support_chat_turn(conversation_id,client_message_id,request_hash,status,expires_at)
+                SELECT id,?,?,'PROCESSING',TIMESTAMPADD(SECOND,120,UTC_TIMESTAMP(3))
+                FROM support_chat_conversation WHERE public_id=?
+                """, client, "0".repeat(64), id);
+        mvc.perform(delete(windowUrl(shop) + "/" + id).with(httpBasic("buyer", PASSWORD)).with(csrf()))
+                .andExpect(status().isConflict());
+        execute("UPDATE support_chat_turn SET status='FAILED' WHERE client_message_id=?", client);
+        mvc.perform(get(windowUrl(shop)).param("beforeId", "not-a-uuid").with(httpBasic("buyer", PASSWORD)))
+                .andExpect(status().isBadRequest());
+        mvc.perform(get(windowUrl(shop)).param("beforeId", UUID.randomUUID().toString()).with(httpBasic("buyer", PASSWORD)))
+                .andExpect(status().isNotFound());
+        mvc.perform(delete(windowUrl(shop) + "/" + id).with(httpBasic("buyer", PASSWORD)).with(csrf()))
+                .andExpect(status().isNoContent());
+    }
+
+    @Test void buyerShopDirectoryIncludesTheTwoDemoShopsWithoutExposingStaffOrMerchantIds() throws Exception {
+        try (Connection connection = admin(); Statement seed = connection.createStatement()) {
+            connection.setAutoCommit(false);
+            seed.executeUpdate("INSERT INTO support_merchant(id,name) VALUES(1,'演示商家') ON DUPLICATE KEY UPDATE id=id");
+            seed.executeUpdate("INSERT INTO support_merchant_shop(shop_id,merchant_id,name) VALUES(100,1,'演示基础店铺') ON DUPLICATE KEY UPDATE shop_id=shop_id");
+            dev.supportflow.deployment.DemoShopData.seed(connection);
+            connection.commit();
+        }
+        mvc.perform(get("/api/v1/shops")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/v1/shops").with(httpBasic("merchant", PASSWORD))).andExpect(status().isForbidden());
+        mvc.perform(get("/api/v1/shops").with(httpBasic("no-order-permission", PASSWORD))).andExpect(status().isForbidden());
+        JsonNode shops = body(mvc.perform(get("/api/v1/shops").with(httpBasic("buyer", PASSWORD)))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(shops.toString()).contains("数码优选店", "生活家居店").doesNotContain("merchantId", "staffId", "buyerId");
+    }
+
+    private String windowUrl(long shop) { return "/api/v1/shops/" + shop + "/chat/window"; }
+    private JsonNode openWindow(String username, long shop) throws Exception {
+        return body(mvc.perform(post(windowUrl(shop)).with(httpBasic(username, PASSWORD)).with(csrf()))
+                .andExpect(status().isOk()).andReturn());
     }
 
     private JsonNode storedResponse(String message) throws SQLException {

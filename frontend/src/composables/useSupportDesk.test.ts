@@ -18,9 +18,10 @@ const mocks = vi.hoisted(() => ({
   currentAccount: vi.fn(),
   chat: vi.fn(),
   reply: vi.fn(),
-  conversations: vi.fn(),
-  createConversation: vi.fn(),
-  conversationMessages: vi.fn(),
+  openShopWindow: vi.fn(),
+  shopWindowMessages: vi.fn(),
+  shops: vi.fn(),
+  deleteShopWindow: vi.fn(),
   sendConversationMessage: vi.fn(),
   pendingReviews: vi.fn(),
   decideReview: vi.fn(),
@@ -39,9 +40,23 @@ vi.mock('../api/client', async (importOriginal) => {
       authenticate = mocks.authenticate
       currentAccount = mocks.currentAccount
       chat = mocks.chat
-      conversations = mocks.conversations
-      createConversation = mocks.createConversation
-      conversationMessages = mocks.conversationMessages
+      openShopWindow = mocks.openShopWindow
+      shops = mocks.shops
+      deleteShopWindow = mocks.deleteShopWindow
+      async shopWindowMessages(shopId: string, beforeId: string | null, signal: AbortSignal) {
+        const page = await mocks.shopWindowMessages(shopId, beforeId, signal)
+        const latest = (page.messages as StoredChatMessage[])
+          .filter((message) => message.role === 'ASSISTANT')
+          .at(-1)
+        return {
+          ...page,
+          shopId: Number(shopId),
+          conversation: page.conversation ? { ...page.conversation, shopId: Number(shopId) } : null,
+          context: Object.hasOwn(page, 'context')
+            ? page.context
+            : (latest?.response?.context ?? null),
+        }
+      }
       sendConversationMessage = mocks.sendConversationMessage
       pendingReviews = mocks.pendingReviews
       decideReview = mocks.decideReview
@@ -161,11 +176,16 @@ beforeEach(() => {
   })
   mocks.chat.mockReset().mockResolvedValue(selection())
   mocks.reply.mockReset().mockResolvedValue(textReply)
-  mocks.conversations.mockReset().mockResolvedValue({ conversations: [], nextBeforeId: null })
-  mocks.createConversation
+  mocks.shops.mockReset().mockResolvedValue([
+    { shopId: 100, name: '原有店铺' },
+    { shopId: 102, name: '数码优选店' },
+    { shopId: 103, name: '生活家居店' },
+  ])
+  mocks.deleteShopWindow.mockReset().mockResolvedValue(undefined)
+  mocks.openShopWindow
     .mockReset()
     .mockImplementation(async (shopId: string) => ({ ...conversation, shopId: Number(shopId) }))
-  mocks.conversationMessages
+  mocks.shopWindowMessages
     .mockReset()
     .mockResolvedValue({ conversation, messages: [], nextBeforeId: null })
   mocks.sendConversationMessage
@@ -224,8 +244,7 @@ describe('useSupportDesk', () => {
   it('restores only the latest topic hint without selecting an old order or replaying a form', async () => {
     const latestTopic = knowledgeTopic()
     const latest = storedPair('latest', { ...textReply, context: latestTopic })
-    mocks.conversations.mockResolvedValueOnce({ conversations: [conversation], nextBeforeId: null })
-    mocks.conversationMessages
+    mocks.shopWindowMessages
       .mockResolvedValueOnce({ conversation, messages: latest, nextBeforeId: latest[0]!.id })
       .mockResolvedValueOnce({
         conversation,
@@ -255,7 +274,7 @@ describe('useSupportDesk', () => {
       await desk.connect('buyer', 'test')
       mocks.reply.mockResolvedValueOnce({ ...textReply, context: orderTopic() })
       await desk.sendMessage('first')
-      mocks.conversationMessages.mockResolvedValueOnce({
+      mocks.shopWindowMessages.mockResolvedValueOnce({
         conversation,
         messages: storedPair('last', {
           ...textReply,
@@ -263,7 +282,7 @@ describe('useSupportDesk', () => {
         }),
         nextBeforeId: null,
       })
-      await desk.selectConversation(conversation.id)
+      await desk.loadEarlierMessages(false)
       expect(desk.conversationContext.value?.kind ?? 'NONE').toBe('NONE')
       expect(desk.contextResetPending.value).toBe(false)
       expect(desk.selectedOrder.value).toBeNull()
@@ -369,7 +388,7 @@ describe('useSupportDesk', () => {
     mocks.reply.mockResolvedValueOnce({ ...textReply, context: topic })
     await desk.sendMessage('order')
     desk.clearConversationTopic()
-    mocks.conversationMessages.mockResolvedValueOnce({
+    mocks.shopWindowMessages.mockResolvedValueOnce({
       conversation,
       messages: storedPair('old', { ...textReply, context: topic }),
       nextBeforeId: null,
@@ -442,30 +461,22 @@ describe('useSupportDesk', () => {
     expect(desk.contextResetPending.value).toBe(false)
   })
 
-  it('discards an old in-flight context response after switching conversations', async () => {
-    const second = { ...conversation, id: '00000000-0000-4000-8000-000000000009' }
-    mocks.conversations.mockResolvedValueOnce({
-      conversations: [conversation, second],
-      nextBeforeId: null,
-    })
-    const topic = knowledgeTopic()
-    mocks.conversationMessages.mockResolvedValueOnce({
-      conversation,
-      messages: [],
-      nextBeforeId: null,
-    })
+  it('discards an old in-flight context response after switching shop windows', async () => {
+    const second = { ...conversation, id: '00000000-0000-4000-8000-000000000009', shopId: 101 }
     const desk = createDesk()
     await desk.connect('buyer', 'test')
     const pending = deferred<ConversationMessages>()
     mocks.sendConversationMessage.mockReturnValueOnce(pending.promise)
     const sending = desk.sendMessage('old question')
     const oldSignal = mocks.sendConversationMessage.mock.lastCall?.[5] as AbortSignal
-    mocks.conversationMessages.mockResolvedValueOnce({
+    const topic = knowledgeTopic()
+    mocks.openShopWindow.mockResolvedValueOnce(second)
+    mocks.shopWindowMessages.mockResolvedValueOnce({
       conversation: second,
       messages: storedPair('new question', { ...textReply, context: topic }),
       nextBeforeId: null,
     })
-    await desk.selectConversation(second.id)
+    await desk.changeShop('101')
     expect(oldSignal.aborted).toBe(true)
     pending.resolve({
       conversation,
@@ -498,14 +509,14 @@ describe('useSupportDesk', () => {
       historical: false,
     })
     const persisted = storedPair('能放张祝福卡吗？', citedReply)
-    mocks.conversationMessages.mockResolvedValueOnce({
+    mocks.shopWindowMessages.mockResolvedValueOnce({
       conversation,
       messages: persisted,
       nextBeforeId: null,
     })
     const sendCount = mocks.sendConversationMessage.mock.calls.length
     const replyCount = mocks.reply.mock.calls.length
-    await desk.selectConversation(conversation.id)
+    await desk.loadEarlierMessages(false)
     expect(desk.messages.value[1]).toMatchObject({
       knowledge: citedReply.knowledge,
       historical: true,
@@ -526,8 +537,7 @@ describe('useSupportDesk', () => {
         ],
       },
     })
-    mocks.conversations.mockResolvedValueOnce({ conversations: [conversation], nextBeforeId: null })
-    mocks.conversationMessages
+    mocks.shopWindowMessages
       .mockResolvedValueOnce({ conversation, messages: recent, nextBeforeId: recent[0]!.id })
       .mockResolvedValueOnce({ conversation, messages: older, nextBeforeId: null })
     const desk = createDesk()
@@ -551,8 +561,7 @@ describe('useSupportDesk', () => {
       type: 'AFTER_SALE_FORM',
       orders: [order],
     })
-    mocks.conversations.mockResolvedValueOnce({ conversations: [conversation], nextBeforeId: null })
-    mocks.conversationMessages.mockResolvedValueOnce({
+    mocks.shopWindowMessages.mockResolvedValueOnce({
       conversation,
       messages: history,
       nextBeforeId: null,
@@ -569,48 +578,57 @@ describe('useSupportDesk', () => {
     expect(mocks.afterSaleEligibility).not.toHaveBeenCalled()
     expect(mocks.applyAfterSale).not.toHaveBeenCalled()
     expect(mocks.confirmReceipt).not.toHaveBeenCalled()
-    expect(mocks.createConversation).not.toHaveBeenCalled()
+    expect(mocks.openShopWindow).toHaveBeenCalledOnce()
     expect(mocks.sendConversationMessage).not.toHaveBeenCalled()
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
   })
 
-  it('creates a conversation only on first explicit send and preserves history on new conversation', async () => {
+  it('restores each shops saved window when switching back without sending another message', async () => {
+    const other = { ...conversation, shopId: 102, id: '00000000-0000-4000-8000-000000000010' }
+    mocks.openShopWindow.mockImplementation(async (shop: string) =>
+      shop === '100' ? conversation : other,
+    )
+    mocks.shopWindowMessages.mockImplementation(async (shop: string) => ({
+      conversation: shop === '100' ? conversation : other,
+      messages: storedPair(shop === '100' ? '原店铺聊天' : '数码店铺聊天'),
+      nextBeforeId: null,
+    }))
     const desk = createDesk()
     await desk.connect('buyer', 'test')
-    desk.clearConversation()
-    expect(mocks.createConversation).not.toHaveBeenCalled()
+    expect(desk.messages.value[0]?.text).toBe('原店铺聊天')
+    await desk.changeShop('102')
+    expect(desk.messages.value[0]?.text).toBe('数码店铺聊天')
+    await desk.changeShop('100')
+    expect(desk.messages.value[0]?.text).toBe('原店铺聊天')
+    expect(desk.shopOptions.value.map((shop) => shop.shopId)).toContain(102)
+    expect(mocks.sendConversationMessage).not.toHaveBeenCalled()
+  })
+
+  it('opens the same shop window on connection and keeps sending into that window', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    expect(desk.activeConversation.value?.id).toBe(conversation.id)
+    expect(mocks.openShopWindow).toHaveBeenCalledOnce()
     await desk.sendMessage('你好')
-    expect(mocks.createConversation).toHaveBeenCalledOnce()
-    expect(mocks.sendConversationMessage).toHaveBeenCalledWith(
-      '100',
+    await desk.sendMessage('继续这家店铺的咨询')
+    expect(mocks.openShopWindow).toHaveBeenCalledOnce()
+    expect(mocks.sendConversationMessage.mock.calls.map((call) => call[1])).toEqual([
       conversation.id,
-      expect.stringMatching(/^[\da-f-]{36}$/i),
-      '你好',
-      undefined,
-      expect.any(AbortSignal),
-      false,
-    )
-    expect(desk.messages.value).toHaveLength(2)
+      conversation.id,
+    ])
+    expect(desk.messages.value).toHaveLength(4)
     expect(desk.messages.value.every((message) => !message.historical && !message.pending)).toBe(
       true,
     )
-    desk.clearConversation()
-    expect(desk.messages.value).toEqual([])
-    expect(desk.activeConversation.value).toBeNull()
-    expect(desk.conversations.value).toEqual([conversation])
-    expect(mocks.createConversation).toHaveBeenCalledOnce()
-    await desk.sendMessage('另一段咨询')
-    expect(mocks.createConversation).toHaveBeenCalledTimes(2)
   })
 
-  it('loads older messages by the returned UUID cursor, prepends in server order, and deduplicates', async () => {
+  it('loads older messages across legacy sessions using the returned UUID cursor and deduplicates', async () => {
     const recent = storedPair('新消息')
-    const earlier = storedPair('旧消息')
+    const earlier = storedPair('以前另一会话的消息')
     const cursor = recent[0]!.id
-    mocks.conversations.mockResolvedValueOnce({ conversations: [conversation], nextBeforeId: null })
     const first: ConversationMessagePage = { conversation, messages: recent, nextBeforeId: cursor }
-    mocks.conversationMessages.mockResolvedValueOnce(first).mockResolvedValueOnce({
+    mocks.shopWindowMessages.mockResolvedValueOnce(first).mockResolvedValueOnce({
       conversation,
       messages: [...earlier, recent[0]],
       nextBeforeId: null,
@@ -618,105 +636,140 @@ describe('useSupportDesk', () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')
     await desk.loadEarlierMessages()
-    expect(mocks.conversationMessages.mock.calls[1]).toEqual([
-      '100',
-      conversation.id,
-      cursor,
-      expect.any(AbortSignal),
-    ])
+    expect(mocks.shopWindowMessages.mock.calls[1]).toEqual(['100', cursor, expect.any(AbortSignal)])
     expect(desk.messages.value.map((message) => message.id)).toEqual(
       [...earlier, ...recent].map((message) => message.id),
     )
     await desk.loadEarlierMessages()
-    expect(mocks.conversationMessages).toHaveBeenCalledTimes(2)
+    expect(mocks.shopWindowMessages).toHaveBeenCalledTimes(2)
   })
 
-  it('loads more conversations with the returned cursor without reopening the selected history', async () => {
-    const older = { ...conversation, id: '00000000-0000-4000-8000-000000000002' }
-    mocks.conversations
-      .mockResolvedValueOnce({ conversations: [conversation], nextBeforeId: conversation.id })
-      .mockResolvedValueOnce({ conversations: [conversation, older], nextBeforeId: null })
+  it('uses the explicit current-window topic instead of inheriting a legacy session topic', async () => {
+    mocks.shopWindowMessages.mockResolvedValueOnce({
+      conversation,
+      messages: storedPair('旧会话订单', { ...textReply, context: orderTopic() }),
+      nextBeforeId: null,
+      context: noTopic,
+    })
     const desk = createDesk()
     await desk.connect('buyer', 'test')
-    await desk.loadConversations(true)
-    expect(mocks.conversations.mock.calls[1]).toEqual([
+    expect(desk.messages.value).toHaveLength(2)
+    expect(desk.conversationContext.value).toEqual(noTopic)
+    expect(desk.selectedOrder.value).toBeNull()
+  })
+
+  it('deletes only the current window on explicit action and uses a fresh id for the next message', async () => {
+    mocks.shopWindowMessages.mockResolvedValueOnce({
+      conversation,
+      messages: storedPair('旧记录'),
+      nextBeforeId: null,
+    })
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    expect(mocks.deleteShopWindow).not.toHaveBeenCalled()
+    const ordersBefore = desk.orders.value
+    expect(await desk.deleteCurrentConversation()).toBe(true)
+    expect(mocks.deleteShopWindow).toHaveBeenCalledWith(
       '100',
       conversation.id,
       expect.any(AbortSignal),
-    ])
-    expect(desk.conversations.value).toEqual([conversation, older])
-    expect(mocks.conversationMessages).toHaveBeenCalledOnce()
-    await desk.loadConversations(true)
-    expect(mocks.conversations).toHaveBeenCalledTimes(2)
+    )
+    expect(desk.messages.value).toEqual([])
+    expect(desk.activeConversation.value).toBeNull()
+    expect(desk.orders.value).toEqual(ordersBefore)
+    const fresh = { ...conversation, id: '00000000-0000-4000-8000-000000000008' }
+    mocks.openShopWindow.mockResolvedValueOnce(fresh)
+    await desk.sendMessage('重新咨询')
+    expect(mocks.sendConversationMessage.mock.lastCall?.[1]).toBe(fresh.id)
+    expect(mocks.deleteShopWindow).toHaveBeenCalledOnce()
   })
 
-  it('preserves creation-order pagination when an older conversation receives a new reply', async () => {
-    const older = { ...conversation, id: '00000000-0000-4000-8000-000000000002' }
-    mocks.conversations.mockResolvedValueOnce({
-      conversations: [conversation, older],
-      nextBeforeId: older.id,
-    })
-    mocks.conversationMessages
-      .mockResolvedValueOnce({ conversation, messages: [], nextBeforeId: null })
-      .mockResolvedValueOnce({ conversation: older, messages: [], nextBeforeId: null })
-    const desk = createDesk()
-    await desk.connect('buyer', 'test')
-    await desk.selectConversation(older.id)
-    await desk.sendMessage('继续咨询')
-    expect(desk.conversations.value.map((item) => item.id)).toEqual([conversation.id, older.id])
-    expect(desk.activeConversation.value?.id).toBe(older.id)
-    expect(desk.nextConversationBeforeId.value).toBe(older.id)
-    expect(mocks.createConversation).not.toHaveBeenCalled()
-  })
-
-  it('does not let a late history response replace another selected conversation', async () => {
-    const other = { ...conversation, id: '00000000-0000-4000-8000-000000000002' }
-    mocks.conversations.mockResolvedValueOnce({
-      conversations: [conversation, other],
+  it('does not replay a delete with an uncertain outcome and verifies it through a read', async () => {
+    mocks.shopWindowMessages.mockResolvedValueOnce({
+      conversation,
+      messages: storedPair('旧记录'),
       nextBeforeId: null,
     })
     const desk = createDesk()
     await desk.connect('buyer', 'test')
+    mocks.deleteShopWindow.mockRejectedValueOnce(new ApiError('network', 0, 'NETWORK_ERROR'))
+    expect(await desk.deleteCurrentConversation()).toBe(false)
+    expect(desk.messages.value).toHaveLength(2)
+    expect(desk.error.value).toContain('删除结果暂时无法确认')
+    mocks.shopWindowMessages.mockResolvedValueOnce({
+      conversation: null,
+      messages: [],
+      nextBeforeId: null,
+      context: noTopic,
+    })
+    await desk.loadEarlierMessages(false)
+    expect(desk.messages.value).toEqual([])
+    expect(desk.activeConversation.value).toBeNull()
+    expect(mocks.deleteShopWindow).toHaveBeenCalledOnce()
+  })
+
+  it('blocks duplicate deletes, sends and shop switches until a pending delete finishes', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const pending = deferred<void>()
+    mocks.deleteShopWindow.mockReturnValueOnce(pending.promise)
+    const deleting = desk.deleteCurrentConversation()
+    expect(desk.deletingConversation.value).toBe(true)
+    expect(await desk.deleteCurrentConversation()).toBe(false)
+    await desk.sendMessage('不能在删除中发送')
+    await desk.changeShop('101')
+    expect(desk.shopId.value).toBe('100')
+    expect(mocks.sendConversationMessage).not.toHaveBeenCalled()
+    pending.resolve()
+    expect(await deleting).toBe(true)
+    expect(desk.deletingConversation.value).toBe(false)
+    expect(mocks.deleteShopWindow).toHaveBeenCalledOnce()
+  })
+
+  it('does not let a late history response replace the next shop window', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const other = { ...conversation, shopId: 101, id: '00000000-0000-4000-8000-000000000002' }
     const pending = deferred<ConversationMessagePage>()
-    mocks.conversationMessages.mockReturnValueOnce(pending.promise).mockResolvedValueOnce({
+    mocks.shopWindowMessages.mockReturnValueOnce(pending.promise).mockResolvedValueOnce({
       conversation: other,
-      messages: storedPair('另一个会话'),
+      messages: storedPair('另一店铺'),
       nextBeforeId: null,
     })
-    const oldLoad = desk.selectConversation(conversation.id)
-    const oldSignal = mocks.conversationMessages.mock.calls[1]?.[3] as AbortSignal
-    await desk.selectConversation(other.id)
+    const oldLoad = desk.loadEarlierMessages(false)
+    const oldSignal = mocks.shopWindowMessages.mock.calls[1]?.[2] as AbortSignal
+    mocks.openShopWindow.mockResolvedValueOnce(other)
+    await desk.changeShop('101')
     expect(oldSignal.aborted).toBe(true)
     pending.resolve({ conversation, messages: storedPair('不应出现'), nextBeforeId: null })
     await oldLoad
     expect(desk.activeConversation.value?.id).toBe(other.id)
-    expect(desk.messages.value[0]?.text).toBe('另一个会话')
+    expect(desk.messages.value[0]?.text).toBe('另一店铺')
     expect(desk.historyLoading.value).toBe(false)
   })
 
   it.each(['logout', 'shop switch'] as const)(
-    'discards late conversation-list results after %s',
+    'discards late window-open results after %s',
     async (transition) => {
       const desk = createDesk()
       await desk.connect('buyer', 'test')
-      const pending = deferred<{ conversations: Conversation[]; nextBeforeId: null }>()
-      mocks.conversations.mockReturnValueOnce(pending.promise)
+      const pending = deferred<Conversation>()
+      mocks.openShopWindow.mockReturnValueOnce(pending.promise)
       const oldLoad = desk.loadConversations()
       if (transition === 'logout') {
         desk.disconnect()
         await desk.connect('another-buyer', 'test')
       } else await desk.changeShop('101')
-      pending.resolve({ conversations: [conversation], nextBeforeId: null })
+      pending.resolve({ ...conversation, id: '00000000-0000-4000-8000-000000000009' })
       await oldLoad
-      expect(desk.conversations.value).toEqual([])
+      expect(desk.activeConversation.value?.id).toBe(conversation.id)
+      expect(desk.activeConversation.value?.shopId).toBe(Number(desk.shopId.value))
       expect(desk.messages.value).toEqual([])
-      expect(desk.activeConversation.value).toBeNull()
     },
   )
 
   it('keeps historical snapshots immutable when a current order is confirmed', async () => {
-    mocks.conversations.mockResolvedValueOnce({ conversations: [conversation], nextBeforeId: null })
-    mocks.conversationMessages.mockResolvedValueOnce({
+    mocks.shopWindowMessages.mockResolvedValueOnce({
       conversation,
       messages: storedPair('订单', { ...textReply, type: 'ORDER_DETAILS', orders: [order] }),
       nextBeforeId: null,
@@ -757,8 +810,24 @@ describe('useSupportDesk', () => {
     expect(mocks.sendConversationMessage).toHaveBeenCalledOnce()
   })
 
+  it('keeps model-outage guidance visible and verifies history without replaying the message', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    mocks.sendConversationMessage.mockRejectedValueOnce(
+      new ApiError('provider detail', 503, 'MODEL_UNAVAILABLE'),
+    )
+    await desk.sendMessage('查物流 SF10001')
+    expect(desk.error.value).toContain('智能服务暂时不可用')
+    expect(desk.error.value).toContain('订单页直接查看订单')
+    expect(desk.error.value).toContain('不要重复发送')
+    expect(desk.error.value).not.toContain('provider detail')
+    expect(desk.messages.value).toEqual([])
+    expect(desk.connected.value).toBe(true)
+    await desk.loadEarlierMessages(false)
+    expect(mocks.sendConversationMessage).toHaveBeenCalledOnce()
+  })
+
   it('blocks conversation switches while a refund business write has an uncertain outcome', async () => {
-    mocks.conversations.mockResolvedValueOnce({ conversations: [conversation], nextBeforeId: null })
     const desk = createDesk()
     await desk.connect('buyer', 'test')
     await desk.openRefundForm(order)
@@ -768,10 +837,10 @@ describe('useSupportDesk', () => {
     const submission = desk.submitRefund()
     const signal = mocks.applyAfterSale.mock.calls[0]?.[3] as AbortSignal
     desk.clearConversation()
-    await desk.selectConversation(conversation.id)
+    await desk.deleteCurrentConversation()
     expect(signal.aborted).toBe(false)
     expect(desk.refundSubmitting.value).toBe(true)
-    expect(mocks.conversationMessages).toHaveBeenCalledOnce()
+    expect(mocks.shopWindowMessages).toHaveBeenCalledOnce()
     pending.resolve({ ...ticket, eligibility: eligible })
     await submission
   })
@@ -1296,7 +1365,7 @@ describe('useSupportDesk', () => {
     expect(desk.connected.value).toBe(false)
     expect(desk.loginError.value).toContain('商家管理端')
     expect(mocks.chat).not.toHaveBeenCalled()
-    expect(mocks.conversations).not.toHaveBeenCalled()
+    expect(mocks.openShopWindow).not.toHaveBeenCalled()
     expect(desk.username.value).toBe('')
   })
 

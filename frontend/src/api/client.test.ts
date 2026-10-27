@@ -86,6 +86,141 @@ const assistantMessage = {
 const storedPair = { conversation, messages: [userMessage, assistantMessage] }
 
 describe('ApiClient', () => {
+  it('opens one shop window, reads its combined history and deletes it once with fresh CSRF', async () => {
+    const context = { kind: 'NONE', orderNo: null, sourceIds: [], expiresAt: null }
+    const window = { ...storedPair, shopId: 100, nextBeforeId: null, context }
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json(conversation))
+      .mockResolvedValueOnce(json(window))
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    const api = new ApiClient('buyer', 'test', request)
+    await expect(api.openShopWindow('100')).resolves.toEqual(conversation)
+    await expect(api.shopWindowMessages('100')).resolves.toEqual(window)
+    await expect(api.deleteShopWindow('100', conversation.id)).resolves.toBeUndefined()
+    expect(request.mock.calls.map(([path, init]) => [path, init?.method])).toEqual([
+      ['/api/v1/security/csrf', 'GET'],
+      ['/api/v1/shops/100/chat/window', 'POST'],
+      ['/api/v1/shops/100/chat/window', 'GET'],
+      ['/api/v1/security/csrf', 'GET'],
+      [`/api/v1/shops/100/chat/window/${conversation.id}`, 'DELETE'],
+    ])
+    const deletion = request.mock.calls[4]?.[1]
+    expect(deletion?.headers).toMatchObject({ 'X-CSRF-TOKEN': csrf.token })
+    expect(deletion?.credentials).toBe('same-origin')
+  })
+
+  it('does not replay a delete when the network outcome is unknown', async () => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockRejectedValueOnce(new TypeError('network'))
+    await expect(
+      new ApiClient('buyer', 'test', request).deleteShopWindow('100', conversation.id),
+    ).rejects.toMatchObject({ code: 'NETWORK_ERROR' })
+    expect(request).toHaveBeenCalledTimes(2)
+    expect(request.mock.calls.filter(([, init]) => init?.method === 'DELETE')).toHaveLength(1)
+  })
+
+  it.each([
+    { shopId: 101, conversation, messages: [], nextBeforeId: null, context: null },
+    {
+      shopId: 100,
+      conversation: { ...conversation, shopId: 101 },
+      messages: [],
+      nextBeforeId: null,
+      context: null,
+    },
+    { shopId: 100, conversation, messages: [], nextBeforeId: null, context: { kind: 'ORDER' } },
+    {
+      shopId: 100,
+      conversation,
+      messages: [
+        { ...assistantMessage, response: { ...reply, orders: [{ ...order, shopId: 101 }] } },
+      ],
+      nextBeforeId: null,
+      context: null,
+    },
+  ])('rejects a foreign or malformed shop-window response', async (window) => {
+    const request = fetchMock().mockResolvedValue(json(window))
+    await expect(
+      new ApiClient('buyer', 'test', request).shopWindowMessages('100'),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+  })
+
+  it('accepts an empty deleted window without creating a replacement during a read', async () => {
+    const window = {
+      shopId: 100,
+      conversation: null,
+      messages: [],
+      nextBeforeId: null,
+      context: null,
+    }
+    const request = fetchMock().mockResolvedValue(json(window))
+    await expect(
+      new ApiClient('buyer', 'test', request).shopWindowMessages('100'),
+    ).resolves.toEqual(window)
+    expect(request.mock.calls.map(([, init]) => init?.method)).toEqual(['GET'])
+  })
+
+  it('reads the two new shop labels without exposing or requiring merchant credentials', async () => {
+    const shops = [
+      { shopId: 102, name: '数码优选店' },
+      { shopId: 103, name: '生活家居店' },
+    ]
+    const request = fetchMock().mockResolvedValue(json(shops))
+    await expect(new ApiClient('buyer', 'test', request).shops()).resolves.toEqual(shops)
+    expect(request.mock.calls.map(([path, init]) => [path, init?.method])).toEqual([
+      ['/api/v1/shops', 'GET'],
+    ])
+  })
+
+  it('rejects invalid window targets before sending any request', async () => {
+    const request = fetchMock()
+    const api = new ApiClient('buyer', 'test', request)
+    await expect(api.openShopWindow('0')).rejects.toBeInstanceOf(ApiError)
+    await expect(api.deleteShopWindow('100', '../../')).rejects.toBeInstanceOf(ApiError)
+    await expect(api.shopWindowMessages('100', 'bad-cursor')).rejects.toBeInstanceOf(ApiError)
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it('waits through a bounded Agent retry without aborting at the ordinary request timeout or replaying the message', async () => {
+    vi.useFakeTimers()
+    const signalTimeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((millis) => {
+      const controller = new AbortController()
+      setTimeout(() => controller.abort(), millis)
+      return controller.signal
+    })
+    try {
+      const request = fetchMock()
+        .mockResolvedValueOnce(json(csrf))
+        .mockImplementationOnce(
+          (_path, init) =>
+            new Promise<Response>((resolve, reject) => {
+              init?.signal?.addEventListener('abort', () =>
+                reject(new DOMException('Timeout', 'AbortError')),
+              )
+              setTimeout(() => resolve(json(storedPair)), 26_000)
+            }),
+        )
+      const pending = new ApiClient('buyer', 'test', request).sendConversationMessage(
+        '100',
+        conversation.id,
+        '00000000-0000-4000-8000-000000000034',
+        '咨询此订单',
+        'SF10001',
+      )
+      const result = expect(pending).resolves.toEqual(storedPair)
+      await vi.advanceTimersByTimeAsync(26_000)
+      await result
+      expect(request.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1)
+    } finally {
+      signalTimeout.mockRestore()
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
   it('reads conversation lists and history with opaque cursors and no CSRF or business POST', async () => {
     const request = fetchMock()
       .mockResolvedValueOnce(json({ conversations: [conversation], nextBeforeId: conversation.id }))
@@ -661,6 +796,17 @@ describe('ApiClient', () => {
     await expect(new ApiClient('buyer', 'test', request).authenticate()).rejects.toMatchObject({
       status: 503,
       message: '服务暂时不可用，请稍后重试。',
+    })
+  })
+
+  it('shows safe order-page guidance for a model outage without trusting provider text', async () => {
+    const request = fetchMock().mockResolvedValue(
+      json({ code: 'MODEL_UNAVAILABLE', message: 'private-provider-detail' }, 503),
+    )
+    await expect(new ApiClient('buyer', 'test', request).authenticate()).rejects.toMatchObject({
+      status: 503,
+      code: 'MODEL_UNAVAILABLE',
+      message: '智能服务暂时不可用，请稍后重试，或在订单页直接查看订单。',
     })
   })
 

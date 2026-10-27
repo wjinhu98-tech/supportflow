@@ -1122,7 +1122,7 @@ class OrderApiIT {
                 .andExpect(status().isServiceUnavailable())
                 .andExpect(jsonPath("$.code").value("MODEL_UNAVAILABLE"))
                 .andExpect(jsonPath("$.message").value(
-                        "智能查单暂时不可用，请稍后重试或使用固定查单指令"))
+                        "智能服务暂时不可用，请稍后重试，或在订单页直接查看订单。"))
                 .andExpect(jsonPath("$.stackTrace").doesNotExist())
                 .andExpect(jsonPath("$.cause").doesNotExist());
         chatPost("customer-200", "查订单 SF10001")

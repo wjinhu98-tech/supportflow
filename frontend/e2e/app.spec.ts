@@ -39,6 +39,36 @@ test('chat is the default view and order navigation opens a separate workspace',
   await expect(page.getByTestId('orders-panel')).not.toBeVisible()
 })
 
+test('shop options include the new shops and deleting a window requires explicit confirmation', async ({
+  page,
+  request,
+}) => {
+  await connect(page)
+  await send(page, '保留当前店铺聊天')
+  await expect(page.getByTestId('chat-message').last()).toContainText('保留当前店铺聊天')
+  await page.getByRole('button', { name: '切换店铺', exact: true }).click()
+  await expect(page.getByTestId('shop-option-102')).toContainText('数码优选店')
+  await expect(page.getByTestId('shop-option-103')).toContainText('生活家居店')
+  await page.getByTestId('shop-option-102').click()
+  await expect(page.getByTestId('shop-confirm')).not.toBeVisible()
+  await expect(page.getByTestId('chat-message')).toHaveCount(0)
+  await send(page, '数码店咨询')
+  await expect(page.getByTestId('chat-message').last()).toContainText('数码店咨询')
+  await switchShop(page, '100')
+  await expect(page.getByTestId('chat-message').last()).toContainText('保留当前店铺聊天')
+  await page.getByTestId('delete-conversation').click()
+  const dialog = page.getByRole('dialog', { name: '删除该店铺对话？' })
+  await dialog.getByRole('button', { name: '取消', exact: true }).click()
+  expect((await recorded(request)).filter((entry) => entry.method === 'DELETE')).toHaveLength(0)
+  await page.getByTestId('delete-conversation').click()
+  await page.getByTestId('confirm-delete-conversation').click()
+  await expect(dialog).not.toBeVisible()
+  await expect(page.getByTestId('chat-message')).toHaveCount(0)
+  expect((await recorded(request)).filter((entry) => entry.method === 'DELETE')).toHaveLength(1)
+  await switchShop(page, '102')
+  await expect(page.getByTestId('chat-message').last()).toContainText('数码店咨询')
+})
+
 test('switching workspaces preserves the draft and conversation without submitting again', async ({
   page,
   request,
@@ -259,7 +289,7 @@ test('shop switch clears old context and queries the same order number only in t
 
 test('empty shop has no invented order cards', async ({ page }) => {
   await connect(page)
-  await switchShop(page, '102')
+  await switchShop(page, '999')
   await showOrders(page)
   await expect(page.getByTestId('orders-panel').getByTestId('order-card')).toHaveCount(0)
   await expect(page.getByRole('heading', { name: '暂未加载到订单', exact: true })).toBeVisible()
@@ -269,6 +299,7 @@ for (const [message, expectedMessage] of [
   ['触发404', /未找到当前店铺内属于你的这笔订单/],
   ['触发403', /无权访问，或 CSRF 校验已失效/],
   ['触发503', /消息结果暂时无法确认/],
+  ['触发模型503', /智能服务暂时不可用.*订单页直接查看订单.*不要重复发送/],
 ] as const) {
   test(`API error ${message} is visible and keeps the connected account`, async ({ page }) => {
     await connect(page)
@@ -314,8 +345,7 @@ test('a failed message is checked through read-only history instead of replaying
   await expect
     .poll(async () =>
       (await recorded(request)).some(
-        (entry) =>
-          entry.method === 'GET' && /\/chat\/conversations\/[^/]+\/messages$/.test(entry.path),
+        (entry) => entry.method === 'GET' && /\/chat\/window$/.test(entry.path),
       ),
     )
     .toBe(true)

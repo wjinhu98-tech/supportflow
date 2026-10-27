@@ -36,8 +36,8 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * Durable, bounded read-only phases. The model proposes an identifier once; Java owns all transitions.
- * This is deliberately not an autonomous model loop or a replay mechanism for refund writes.
+ * Versioned read-only runtime. New runs use the observation-driven model loop;
+ * V12 checkpoints retain their original three-phase recovery contract. No refund writes are replayed.
  */
 @Service
 public class ReadOnlyAgentRuntime {
@@ -52,17 +52,30 @@ public class ReadOnlyAgentRuntime {
     private final OrderQueryService orders;
     private final AgentRuntimeProperties properties;
     private final Clock clock;
+    private final AgentLoopExecutor loop;
 
-    @Autowired
     public ReadOnlyAgentRuntime(AgentRunStore store, ToolPlanner planner, OrderTool orderTool,
                                 LogisticsTool logistics, OrderQueryService orders,
                                 AgentRuntimeProperties properties) {
         this(store, planner, orderTool, logistics, orders, properties, Clock.systemUTC());
     }
 
+    @Autowired
+    public ReadOnlyAgentRuntime(AgentRunStore store, ToolPlanner planner, OrderTool orderTool,
+                                LogisticsTool logistics, OrderQueryService orders,
+                                AgentRuntimeProperties properties, AgentLoopExecutor loop) {
+        this(store, planner, orderTool, logistics, orders, properties, Clock.systemUTC(), Objects.requireNonNull(loop));
+    }
+
     ReadOnlyAgentRuntime(AgentRunStore store, ToolPlanner planner, OrderTool orderTool,
                          LogisticsTool logistics, OrderQueryService orders,
                          AgentRuntimeProperties properties, Clock clock) {
+        this(store, planner, orderTool, logistics, orders, properties, clock, null);
+    }
+
+    private ReadOnlyAgentRuntime(AgentRunStore store, ToolPlanner planner, OrderTool orderTool,
+                                 LogisticsTool logistics, OrderQueryService orders,
+                                 AgentRuntimeProperties properties, Clock clock, AgentLoopExecutor loop) {
         this.store = Objects.requireNonNull(store);
         this.planner = Objects.requireNonNull(planner);
         this.orderTool = Objects.requireNonNull(orderTool);
@@ -70,6 +83,7 @@ public class ReadOnlyAgentRuntime {
         this.orders = Objects.requireNonNull(orders);
         this.properties = Objects.requireNonNull(properties);
         this.clock = Objects.requireNonNull(clock);
+        this.loop = loop;
     }
 
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
@@ -77,7 +91,8 @@ public class ReadOnlyAgentRuntime {
         requireOwner(principal, input.key());
         // A selection is an untrusted identifier, not an authorization to read it or send it to a model.
         if (input.selectedOrderNo() != null) ownedOrder(principal, input.key(), input.selectedOrderNo());
-        store.create(input, properties.maxSteps(), properties.totalTimeoutSeconds());
+        if (loop == null) store.create(input, properties.maxSteps(), properties.totalTimeoutSeconds());
+        else loop.create(input);
         AgentRun claimed = store.claim(input.key(), false);
         validateCheckpointScope(claimed, input.key());
         return advance(principal, claimed);
@@ -124,17 +139,24 @@ public class ReadOnlyAgentRuntime {
     public AgentRunView view(CustomerPrincipal principal, AgentRunKey key) {
         AgentRun run = findOwned(principal, key);
         Instant now = clock.instant();
-        boolean remaining = now.isBefore(run.deadlineAt()) && run.attempts() < run.maxSteps();
+        boolean remaining = now.isBefore(run.deadlineAt()) && run.attempts() < run.maxSteps()
+                && (run.workflowVersion() == 1 || run.phase() != AgentPhase.PLAN || run.budget().canReserve());
         boolean resumable = run.status() == AgentRunStatus.SUCCEEDED
                 || remaining && (run.status() == AgentRunStatus.PAUSED
                 || run.status() == AgentRunStatus.RUNNING && run.leaseUntil() != null
                 && !now.isBefore(run.leaseUntil()));
         return new AgentRunView(run.id(), key.clientMessageId(), run.status(), run.phase(), run.attempts(),
                 run.maxSteps(), run.deadlineAt(), resumable,
-                run.status() == AgentRunStatus.SUCCEEDED ? run.result() : null, store.steps(key));
+                run.status() == AgentRunStatus.SUCCEEDED ? run.result() : null, store.steps(key),
+                run.workflowVersion(), AgentBudgetView.from(run.budget()));
     }
 
     private AgentRun advance(CustomerPrincipal principal, AgentRun initial) {
+        if (initial.workflowVersion() == 2) {
+            if (loop == null) throw new IllegalStateException("Observation-driven runtime unavailable");
+            recheckKnownOrder(principal, initial);
+            return loop.advance(principal, initial);
+        }
         AgentRun run = initial;
         requireOwner(principal, run.key());
         try {

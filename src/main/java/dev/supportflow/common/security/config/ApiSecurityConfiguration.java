@@ -84,6 +84,15 @@ public class ApiSecurityConfiguration {
                                 HttpMethod.GET, "/api/v1/security/csrf", "/api/v1/security/me"
                         ).authenticated()
                         .requestMatchers(HttpMethod.GET,
+                                "/api/v1/shops")
+                        .access(accountAccess(AccountType.BUYER, SecurityPermission.ORDER_READ))
+                        .requestMatchers(HttpMethod.GET, "/api/v1/shops/*/chat/window")
+                        .access(accountAccess(AccountType.BUYER))
+                        .requestMatchers(HttpMethod.POST, "/api/v1/shops/*/chat/window")
+                        .access(accountAccess(AccountType.BUYER))
+                        .requestMatchers(HttpMethod.DELETE, "/api/v1/shops/*/chat/window/*")
+                        .access(accountAccess(AccountType.BUYER))
+                        .requestMatchers(HttpMethod.GET,
                                 "/api/v1/shops/*/chat/conversations/*/runs/*")
                         .access(accountAccess(AccountType.BUYER, SecurityPermission.ORDER_READ))
                         .requestMatchers(HttpMethod.POST,

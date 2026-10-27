@@ -9,6 +9,8 @@ import type {
   ConversationPage,
   ConversationMessages,
   ConversationMessagePage,
+  ShopConversationWindow,
+  ShopOption,
   StoredChatMessage,
   CsrfResponse,
   CurrentAccount,
@@ -650,6 +652,91 @@ export class ApiClient {
     return { conversations, nextBeforeId: parseCursor(data.nextBeforeId) }
   }
 
+  async shops(signal?: AbortSignal): Promise<ShopOption[]> {
+    const data = await this.queued(() => this.request('/api/v1/shops', { method: 'GET' }, signal))
+    if (
+      !Array.isArray(data) ||
+      data.length > 50 ||
+      data.some(
+        (shop) =>
+          !isRecord(shop) ||
+          !Number.isSafeInteger(shop.shopId) ||
+          Number(shop.shopId) <= 0 ||
+          typeof shop.name !== 'string' ||
+          !shop.name.trim() ||
+          shop.name.length > 128,
+      ) ||
+      new Set(data.map((shop) => shop.shopId)).size !== data.length
+    )
+      throw new ApiError('店铺列表格式不正确。', 0, 'INVALID_RESPONSE')
+    return data.map((shop) => ({ shopId: shop.shopId, name: shop.name }))
+  }
+
+  async openShopWindow(shopId: string, signal?: AbortSignal): Promise<Conversation> {
+    const path = this.windowPath(shopId)
+    return this.queued(async () => {
+      if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
+      const csrf = await this.getCsrf(signal)
+      return parseConversation(
+        await this.request(
+          path,
+          {
+            method: 'POST',
+            headers: { [csrf.headerName]: csrf.token },
+          },
+          signal,
+        ),
+        shopId,
+      )
+    })
+  }
+
+  async shopWindowMessages(
+    shopId: string,
+    beforeId: string | null = null,
+    signal?: AbortSignal,
+  ): Promise<ShopConversationWindow> {
+    const path = this.windowPath(shopId)
+    const suffix = beforeId === null ? '' : `?beforeId=${this.validConversationId(beforeId)}`
+    const data = await this.queued(() => this.request(path + suffix, { method: 'GET' }, signal))
+    if (
+      !isRecord(data) ||
+      data.shopId !== Number(shopId) ||
+      !validConversationContext(data.context)
+    )
+      throw new ApiError('店铺对话格式不正确。', 0, 'INVALID_RESPONSE')
+    return {
+      shopId: Number(shopId),
+      conversation:
+        data.conversation === null ? null : parseConversation(data.conversation, shopId),
+      messages: parseStoredMessages(data.messages, shopId),
+      nextBeforeId: parseCursor(data.nextBeforeId),
+      context: data.context,
+    }
+  }
+
+  async deleteShopWindow(
+    shopId: string,
+    conversationId: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const path = `${this.windowPath(shopId)}/${this.validConversationId(conversationId)}`
+    await this.queued(async () => {
+      if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
+      const csrf = await this.getCsrf(signal)
+      await this.request(
+        path,
+        { method: 'DELETE', headers: { [csrf.headerName]: csrf.token } },
+        signal,
+      )
+    })
+  }
+
+  private windowPath(shopId: string): string {
+    if (!validShopId(shopId)) throw new ApiError('店铺 ID 必须为有效的正整数。')
+    return `/api/v1/shops/${shopId}/chat/window`
+  }
+
   async createConversation(shopId: string, signal?: AbortSignal): Promise<Conversation> {
     const path = this.conversationPath(shopId)
     return this.queued(async () => {
@@ -714,6 +801,7 @@ export class ApiClient {
           }),
         },
         signal,
+        105_000, // The server's Agent deadline is at most 100s, including its bounded retries.
       )
       if (!isRecord(data))
         throw new ApiError('回复结果无法确认，请刷新咨询记录核实。', 0, 'INVALID_RESPONSE')
@@ -985,8 +1073,13 @@ export class ApiClient {
     return data as unknown as CsrfResponse
   }
 
-  private async request(path: string, init: RequestInit, signal?: AbortSignal): Promise<unknown> {
-    const deadline = AbortSignal.timeout(25_000)
+  private async request(
+    path: string,
+    init: RequestInit,
+    signal?: AbortSignal,
+    timeoutMillis = 25_000,
+  ): Promise<unknown> {
+    const deadline = AbortSignal.timeout(timeoutMillis)
     const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline
     try {
       // Native browser fetch must not be invoked with the ApiClient instance as `this`.
@@ -1000,6 +1093,7 @@ export class ApiClient {
         headers: { ...init.headers, Authorization: this.authorization, Accept: 'application/json' },
       })
       const contentType = response.headers.get('content-type') ?? ''
+      if (response.status === 204 && response.ok) return undefined
       let data: unknown = null
       if (contentType.includes('application/json')) {
         try {
@@ -1020,7 +1114,13 @@ export class ApiClient {
             ? serverMessage
             : response.status === 404 && code === 'REVIEW_NOT_FOUND'
               ? '未找到该售后申请，请刷新审核列表后重试。'
-              : statusMessages[response.status]) ??
+              : response.status === 404 && code === 'CONVERSATION_NOT_FOUND'
+                ? '未找到该店铺对话，可能已被删除，请刷新后继续。'
+                : response.status === 409 && code === 'CONVERSATION_CONFLICT'
+                  ? '对话状态已变化，或仍有消息正在处理。请刷新后再试。'
+                  : response.status === 503 && code === 'MODEL_UNAVAILABLE'
+                    ? '智能服务暂时不可用，请稍后重试，或在订单页直接查看订单。'
+                    : statusMessages[response.status]) ??
             (response.status === 400 && serverMessage
               ? serverMessage
               : '请求未能完成，请稍后重试。'),

@@ -82,6 +82,19 @@ export interface ConversationPage {
   nextBeforeId: string | null
 }
 
+export interface ShopOption {
+  shopId: number
+  name: string
+}
+
+export interface ShopConversationWindow {
+  shopId: number
+  conversation: Conversation | null
+  messages: StoredChatMessage[]
+  nextBeforeId: string | null
+  context: ConversationContextRef | null
+}
+
 export interface StoredChatMessage {
   id: string
   role: 'USER' | 'ASSISTANT'

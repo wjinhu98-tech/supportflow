@@ -1,8 +1,7 @@
 package dev.supportflow.chat.api;
 
 import dev.supportflow.SupportFlowApplication;
-import dev.supportflow.assistant.planning.ToolName;
-import dev.supportflow.assistant.planning.ToolPlanner;
+import dev.supportflow.assistant.runtime.planning.AgentDecisionPlanner;
 import dev.supportflow.assistant.tool.LogisticsTool;
 import dev.supportflow.chat.api.response.ChatResponse;
 import dev.supportflow.chat.application.model.ChatReply;
@@ -99,7 +98,7 @@ class AgentRuntimeApiIT {
     private static boolean prepared;
     @Autowired private WebApplicationContext context;
     @Autowired private ObjectMapper json;
-    @MockitoSpyBean private ToolPlanner planner;
+    @MockitoSpyBean private AgentDecisionPlanner planner;
     @MockitoSpyBean private LogisticsTool logistics;
     @MockitoSpyBean private ConversationStore conversations;
     private MockMvc mvc;
@@ -157,7 +156,7 @@ class AgentRuntimeApiIT {
     }
 
     @Test
-    void shouldPersistThreeCheckpointsAndKeepTheExistingConversationResponseAndReplayContract() throws Exception {
+    void shouldPersistObservedDecisionLoopAndKeepTheExistingConversationResponseAndReplayContract() throws Exception {
         long shop = SHOPS.incrementAndGet();
         Fixture order = order(shop, 200);
         String conversation = create(shop);
@@ -170,11 +169,13 @@ class AgentRuntimeApiIT {
         assertThat(run.path("clientMessageId").asString()).isEqualTo(message);
         assertThat(run.path("status").asString()).isEqualTo("SUCCEEDED");
         assertThat(run.path("phase").asString()).isEqualTo("COMPLETE");
-        assertThat(run.path("attempts").asInt()).isEqualTo(3);
-        assertThat(run.path("maxSteps").asInt()).isGreaterThanOrEqualTo(3);
+        assertThat(run.path("attempts").asInt()).isEqualTo(5);
+        assertThat(run.path("maxSteps").asInt()).isGreaterThanOrEqualTo(5);
+        assertThat(run.path("workflowVersion").asInt()).isEqualTo(2);
+        assertThat(run.path("budget").path("chargedTokens").asLong()).isZero();
         assertThat(Instant.parse(run.path("deadlineAt").asString())).isAfter(Instant.now().minusSeconds(120));
         assertThat(run.path("resumable").asBoolean()).isFalse();
-        assertThat(phases(run.path("steps"))).containsExactly("PLAN", "ORDER_LOOKUP", "LOGISTICS_LOOKUP");
+        assertThat(phases(run.path("steps"))).containsExactly("PLAN", "ORDER_LOOKUP", "PLAN", "LOGISTICS_LOOKUP", "PLAN");
         for (JsonNode step : run.path("steps")) {
             assertThat(step.path("status").asString()).isEqualTo("SUCCEEDED");
             assertThat(UUID.fromString(step.path("operationId").asString())).isNotNull();
@@ -186,7 +187,7 @@ class AgentRuntimeApiIT {
         assertThat(replay).isEqualTo(response);
         assertThat(view("buyer", shop, conversation, message)).isEqualTo(run);
         assertThat(messageCount(conversation)).isEqualTo(2);
-        verify(planner, times(1)).plan(eq(ToolName.LOGISTICS_LOOKUP), anyString(), eq(order.number()));
+        verify(planner, times(3)).decide(argThat(input -> order.number().equals(input.selectedOrderNo())));
         verify(logistics, times(1)).lookup(argThat(value -> value.orderNo().equals(order.number())));
     }
 
@@ -247,7 +248,7 @@ class AgentRuntimeApiIT {
         assertThat(paused.path("status").asString()).isEqualTo("PAUSED");
         assertThat(paused.path("phase").asString()).isEqualTo("LOGISTICS_LOOKUP");
         assertThat(paused.path("resumable").asBoolean()).isTrue();
-        assertThat(paused.path("attempts").asInt()).isEqualTo(3);
+        assertThat(paused.path("attempts").asInt()).isEqualTo(4);
         assertThat(messageCount(conversation)).isZero();
         send("buyer", shop, conversation, message, "查物流", order.number()).andExpect(status().isConflict());
 
@@ -256,15 +257,15 @@ class AgentRuntimeApiIT {
         assertCompletedTurn(completed, order.number());
         JsonNode recovered = view("buyer", shop, conversation, message);
         assertThat(recovered.path("status").asString()).isEqualTo("SUCCEEDED");
-        assertThat(recovered.path("attempts").asInt()).isEqualTo(4);
+        assertThat(recovered.path("attempts").asInt()).isEqualTo(6);
         assertThat(recovered.path("deadlineAt")).isEqualTo(paused.path("deadlineAt"));
         assertThat(phases(recovered.path("steps")))
-                .containsExactly("PLAN", "ORDER_LOOKUP", "LOGISTICS_LOOKUP", "LOGISTICS_LOOKUP");
+                .containsExactly("PLAN", "ORDER_LOOKUP", "PLAN", "LOGISTICS_LOOKUP", "LOGISTICS_LOOKUP", "PLAN");
         JsonNode replay = body(resume("buyer", shop, conversation, message)
                 .andExpect(status().isOk()).andReturn());
         assertThat(replay).isEqualTo(completed);
         assertThat(messageCount(conversation)).isEqualTo(2);
-        verify(planner, times(1)).plan(eq(ToolName.LOGISTICS_LOOKUP), anyString(), eq(order.number()));
+        verify(planner, times(3)).decide(argThat(input -> order.number().equals(input.selectedOrderNo())));
         verify(logistics, times(2)).lookup(argThat(value -> value.orderNo().equals(order.number())));
         assertPrivateFieldsAbsent(recovered);
     }
@@ -288,7 +289,7 @@ class AgentRuntimeApiIT {
         JsonNode saved = view("buyer", shop, conversation, message);
         assertThat(saved.path("status").asString()).isEqualTo("SUCCEEDED");
         assertThat(saved.path("phase").asString()).isEqualTo("COMPLETE");
-        assertThat(saved.path("attempts").asInt()).isEqualTo(3);
+        assertThat(saved.path("attempts").asInt()).isEqualTo(5);
         assertThat(saved.path("resumable").asBoolean()).isTrue();
         assertThat(messageCount(conversation)).isZero();
         send("buyer", shop, conversation, message, "查物流", order.number()).andExpect(status().isConflict());
@@ -297,13 +298,13 @@ class AgentRuntimeApiIT {
                 .andExpect(status().isOk()).andReturn());
         assertCompletedTurn(completed, order.number());
         JsonNode finalized = view("buyer", shop, conversation, message);
-        assertThat(finalized.path("attempts").asInt()).isEqualTo(3);
+        assertThat(finalized.path("attempts").asInt()).isEqualTo(5);
         assertThat(finalized.path("steps")).isEqualTo(saved.path("steps"));
         assertThat(finalized.path("resumable").asBoolean()).isFalse();
         assertThat(body(resume("buyer", shop, conversation, message).andExpect(status().isOk()).andReturn()))
                 .isEqualTo(completed);
         assertThat(messageCount(conversation)).isEqualTo(2);
-        verify(planner, times(1)).plan(eq(ToolName.LOGISTICS_LOOKUP), anyString(), eq(order.number()));
+        verify(planner, times(3)).decide(argThat(input -> order.number().equals(input.selectedOrderNo())));
         verify(logistics, times(1)).lookup(argThat(value -> value.orderNo().equals(order.number())));
     }
 
@@ -320,7 +321,7 @@ class AgentRuntimeApiIT {
         resume("buyer", shop, conversation, message).andExpect(status().isConflict());
         assertThat(messageCount(conversation)).isEqualTo(2);
         verify(logistics, times(1)).lookup(argThat(value -> value.orderNo().equals(order.number())));
-        verify(planner, times(1)).plan(eq(ToolName.LOGISTICS_LOOKUP), anyString(), eq(order.number()));
+        verify(planner, times(2)).decide(argThat(input -> order.number().equals(input.selectedOrderNo())));
     }
 
     @Test

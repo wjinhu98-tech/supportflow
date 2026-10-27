@@ -13,7 +13,7 @@ public enum ErrorCode {
     ORDER_NOT_FOUND("ORDER_NOT_FOUND", "订单不存在或无权访问"),
     AUTHENTICATION_REQUIRED("AUTHENTICATION_REQUIRED", "请先完成身份认证"),
     ACCESS_DENIED("ACCESS_DENIED", "无权执行此操作"),
-    MODEL_UNAVAILABLE("MODEL_UNAVAILABLE", "智能查单暂时不可用，请稍后重试或使用固定查单指令"),
+    MODEL_UNAVAILABLE("MODEL_UNAVAILABLE", "智能服务暂时不可用，请稍后重试，或在订单页直接查看订单。"),
     REQUEST_REJECTED("REQUEST_REJECTED", "请求无法处理"),
     REVIEW_NOT_FOUND("REVIEW_NOT_FOUND", "售后申请不存在"),
     REVIEW_CONFLICT("REVIEW_CONFLICT", "售后申请已处理或状态已变化"),

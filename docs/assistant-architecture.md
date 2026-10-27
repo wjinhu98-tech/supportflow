@@ -89,7 +89,7 @@ Vue 店铺客服页面
 
 根目录 `mvn -o verify`：单元、安全/数据库/迁移/并发集成测试。前端 `npm.cmd run check`、`npm.cmd run build`、`npm.cmd run test:e2e`：类型、状态流、构建、模拟接口浏览器测试。
 
-真正的浏览器/Java/MySQL闭环使用 `FrontendTestServer`。它创建一次性MySQL、执行V1–V12、开启模拟执行Worker、强制关闭DeepSeek、不加载 `.local`，只监听 `127.0.0.1:18081`。启动方式见[前端运行说明](../frontend/README.md)。公开测试账号包括买家、不同商家的员工、无授权员工，以及 `frontend-editor` 知识专职和 `frontend-review-only` 审核专职账号。密码均为源码中的测试专用 `Frontend-Test-Only!`，只能用于该临时实例。不要复制到本地真实配置。
+真正的浏览器/Java/MySQL闭环使用 `FrontendTestServer`。它创建一次性MySQL、执行V1–V15、开启模拟执行Worker、强制关闭DeepSeek、不加载 `.local`，只监听 `127.0.0.1:18081`。启动方式见[前端运行说明](../frontend/README.md)。公开测试账号包括买家、不同商家的员工、无授权员工，以及 `frontend-editor` 知识专职和 `frontend-review-only` 审核专职账号。密码均为源码中的测试专用 `Frontend-Test-Only!`，只能用于该临时实例。不要复制到本地真实配置。
 
 DeepSeek function calling 的协议已由 mock HTTP 单测验证，没有为这轮验收消耗真实模型额度。[DeepSeek 官方工具调用文档](https://api-docs.deepseek.com/guides/tool_calls/)
 

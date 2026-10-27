@@ -36,11 +36,10 @@ public class AgentRunConversationService {
         AgentRunKey key = key(principal, shopId, conversationId, clientMessageId);
         AgentRunView view = runtime.view(principal, key);
         boolean completed = conversations.completed(key.buyerId(), shopId, conversationId, clientMessageId);
-        return new AgentRunView(view.runId(), view.clientMessageId(), view.status(), view.phase(), view.attempts(),
-                view.maxSteps(), view.deadlineAt(), !completed && view.resumable()
+        return view.withResumable(!completed && view.resumable()
                         && conversations.latest(key.buyerId(), shopId, conversationId, clientMessageId)
                         && conversations.recoverable(key.buyerId(), shopId, conversationId, clientMessageId,
-                                view.status() != AgentRunStatus.SUCCEEDED), view.result(), view.steps());
+                                view.status() != AgentRunStatus.SUCCEEDED));
     }
 
     @Transactional(propagation = Propagation.NOT_SUPPORTED)

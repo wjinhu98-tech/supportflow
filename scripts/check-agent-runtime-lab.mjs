@@ -154,11 +154,12 @@ async function main() {
   const run = await json(await call('GET', runPath()));
   pass('ARL05', UUID_PATTERN.test(run.runId ?? '') && run.clientMessageId === clientMessageId
     && run.status === 'SUCCEEDED' && run.phase === 'COMPLETE'
-    && run.attempts === 3 && run.resumable === false && Number.isInteger(run.maxSteps) && run.maxSteps >= 3
+    && run.attempts === 5 && run.resumable === false && Number.isInteger(run.maxSteps) && run.maxSteps >= 5
+    && run.workflowVersion === 2 && run.budget?.chargedTokens === 0 && run.budget?.currency === 'USD'
     && run.result === completed.messages[1].response.reply
     && Number.isFinite(Date.parse(run.deadlineAt)));
-  pass('ARL06', Array.isArray(run.steps) && run.steps.length === 3
-    && run.steps.map(step => step.phase).join(',') === 'PLAN,ORDER_LOOKUP,LOGISTICS_LOOKUP'
+  pass('ARL06', Array.isArray(run.steps) && run.steps.length === 5
+    && run.steps.map(step => step.phase).join(',') === 'PLAN,ORDER_LOOKUP,PLAN,LOGISTICS_LOOKUP,PLAN'
     && run.steps.every((step, index) => step.status === 'SUCCEEDED' && step.attempt === index + 1
       && UUID_PATTERN.test(step.operationId ?? '')
       && Number.isFinite(Date.parse(step.completedAt))));

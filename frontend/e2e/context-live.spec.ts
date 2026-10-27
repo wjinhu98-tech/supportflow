@@ -1,6 +1,6 @@
 import { expect, request, test, type APIRequestContext, type Page } from '@playwright/test'
 import type { ChatResponse, KnowledgeArticle } from '../src/types'
-import { connect, send, switchShop } from './helpers'
+import { connect, send, switchShop, clearShopConversation } from './helpers'
 
 const password = 'Frontend-Test-Only!'
 const knowledgeBase = '/api/v1/merchant/shops/100/knowledge'
@@ -60,7 +60,7 @@ test('restored order context supports a fresh read without selecting a historica
   test.setTimeout(75_000)
   await page.goto('/?shopId=100')
   await connect(page, 'frontend-buyer', password)
-  await page.getByTestId('new-conversation').click()
+  await clearShopConversation(page)
   const first = await ask(page, '查订单 SF10001')
   expect(first.answer.context?.kind).toBe('ORDER')
   expect(first.answer.context?.orderNo).toBe('SF10001')
@@ -89,7 +89,7 @@ test('restored order context supports a fresh read without selecting a historica
   expect(cleared.answer.reply).toMatch(/选择|明确/)
 
   await ask(page, '查订单 SF10001')
-  await page.getByTestId('new-conversation').click()
+  await clearShopConversation(page)
   const newConversation = await ask(page, '这单现在是什么状态？')
   expect(newConversation.answer.context?.kind).toBe('NONE')
   expect(newConversation.answer.orders).toEqual([])
@@ -121,7 +121,7 @@ test('knowledge follow-ups reload the current publication and never resurrect an
     )
     await page.goto('/?shopId=100')
     await connect(page, 'frontend-buyer', password)
-    await page.getByTestId('new-conversation').click()
+    await clearShopConversation(page)
     const first = await ask(page, `知识库：${token}`)
     expect(first.answer.context?.kind).toBe('KNOWLEDGE')
     expect(first.answer.context?.sourceIds).toEqual([`kb-${article.id}`])
@@ -200,7 +200,7 @@ test('an ambiguous knowledge reference asks for a topic and a write request cann
     }
     await page.goto('/?shopId=100')
     await connect(page, 'frontend-buyer', password)
-    await page.getByTestId('new-conversation').click()
+    await clearShopConversation(page)
     const multiple = await ask(page, `知识库：${token}`)
     expect(multiple.answer.context?.sourceIds).toHaveLength(2)
     const clarified = await ask(page, '那怎么使用？')
@@ -239,7 +239,7 @@ test('a named gift-box price overrides a stale selection while an unspecified pr
     })
     await page.goto('/?shopId=100')
     await connect(page, 'frontend-buyer', password)
-    await page.getByTestId('new-conversation').click()
+    await clearShopConversation(page)
     await ask(page, '查订单 SF10001')
     const gift = await ask(page, `这个礼盒 ${token} 多少钱？`)
     expect(gift.requestBody.orderNo).toBe('SF10001')

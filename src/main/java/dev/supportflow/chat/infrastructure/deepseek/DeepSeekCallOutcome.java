@@ -10,5 +10,6 @@ enum DeepSeekCallOutcome {
     PROVIDER_ERROR,
     INVALID_RESPONSE,
     TRANSPORT_ERROR,
-    CANCELLED
+    CANCELLED,
+    CIRCUIT_OPEN
 }

@@ -8,7 +8,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 @Order(Ordered.HIGHEST_PRECEDENCE)
-@RestControllerAdvice(assignableTypes = {ConversationController.class, AgentRunController.class})
+@RestControllerAdvice(assignableTypes = {ConversationController.class, AgentRunController.class, ShopConversationController.class})
 public class ConversationExceptionHandler {
     public record ConversationError(ConversationException.Code code, String message) { }
 

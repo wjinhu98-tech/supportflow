@@ -59,13 +59,19 @@ class DeepSeekCallMetricsTest {
             for (Meter meter : registry.getMeters()) {
                 Meter.Id id = meter.getId();
                 assertThat(id.getName()).isIn("supportflow.ai.calls", "supportflow.ai.call.duration",
-                        "supportflow.ai.inflight", "supportflow.ai.limit");
-                if (id.getType() == Meter.Type.COUNTER || id.getType() == Meter.Type.TIMER) {
+                        "supportflow.ai.inflight", "supportflow.ai.limit", "supportflow.ai.circuit.state",
+                        "supportflow.ai.circuit.transitions");
+                if (id.getName().equals("supportflow.ai.circuit.transitions")) {
+                    assertThat(id.getType()).isEqualTo(Meter.Type.COUNTER);
+                    assertThat(id.getTags()).extracting(tag -> tag.getKey()).containsExactlyInAnyOrder("from", "to");
+                    assertThat(id.getTag("from")).isIn("CLOSED", "OPEN", "HALF_OPEN");
+                    assertThat(id.getTag("to")).isIn("CLOSED", "OPEN", "HALF_OPEN");
+                } else if (id.getType() == Meter.Type.COUNTER || id.getType() == Meter.Type.TIMER) {
                     assertThat(id.getTags()).extracting(tag -> tag.getKey())
                             .containsExactlyInAnyOrder("operation", "outcome");
-                    assertThat(id.getTag("operation")).isIn("ORDER_INTENT", "TOOL_PLAN");
+                    assertThat(id.getTag("operation")).isIn("ORDER_INTENT", "TOOL_PLAN", "AGENT_DECISION");
                     assertThat(id.getTag("outcome")).isIn("SUCCESS", "BUSY", "TIMEOUT", "INTERRUPTED",
-                            "PROVIDER_RATE_LIMITED", "PROVIDER_ERROR", "INVALID_RESPONSE", "TRANSPORT_ERROR", "CANCELLED");
+                            "PROVIDER_RATE_LIMITED", "PROVIDER_ERROR", "INVALID_RESPONSE", "TRANSPORT_ERROR", "CANCELLED", "CIRCUIT_OPEN");
                 } else {
                     assertThat(id.getType()).isEqualTo(Meter.Type.GAUGE);
                     assertThat(id.getTags()).isEmpty();
@@ -91,8 +97,8 @@ class DeepSeekCallMetricsTest {
                 assertThat(duration(operation, outcome).totalTime(TimeUnit.SECONDS)).isCloseTo(0.025, within(0.000000001));
             }
         }
-        assertThat(totalCalls()).isEqualTo(18);
-        assertThat(totalDurations()).isEqualTo(18);
+        assertThat(totalCalls()).isEqualTo(30);
+        assertThat(totalDurations()).isEqualTo(30);
     }
 
     @ParameterizedTest

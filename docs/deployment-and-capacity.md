@@ -26,7 +26,7 @@ MySQL 没有发布宿主端口。数据库网络保持 internal；网页和监�
 ```text
 本机 prepare：生成本实验的新凭据，不覆盖已有凭据
   → MySQL：新建 supportflow_lab 与独立账号
-  → migrate：短生命周期迁移账号执行 V1–V12
+  → migrate：短生命周期迁移账号执行 V1–V15
   → grant：建表完成后授应用账号精确表/列写权限
   → seed：仅在新库为空时写入 5000 笔测试订单及 2 笔隔离样例
   → backend：lab_app 运行，关闭运行时 Flyway

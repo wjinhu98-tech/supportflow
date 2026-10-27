@@ -201,6 +201,10 @@ public final class FrontendTestServer {
                     INSERT INTO support_merchant_shop (shop_id, merchant_id, name, status)
                     VALUES (100, 1, '测试店铺100', 'ACTIVE'), (101, 2, '测试店铺101', 'ACTIVE')
                     """);
+            connection.setAutoCommit(false);
+            dev.supportflow.deployment.DemoShopData.seed(connection);
+            connection.commit();
+            connection.setAutoCommit(true);
             statement.executeUpdate("""
                     INSERT INTO support_merchant_staff (id, merchant_id, username, linked_buyer_id, status)
                     VALUES (1, 1, 'frontend-reviewer', 999, 'ACTIVE'),

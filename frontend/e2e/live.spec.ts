@@ -1,9 +1,12 @@
 import { expect, test, type Page } from '@playwright/test'
-import { connect, send, showChat, showOrders, switchShop } from './helpers'
+import { connect, send, showChat, showOrders, switchShop, clearShopConversation } from './helpers'
 import type {
   AfterSaleEligibility,
   AfterSaleTicket,
   ChatResponse,
+  ConversationMessagePage,
+  ConversationPage,
+  MerchantShop,
   ReceiptConfirmation,
 } from '../src/types'
 
@@ -174,10 +177,13 @@ test('conversation history survives reconnect without reopening refund forms or 
   page,
 }) => {
   await connect(page, 'frontend-buyer', password)
-  await page.getByTestId('new-conversation').click()
+  await clearShopConversation(page)
   const marker = `历史恢复验收-${Date.now()}`
+  const markerRequest = page.waitForRequest(
+    (request) => request.method() === 'POST' && request.postDataJSON()?.message === marker,
+  )
   await chat(page, marker)
-  const conversationId = await page.getByTestId('conversation-select').inputValue()
+  const conversationId = new URL((await markerRequest).url()).pathname.split('/').at(-2)!
   await selectOrder(page, 'SF10001')
   await chat(page, '申请退款')
   await expect(page.getByRole('dialog', { name: '申请退款', exact: true })).toBeVisible()
@@ -195,7 +201,7 @@ test('conversation history survives reconnect without reopening refund forms or 
   await page.reload()
   await expect(page.getByTestId('disconnect-button')).toHaveCount(0)
   await connect(page, 'frontend-buyer', password)
-  await expect(page.getByTestId('conversation-select')).toHaveValue(conversationId)
+  await expect(page.getByTestId('conversation-select')).toHaveCount(0)
   await expect(page.getByTestId('chat-message').filter({ hasText: marker }).first()).toBeVisible()
   await expect(page.getByRole('dialog', { name: '申请退款', exact: true })).toHaveCount(0)
   await expect(page.getByText('历史快照', { exact: false }).first()).toBeVisible()
@@ -210,16 +216,25 @@ test('conversation history survives reconnect without reopening refund forms or 
   )
   expect(foreignShop.status()).toBe(404)
   await switchShop(page, '100')
-  await expect(page.getByTestId('conversation-select')).toHaveValue(conversationId)
+  await expect(page.getByTestId('chat-message').filter({ hasText: marker }).first()).toBeVisible()
   expect(writes).toHaveLength(0)
 
-  await page.getByTestId('new-conversation').click()
-  await expect(page.getByTestId('chat-message')).toHaveCount(0)
-  const secondMarker = `新的独立会话-${Date.now()}`
+  await expect(page.getByTestId('new-conversation')).toHaveCount(0)
+  const secondMarker = `同一店铺继续咨询-${Date.now()}`
   await chat(page, secondMarker)
-  await page.getByTestId('conversation-select').selectOption(conversationId)
+  // A shop has one window; continuing must not make the earlier messages disappear.
+  const originalHistory = await page.request.get(
+    `/api/v1/shops/100/chat/conversations/${conversationId}/messages`,
+    { headers: buyerHeaders },
+  )
+  expect(originalHistory.status()).toBe(200)
+  const originalMessages = (await originalHistory.json()) as ConversationMessagePage
+  expect(originalMessages.messages.some((message) => message.text === marker)).toBe(true)
+  expect(originalMessages.messages.some((message) => message.text === secondMarker)).toBe(true)
   await expect(page.getByTestId('chat-message').filter({ hasText: marker }).first()).toBeVisible()
-  await expect(page.getByTestId('chat-message').filter({ hasText: secondMarker })).toHaveCount(0)
+  await expect(
+    page.getByTestId('chat-message').filter({ hasText: secondMarker }).first(),
+  ).toBeVisible()
   await expect(page.getByRole('dialog', { name: '申请退款', exact: true })).toHaveCount(0)
   await page.screenshot({ path: 'test-results/conversation-history.png', fullPage: true })
 
@@ -237,11 +252,112 @@ test('conversation history survives reconnect without reopening refund forms or 
   expect(foreignBuyer.status()).toBe(404)
 })
 
+test('each shop keeps its own window and explicit deletion leaves the other shops and orders intact', async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(90_000)
+  await connect(page, 'frontend-buyer', password)
+  await clearShopConversation(page)
+  const marker100 = `原店铺记录-${Date.now()}`
+  await chat(page, marker100)
+  await page.getByRole('button', { name: '切换店铺', exact: true }).click()
+  await expect(page.getByTestId('shop-option-102')).toContainText('数码优选店')
+  await expect(page.getByTestId('shop-option-103')).toContainText('生活家居店')
+  await page.getByTestId('shop-option-102').click()
+  await expect(page.getByTestId('shop-confirm')).not.toBeVisible()
+  await clearShopConversation(page)
+  const marker102 = `数码店铺记录-${Date.now()}`
+  const sent102 = page.waitForRequest(
+    (request) => request.method() === 'POST' && request.postDataJSON()?.message === marker102,
+  )
+  await chat(page, marker102)
+  const oldId = new URL((await sent102).url()).pathname.split('/').at(-2)!
+  const orderResponse = await page.request.get('/api/v1/shops/102/orders/SF102001', {
+    headers: buyerHeaders,
+  })
+  expect(orderResponse.status()).toBe(200)
+  const orderBefore = await orderResponse.json()
+  await selectOrder(page, 'SF102001')
+  await switchShop(page, '103')
+  await clearShopConversation(page)
+  const marker103 = `家居店铺记录-${Date.now()}`
+  await chat(page, marker103)
+  await switchShop(page, '102')
+  await expect(
+    page.getByTestId('chat-message').filter({ hasText: marker102 }).first(),
+  ).toBeVisible()
+  await expect(page.getByTestId('chat-message').filter({ hasText: marker103 })).toHaveCount(0)
+  await expect(page.getByTestId('chat-message').filter({ hasText: marker100 })).toHaveCount(0)
+  const deletions: string[] = []
+  page.on('request', (request) => {
+    if (request.method() === 'DELETE') deletions.push(request.url())
+  })
+  await page.getByTestId('delete-conversation').click()
+  const dialog = page.getByRole('dialog', { name: '删除该店铺对话？' })
+  await expect(dialog).toContainText('店铺 102')
+  await dialog.getByRole('button', { name: '取消', exact: true }).click()
+  expect(deletions).toHaveLength(0)
+  await expect(
+    page.getByTestId('chat-message').filter({ hasText: marker102 }).first(),
+  ).toBeVisible()
+  await clearShopConversation(page)
+  expect(deletions).toHaveLength(1)
+  expect(
+    (
+      await page.request.get(`/api/v1/shops/102/chat/conversations/${oldId}/messages`, {
+        headers: buyerHeaders,
+      })
+    ).status(),
+  ).toBe(404)
+  const orderAfter = await page.request.get('/api/v1/shops/102/orders/SF102001', {
+    headers: buyerHeaders,
+  })
+  expect(await orderAfter.json()).toEqual(orderBefore)
+  await page.reload()
+  await connect(page, 'frontend-buyer', password)
+  await expect(page.getByTestId('chat-message')).toHaveCount(0)
+  const fresh = `删除后继续咨询-${Date.now()}`
+  await chat(page, fresh)
+  const csrfResponse = await page.request.get('/api/v1/security/csrf', { headers: buyerHeaders })
+  const csrf = await csrfResponse.json()
+  expect(
+    (
+      await page.request.delete(`/api/v1/shops/102/chat/window/${oldId}`, {
+        headers: { ...buyerHeaders, [csrf.headerName]: csrf.token },
+      })
+    ).status(),
+  ).toBe(204)
+  await page.reload()
+  await connect(page, 'frontend-buyer', password)
+  await expect(page.getByTestId('chat-message').filter({ hasText: fresh }).first()).toBeVisible()
+  await expect(page.getByTestId('chat-message').filter({ hasText: marker102 })).toHaveCount(0)
+  await page.screenshot({
+    path: testInfo.outputPath('shop-window-after-delete.png'),
+    fullPage: true,
+  })
+  await switchShop(page, '103')
+  await expect(
+    page.getByTestId('chat-message').filter({ hasText: marker103 }).first(),
+  ).toBeVisible()
+  await switchShop(page, '100')
+  await expect(
+    page.getByTestId('chat-message').filter({ hasText: marker100 }).first(),
+  ).toBeVisible()
+  const merchantShops = await page.request.get('/api/v1/merchant/shops', {
+    headers: {
+      Authorization: `Basic ${Buffer.from(`frontend-reviewer:${password}`).toString('base64')}`,
+    },
+  })
+  expect(merchantShops.status()).toBe(200)
+  expect((await merchantShops.json()).map((shop: MerchantShop) => shop.id)).toEqual([100])
+})
+
 test('real history uses bounded pages for both conversations and older messages', async ({
   page,
 }) => {
   test.setTimeout(90_000)
   await connect(page, 'frontend-buyer', password)
+  await clearShopConversation(page)
   async function post(path: string, data: unknown = {}) {
     const csrfResponse = await page.request.get('/api/v1/security/csrf', { headers: buyerHeaders })
     expect(csrfResponse.status()).toBe(200)
@@ -263,7 +379,7 @@ test('real history uses bounded pages for both conversations and older messages'
   }
   await page.reload()
   await connect(page, 'frontend-buyer', password)
-  await expect(page.getByTestId('conversation-select')).toHaveValue(id)
+  await expect(page.getByTestId('conversation-select')).toHaveCount(0)
   await expect(page.getByTestId('chat-message')).toHaveCount(40)
   await page.getByTestId('load-earlier-messages').click()
   await expect(page.getByTestId('chat-message')).toHaveCount(44)
@@ -272,12 +388,25 @@ test('real history uses bounded pages for both conversations and older messages'
   for (let index = 0; index < 21; index++) await post(base)
   await page.reload()
   await connect(page, 'frontend-buyer', password)
-  const options = page.getByTestId('conversation-select').locator('option[value]:not([value=""])')
-  await expect(options).toHaveCount(20)
-  await page.getByTestId('load-more-conversations').click()
-  await expect(options).not.toHaveCount(20)
-  await page.getByTestId('conversation-select').selectOption(id)
-  await expect(page.getByTestId('chat-message')).toHaveCount(40)
+  // Conversation pagination stays available through the API without a history toolbar.
+  const firstPage = await page.request.get(base, { headers: buyerHeaders })
+  expect(firstPage.status()).toBe(200)
+  const first = (await firstPage.json()) as ConversationPage
+  expect(first.conversations).toHaveLength(20)
+  expect(first.nextBeforeId).toBeTruthy()
+  const secondPage = await page.request.get(`${base}?beforeId=${first.nextBeforeId}`, {
+    headers: buyerHeaders,
+  })
+  expect(secondPage.status()).toBe(200)
+  const second = (await secondPage.json()) as ConversationPage
+  expect(second.conversations.some((conversation) => conversation.id === id)).toBe(true)
+  expect(second.conversations.length).toBeLessThanOrEqual(20)
+  expect(
+    second.conversations.some((conversation) =>
+      first.conversations.some((previous) => previous.id === conversation.id),
+    ),
+  ).toBe(false)
+  await expect(page.getByTestId('load-more-conversations')).toHaveCount(0)
 })
 
 test('real Spring Security CSRF and real MySQL owned-order selection', async ({ page }) => {
@@ -457,7 +586,10 @@ test('real knowledge citations and recorded logistics stay separate from same-nu
   await switchShop(page, '101')
   await selectOrder(page, 'SF10001')
   const otherShopLogistics = await chat(page, '查物流')
-  expect(otherShopLogistics.reply).toContain('暂无录入的物流事件')
+  // The observed PAID order finishes without querying logistics for another shop.
+  expect(otherShopLogistics.reply).toContain('店铺 101 的订单 SF10001')
+  expect(otherShopLogistics.reply).toContain('待发货')
+  expect(otherShopLogistics.reply).toContain('899.00 CNY')
   expect(otherShopLogistics.reply).not.toContain('学习版仓库：已出库')
   expect(otherShopLogistics.reply).not.toContain('学习版配送中心：运输中')
 })

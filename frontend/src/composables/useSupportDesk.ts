@@ -5,6 +5,7 @@ import type {
   AfterSaleTicket,
   ChatMessage,
   Conversation,
+  ShopOption,
   ConversationContextRef,
   StoredChatMessage,
   Order,
@@ -24,13 +25,14 @@ export function useSupportDesk() {
   const nextAfterId = ref<number | null>(null)
   const selectedOrder = ref<Order | null>(null)
   const messages = ref<ChatMessage[]>([])
-  const conversations = ref<Conversation[]>([])
   const activeConversation = ref<Conversation | null>(null)
+  const shopOptions = ref<ShopOption[]>([])
+  const shopDirectoryError = ref<string | null>(null)
+  const deletingConversation = ref(false)
   const conversationContext = ref<ConversationContextRef | null>(null)
   const contextResetPending = ref(false)
   const contextExpired = ref(false)
   let contextExpiryTimer: ReturnType<typeof setTimeout> | null = null
-  const nextConversationBeforeId = ref<string | null>(null)
   const nextMessageBeforeId = ref<string | null>(null)
   const conversationsLoading = ref(false)
   const historyLoading = ref(false)
@@ -119,13 +121,12 @@ export function useSupportDesk() {
     resetConversationContext()
     conversationRequest.abort()
     conversationRequest = new AbortController()
-    conversations.value = []
     activeConversation.value = null
-    nextConversationBeforeId.value = null
     nextMessageBeforeId.value = null
     conversationsLoading.value = false
     historyLoading.value = false
     conversationError.value = null
+    deletingConversation.value = false
     resetReceiptConfirmation()
     detailRequest.abort()
     selectedEligibility.value = null
@@ -153,6 +154,8 @@ export function useSupportDesk() {
     connected.value = false
     connecting.value = false
     loginError.value = null
+    shopOptions.value = []
+    shopDirectoryError.value = null
   }
 
   function report(failure: unknown, signal: AbortSignal) {
@@ -183,6 +186,8 @@ export function useSupportDesk() {
       username.value = identity.username
       connected.value = true
       connecting.value = false
+      await loadShops()
+      if (signal.aborted) return false
       await loadOrders()
       if (!signal.aborted) await loadConversations()
       return connected.value
@@ -227,6 +232,7 @@ export function useSupportDesk() {
   }
 
   async function changeShop(value: string) {
+    if (deletingConversation.value) return
     const normalized = value.trim()
     if (!validShopId(normalized)) {
       error.value = '店铺 ID 必须为有效的正整数。'
@@ -252,11 +258,21 @@ export function useSupportDesk() {
   }
 
   function upsertConversation(conversation: Conversation) {
-    // The list is paged by immutable creation order, not latest activity.
-    conversations.value = conversations.value.some((item) => item.id === conversation.id)
-      ? conversations.value.map((item) => (item.id === conversation.id ? conversation : item))
-      : [conversation, ...conversations.value]
     activeConversation.value = conversation
+  }
+
+  async function loadShops() {
+    if (!client || !connected.value) return
+    const signal = context.signal
+    try {
+      const options = await client.shops(signal)
+      if (!signal.aborted) shopOptions.value = options
+    } catch (failure) {
+      if (!signal.aborted) {
+        shopDirectoryError.value = '暂时无法读取店铺列表，也可以输入店铺 ID 进入。'
+        if (failure instanceof ApiError && failure.status === 401) report(failure, signal)
+      }
+    }
   }
 
   function restoreMessage(message: StoredChatMessage, historical: boolean): ChatMessage {
@@ -278,34 +294,20 @@ export function useSupportDesk() {
   }
 
   function businessWriteInProgress() {
-    return refundSubmitting.value || receiptSubmitting.value
+    return refundSubmitting.value || receiptSubmitting.value || deletingConversation.value
   }
 
-  async function loadConversations(loadMore = false) {
+  async function loadConversations() {
     if (!client || !connected.value || conversationsLoading.value) return
-    if (loadMore && !nextConversationBeforeId.value) return
     const signal = context.signal
-    const cursor = loadMore ? nextConversationBeforeId.value : null
     conversationsLoading.value = true
     conversationError.value = null
     try {
-      const result = await client.conversations(shopId.value, cursor, signal)
+      const result = await client.openShopWindow(shopId.value, signal)
       if (signal.aborted) return
-      if (cursor && result.nextBeforeId === cursor)
-        throw new ApiError('咨询列表分页未前进，请刷新后核实。')
-      const items = loadMore
-        ? [...conversations.value, ...result.conversations]
-        : result.conversations
-      conversations.value = Array.from(new Map(items.map((item) => [item.id, item])).values())
-      nextConversationBeforeId.value = result.nextBeforeId
+      activeConversation.value = result
       conversationsLoading.value = false
-      if (
-        !loadMore &&
-        !activeConversation.value &&
-        !messages.value.length &&
-        result.conversations[0]
-      )
-        await selectConversation(result.conversations[0].id)
+      await loadEarlierMessages(false)
     } catch (failure) {
       if (!signal.aborted) {
         conversationError.value =
@@ -317,32 +319,22 @@ export function useSupportDesk() {
     }
   }
 
-  async function selectConversation(id: string) {
-    if (!client || !connected.value || businessWriteInProgress()) return
-    const conversation = conversations.value.find((item) => item.id === id)
-    if (!conversation || conversation.shopId !== Number(shopId.value)) return
-    clearConversation()
-    activeConversation.value = conversation
-    await loadEarlierMessages(false)
-  }
-
   async function loadEarlierMessages(loadEarlier = true) {
     if (
       !client ||
       !connected.value ||
-      !activeConversation.value ||
       historyLoading.value ||
-      busy.value
+      busy.value ||
+      deletingConversation.value
     )
       return
     if (loadEarlier && nextMessageBeforeId.value === null) return
     const signal = AbortSignal.any([context.signal, conversationRequest.signal])
-    const id = activeConversation.value.id
     const cursor = loadEarlier ? nextMessageBeforeId.value : null
     historyLoading.value = true
     conversationError.value = null
     try {
-      const result = await client.conversationMessages(shopId.value, id, cursor, signal)
+      const result = await client.shopWindowMessages(shopId.value, cursor, signal)
       if (signal.aborted) return
       if (cursor && result.nextBeforeId === cursor)
         throw new ApiError('咨询记录分页未前进，请刷新后核实。')
@@ -352,8 +344,7 @@ export function useSupportDesk() {
       activeConversation.value = result.conversation
       nextMessageBeforeId.value = result.nextBeforeId
       if (!loadEarlier && !contextResetPending.value) {
-        const latest = result.messages.filter((message) => message.role === 'ASSISTANT').at(-1)
-        setConversationContext(latest?.response?.context)
+        setConversationContext(result.context)
       }
       // Restoring replies never selects stale orders, reopens forms, or replays tools.
     } catch (failure) {
@@ -378,7 +369,13 @@ export function useSupportDesk() {
       error.value = '请先连接账号，再咨询订单。'
       return
     }
-    if (busy.value || historyLoading.value || conversationsLoading.value || receiptSubmitting.value)
+    if (
+      busy.value ||
+      historyLoading.value ||
+      conversationsLoading.value ||
+      receiptSubmitting.value ||
+      deletingConversation.value
+    )
       return
     const signal = AbortSignal.any([context.signal, conversationRequest.signal])
     const activeShop = shopId.value
@@ -397,7 +394,7 @@ export function useSupportDesk() {
     try {
       let conversation = activeConversation.value
       if (!conversation) {
-        conversation = await client.createConversation(activeShop, signal)
+        conversation = await client.openShopWindow(activeShop, signal)
         if (signal.aborted) return
         upsertConversation(conversation)
       }
@@ -432,7 +429,17 @@ export function useSupportDesk() {
       report(failure, signal)
       if (!signal.aborted && connected.value) {
         messages.value = messages.value.filter((item) => item.id !== clientMessageId)
-        if (!(failure instanceof ApiError) || ![400, 403, 404, 409, 429].includes(failure.status))
+        if (
+          failure instanceof ApiError &&
+          failure.status === 503 &&
+          failure.code === 'MODEL_UNAVAILABLE'
+        )
+          error.value =
+            '智能服务暂时不可用。请稍后查看咨询记录，或在订单页直接查看订单，不要重复发送。'
+        else if (
+          !(failure instanceof ApiError) ||
+          ![400, 403, 404, 409, 429].includes(failure.status)
+        )
           error.value = '消息结果暂时无法确认，请刷新咨询记录核实，不要重复发送。'
       }
     } finally {
@@ -455,6 +462,38 @@ export function useSupportDesk() {
 
   function clearSelectedOrder() {
     clearConversationTopic()
+  }
+  async function deleteCurrentConversation(): Promise<boolean> {
+    if (
+      !client ||
+      !connected.value ||
+      !activeConversation.value ||
+      busy.value ||
+      historyLoading.value ||
+      conversationsLoading.value ||
+      businessWriteInProgress()
+    )
+      return false
+    const signal = context.signal
+    const id = activeConversation.value.id
+    deletingConversation.value = true
+    error.value = null
+    try {
+      await client.deleteShopWindow(shopId.value, id, signal)
+      if (signal.aborted) return false
+      deletingConversation.value = false
+      clearConversation()
+      return true
+    } catch (failure) {
+      if (!signal.aborted) {
+        report(failure, signal)
+        if (!(failure instanceof ApiError) || ![400, 403, 404, 409].includes(failure.status))
+          error.value = '删除结果暂时无法确认，请刷新对话核实，不会自动重复删除。'
+      }
+      return false
+    } finally {
+      if (!signal.aborted) deletingConversation.value = false
+    }
   }
   function clearConversation() {
     // A pending refund or receipt confirmation must not lose its result.
@@ -756,19 +795,20 @@ export function useSupportDesk() {
   })
 
   return {
-    conversations,
     activeConversation,
+    shopOptions,
+    shopDirectoryError,
+    deletingConversation,
+    deleteCurrentConversation,
     conversationContext,
     contextResetPending,
     contextExpired,
     clearConversationTopic,
-    nextConversationBeforeId,
     nextMessageBeforeId,
     conversationsLoading,
     historyLoading,
     conversationError,
     loadConversations,
-    selectConversation,
     loadEarlierMessages,
     receiptOpen,
     receiptOrder,

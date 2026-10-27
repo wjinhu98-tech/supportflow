@@ -30,6 +30,16 @@ public class ConversationService {
         return store.create(principal.getIdentity().buyerId(), shopId);
     }
 
+    public Conversation openWindow(CustomerPrincipal principal, long shopId) {
+        return store.openWindow(principal.getIdentity().buyerId(), shopId);
+    }
+    public ShopConversationWindow window(CustomerPrincipal principal, long shopId, UUID beforeId) {
+        return store.window(principal.getIdentity().buyerId(), shopId, beforeId);
+    }
+    public void deleteWindow(CustomerPrincipal principal, long shopId, UUID id) {
+        store.deleteWindow(principal.getIdentity().buyerId(), shopId, id);
+    }
+
     public ConversationPage list(CustomerPrincipal principal, long shopId, UUID beforeId) {
         return store.list(principal.getIdentity().buyerId(), shopId, beforeId);
     }
