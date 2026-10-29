@@ -69,6 +69,164 @@ test('shop options include the new shops and deleting a window requires explicit
   await expect(page.getByTestId('chat-message').last()).toContainText('数码店咨询')
 })
 
+test('product candidates show purchase details and continue only the selected logistics read', async ({
+  page,
+  request,
+}, testInfo) => {
+  await connect(page)
+  const question = '我买的无线耳机物流到哪了？'
+  const firstOrder = {
+    shopId: 100,
+    orderNo: 'SF10001',
+    status: 'SHIPPED',
+    statusDescription: '已发货',
+    totalAmount: 199.9,
+    currency: 'CNY',
+    createdAt: '2026-10-01T00:00:00Z',
+    updatedAt: '2026-10-02T00:00:00Z',
+    receivedAt: null,
+    items: [{ productName: '无线耳机', specification: '白色', quantity: 1 }],
+    itemKinds: 1,
+  }
+  const secondOrder = {
+    ...firstOrder,
+    orderNo: 'SF10002',
+    status: 'PAID',
+    statusDescription: '待发货',
+    items: [{ productName: '无线耳机', specification: '黑色', quantity: 2 }],
+  }
+  await page.route('**/api/v1/shops/100/chat/conversations/*/messages', async (route) => {
+    if (route.request().method() !== 'POST') return route.continue()
+    const submitted = route.request().postDataJSON() as { message: string; orderNo?: string }
+    const upstream = await route.fetch()
+    const result = await upstream.json()
+    const answer = result.messages.find((message: { role: string }) => message.role === 'ASSISTANT')
+    if (submitted.message === question) {
+      answer.response = {
+        reply: '你在当前店铺购买过多笔无线耳机，请选择要查询的一笔。',
+        type: 'ORDER_SELECTION',
+        orders: [firstOrder, secondOrder],
+        nextAfterId: null,
+        knowledge: null,
+        selectionIntent: 'LOGISTICS',
+        context: { kind: 'NONE', orderNo: null, sourceIds: [], expiresAt: null },
+      }
+    } else if (submitted.message === '查物流' && submitted.orderNo === secondOrder.orderNo) {
+      answer.response = {
+        reply: '黑色无线耳机尚未发货，订单状态为待发货。',
+        type: 'TEXT',
+        orders: [],
+        nextAfterId: null,
+        knowledge: null,
+        context: {
+          kind: 'ORDER',
+          orderNo: secondOrder.orderNo,
+          sourceIds: [],
+          expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+        },
+      }
+    }
+    answer.text = answer.response.reply
+    await route.fulfill({ response: upstream, json: result })
+  })
+  await expect(page.getByTestId('message-input')).toHaveAttribute('placeholder', /商品名称/)
+  await send(page, question)
+  const cards = page.getByTestId('chat-message').last().getByTestId('order-card')
+  await expect(cards).toHaveCount(2)
+  await expect(cards.first()).toContainText('无线耳机')
+  await expect(cards.first()).toContainText('白色 · 数量 1')
+  await expect(cards.last()).toContainText('黑色 · 数量 2')
+  await page.screenshot({
+    path: testInfo.outputPath('product-name-candidates.png'),
+    fullPage: true,
+  })
+  await cards
+    .last()
+    .getByRole('button', { name: `咨询此订单 ${secondOrder.orderNo}`, exact: true })
+    .click()
+  await expect(page.getByTestId('chat-message').last()).toContainText('黑色无线耳机尚未发货')
+  const submissions = (await recorded(request)).filter(
+    (entry) => entry.method === 'POST' && /\/conversations\/[^/]+\/messages$/.test(entry.path),
+  )
+  expect(submissions.map((entry) => entry.body?.message)).toEqual([question, '查物流'])
+  expect(submissions.at(-1)?.body).toEqual(
+    expect.objectContaining({ message: '查物流', orderNo: 'SF10002' }),
+  )
+})
+
+for (const viewport of [
+  { name: 'desktop', width: 1440, height: 1000 },
+  { name: 'mobile', width: 390, height: 844 },
+]) {
+  test(`${viewport.name} order products load images and retain useful missing-image placeholders`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height })
+    await page.route('**/products/demo/white-mouse.png', async (route) => {
+      await route.fulfill({ status: 404, body: 'Missing test product image' })
+    })
+    await page.route('**/api/v1/shops/100/chat/messages', async (route) => {
+      const upstream = await route.fetch()
+      const result = await upstream.json()
+      result.orders = [
+        {
+          ...result.orders[0],
+          items: [
+            {
+              productName: '无线耳机',
+              specification: '黑色',
+              quantity: 1,
+              imageUrl: '/products/demo/black-earbuds.png',
+            },
+            {
+              productName: '无线鼠标',
+              specification: '白色',
+              quantity: 2,
+              imageUrl: '/products/demo/white-mouse.png',
+            },
+            { productName: '陶瓷马克杯', specification: null, quantity: 1, imageUrl: null },
+          ],
+          itemKinds: 3,
+        },
+        result.orders[1],
+      ]
+      result.nextAfterId = null
+      await route.fulfill({ response: upstream, json: result })
+    })
+    await connect(page)
+    await showOrders(page)
+    const cards = page.getByTestId('orders-panel').getByTestId('order-card')
+    await expect(cards).toHaveCount(2)
+    const products = cards.first().locator('.order-item-preview > li')
+    await expect(products).toHaveCount(3)
+    const image = products.first().locator('img')
+    await expect(image).toHaveAttribute('alt', '无线耳机')
+    await expect(image).toHaveAttribute('loading', 'lazy')
+    await expect(image).toHaveAttribute('decoding', 'async')
+    await expect
+      .poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth))
+      .toBeGreaterThan(0)
+    await expect(products.nth(1).locator('img')).toHaveCount(0)
+    await expect(products.nth(1).locator('.order-product-placeholder')).toContainText('暂无图片')
+    await expect(products.nth(2).locator('.order-product-placeholder')).toContainText('暂无图片')
+    await expect(products.first()).toContainText('黑色 · 数量 1')
+    await expect(products.nth(1)).toContainText('白色 · 数量 2')
+    await expect(cards.last().getByTestId('order-product-name')).toHaveCount(0)
+    await expect(cards.last()).toContainText('SF10002')
+    const imageBox = await products.first().locator('.order-product-image').boundingBox()
+    expect(imageBox?.width).toBeGreaterThanOrEqual(64)
+    expect(imageBox?.width).toBeLessThanOrEqual(72)
+    expect(imageBox?.height).toBe(imageBox?.width)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(
+      true,
+    )
+    await page.screenshot({
+      path: testInfo.outputPath(`order-products-images-${viewport.name}.png`),
+      fullPage: true,
+    })
+  })
+}
+
 test('switching workspaces preserves the draft and conversation without submitting again', async ({
   page,
   request,

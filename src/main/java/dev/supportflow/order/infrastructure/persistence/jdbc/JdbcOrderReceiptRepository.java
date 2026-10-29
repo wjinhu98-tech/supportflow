@@ -30,7 +30,7 @@ public class JdbcOrderReceiptRepository implements OrderReceiptRepository {
     public Optional<SupportOrder> lockOwnedOrder(long shopId, long buyerId, String orderNo) {
         return jdbc.sql("""
                 SELECT id, tenant_id, customer_id, buyer_id, order_no, status,
-                       total_amount, currency, created_at, updated_at, received_at
+                       total_amount, currency, created_at, updated_at, received_at, product_items_json
                 FROM support_order
                 WHERE tenant_id=:shop AND buyer_id=:buyer AND order_no=:number
                 FOR UPDATE
@@ -70,7 +70,8 @@ public class JdbcOrderReceiptRepository implements OrderReceiptRepository {
             return new SupportOrder(row.getLong("id"), row.getLong("tenant_id"), row.getLong("customer_id"),
                     row.getLong("buyer_id"), row.getString("order_no"), OrderStatus.fromCode(row.getString("status")),
                     row.getBigDecimal("total_amount"), row.getString("currency"), instant(row, "created_at"),
-                    instant(row, "updated_at"), instant(row, "received_at"));
+                    instant(row, "updated_at"), instant(row, "received_at"),
+                    OrderItemSnapshotJson.read(row.getString("product_items_json")));
         } catch (IllegalArgumentException | NullPointerException failure) {
             throw new DataRetrievalFailureException("Invalid persisted order receipt data", failure);
         }

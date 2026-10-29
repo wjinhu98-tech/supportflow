@@ -304,9 +304,91 @@ class ConversationContextEngineTest {
         assertThat(reply("我的订单", null, orderContext()).context().kind()).isEqualTo(ConversationContextKind.NONE);
     }
 
+    @Test
+    void namedProductOverridesTheOldUiOrderAndReturnsTheNewOwnedOrder() {
+        when(orders.findOwnedOrdersByProduct(principal.getIdentity(), 100, "鼠标"))
+                .thenReturn(new dev.supportflow.order.application.model.OrderProductMatches(List.of(order("SF10002")), false));
+        when(orchestrator.reply(principal, 100, "查询此订单", "SF10002"))
+                .thenReturn(ChatReply.details("待发货", order("SF10002")));
+        var response = reply("我买的鼠标发货了吗", "SF10001", orderContext());
+        assertThat(response.reply()).contains("包含「鼠标」", "整单状态", "待发货");
+        assertThat(response.context().orderNo()).isEqualTo("SF10002");
+        verify(orchestrator, never()).reply(principal, 100, "查询此订单", "SF10001");
+        verifyNoInteractions(knowledge);
+    }
+
+    @Test
+    void multipleProductOrdersRequireAnExplicitSelectionAndDoNotRunLogistics() {
+        when(orders.findOwnedOrdersByProduct(principal.getIdentity(), 100, "耳机"))
+                .thenReturn(new dev.supportflow.order.application.model.OrderProductMatches(List.of(order("SF10001"), order("SF10002")), false));
+        var response = reply("耳机物流到哪了", "SF10001", orderContext());
+        assertThat(response.type()).isEqualTo(dev.supportflow.chat.application.model.ChatReplyType.ORDER_SELECTION);
+        assertThat(response.selectionIntent()).isEqualTo(dev.supportflow.chat.application.model.OrderSelectionIntent.LOGISTICS);
+        assertThat(response.orders()).hasSize(2);
+        assertThat(response.context().kind()).isEqualTo(ConversationContextKind.NONE);
+        assertThat(response.nextAfterId()).isNull();
+        verifyNoInteractions(orchestrator, knowledge);
+    }
+
+    @Test
+    void aMissingNamedProductDoesNotFallBackToThePreviousOrder() {
+        when(orders.findOwnedOrdersByProduct(principal.getIdentity(), 100, "游戏手柄"))
+                .thenReturn(new dev.supportflow.order.application.model.OrderProductMatches(List.of(), false));
+        var response = reply("我买的游戏手柄发货了吗", "SF10001", orderContext());
+        assertThat(response.reply()).contains("暂未找到", "历史订单可能");
+        assertThat(response.orders()).isEmpty();
+        assertThat(response.context().kind()).isEqualTo(ConversationContextKind.NONE);
+        verifyNoInteractions(orchestrator, knowledge);
+    }
+
+    @Test
+    void productLookupNeverReusesAnUnfilteredPaginationCursor() {
+        when(orders.findOwnedOrdersByProduct(principal.getIdentity(), 100, "耳机"))
+                .thenReturn(new dev.supportflow.order.application.model.OrderProductMatches(
+                        java.util.stream.IntStream.range(1, 21).mapToObj(i -> order("SF" + i)).toList(), true));
+        var response = reply("我买的耳机发货了吗", null, ConversationContextRef.none());
+        assertThat(response.orders()).hasSize(20);
+        assertThat(response.nextAfterId()).isNull();
+        assertThat(response.reply()).contains("补充更具体");
+        verifyNoInteractions(orchestrator, knowledge);
+    }
+
+    @Test
+    void aGeneralShippingQuestionDoesNotBecomeAReadOfTheOldSelectedOrder() {
+        when(knowledge.answerDetailed(100, "耳机一般什么时候发货"))
+                .thenReturn(answer(SOURCE, "v1", "公开发货安排说明"));
+        var response = reply("耳机一般什么时候发货", "SF10001", orderContext());
+        assertThat(response.reply()).contains("公开发货安排");
+        assertThat(response.knowledge()).isNotNull();
+        assertThat(response.context().kind()).isEqualTo(ConversationContextKind.KNOWLEDGE);
+        verifyNoInteractions(orders, orchestrator);
+    }
+
+    @Test
+    void anUnnamedLogisticsFollowupUsesTheOwnedOrderReferenceInsteadOfSearchingForAProductCalledInformation() {
+        when(orchestrator.reply(principal, 100, "查物流", "SF10001")).thenReturn(ChatReply.text("最新物流记录"));
+        var response = reply("快递什么时候能到", null, orderContext());
+        assertThat(response.reply()).isEqualTo("最新物流记录");
+        assertThat(response.context().orderNo()).isEqualTo("SF10001");
+        verify(orders).getOwnedOrder(principal.getIdentity(), 100, "SF10001");
+        verify(orders, never()).findOwnedOrdersByProduct(any(), anyLong(), anyString());
+        verifyNoInteractions(knowledge);
+    }
+
     private ChatResponse reply(String text, String selectedOrder, ConversationContextRef previous) {
         return engine.reply(principal, 100, new ConversationMessageRequest(UUID.randomUUID(), text, selectedOrder), previous);
     }
+    @Test
+    void explicitOrderSelectionCannotBeReplacedByAMatchingMerchantFaq() {
+        when(knowledge.tryAnswerDetailed(100, "查订单"))
+                .thenReturn(Optional.of(answer(SOURCE, "v1", "PUBLIC_FAQ_ORDER_TRAP")));
+        when(orchestrator.reply(principal, 100, "查订单", null))
+                .thenReturn(ChatReply.selection("请选择当前店铺的订单", List.of(order("SF10001")), null));
+        assertThat(reply("查订单", null, ConversationContextRef.none()).type())
+                .isEqualTo(dev.supportflow.chat.application.model.ChatReplyType.ORDER_SELECTION);
+        verifyNoInteractions(knowledge, orders);
+    }
+
     private static ConversationContextRef orderContext() {
         return ConversationContextRef.order("SF10001", NOW.plusSeconds(120));
     }

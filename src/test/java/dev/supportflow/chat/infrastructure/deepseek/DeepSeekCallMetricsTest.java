@@ -69,7 +69,7 @@ class DeepSeekCallMetricsTest {
                 } else if (id.getType() == Meter.Type.COUNTER || id.getType() == Meter.Type.TIMER) {
                     assertThat(id.getTags()).extracting(tag -> tag.getKey())
                             .containsExactlyInAnyOrder("operation", "outcome");
-                    assertThat(id.getTag("operation")).isIn("ORDER_INTENT", "TOOL_PLAN", "AGENT_DECISION");
+                    assertThat(id.getTag("operation")).isIn("ORDER_INTENT", "TOOL_PLAN", "AGENT_DECISION", "PUBLIC_KNOWLEDGE_EVIDENCE");
                     assertThat(id.getTag("outcome")).isIn("SUCCESS", "BUSY", "TIMEOUT", "INTERRUPTED",
                             "PROVIDER_RATE_LIMITED", "PROVIDER_ERROR", "INVALID_RESPONSE", "TRANSPORT_ERROR", "CANCELLED", "CIRCUIT_OPEN");
                 } else {
@@ -97,8 +97,9 @@ class DeepSeekCallMetricsTest {
                 assertThat(duration(operation, outcome).totalTime(TimeUnit.SECONDS)).isCloseTo(0.025, within(0.000000001));
             }
         }
-        assertThat(totalCalls()).isEqualTo(30);
-        assertThat(totalDurations()).isEqualTo(30);
+        int expectedCombinations = DeepSeekCallOperation.values().length * DeepSeekCallOutcome.values().length;
+        assertThat(totalCalls()).isEqualTo(expectedCombinations);
+        assertThat(totalDurations()).isEqualTo(expectedCombinations);
     }
 
     @ParameterizedTest

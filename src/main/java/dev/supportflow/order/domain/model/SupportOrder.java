@@ -3,6 +3,7 @@ package dev.supportflow.order.domain.model;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Objects;
+import java.util.List;
 
 /**
  * 已持久化订单的只读业务快照。
@@ -20,7 +21,8 @@ public record SupportOrder(
         String currency,
         Instant createdAt,
         Instant updatedAt,
-        Instant receivedAt
+        Instant receivedAt,
+        List<OrderItemSnapshot> items
 ) {
 
     /** Historical fixtures and orders without a trusted receipt event keep this value unknown. */
@@ -28,10 +30,21 @@ public record SupportOrder(
                         OrderStatus status, BigDecimal totalAmount, String currency,
                         Instant createdAt, Instant updatedAt) {
         this(id, tenantId, customerId, buyerId, orderNo, status, totalAmount, currency,
-                createdAt, updatedAt, null);
+                createdAt, updatedAt, null, List.of());
+    }
+
+    /** Historical constructors and JSON snapshots have no product data; an empty list means unknown. */
+    public SupportOrder(long id, long tenantId, long customerId, long buyerId, String orderNo,
+                        OrderStatus status, BigDecimal totalAmount, String currency,
+                        Instant createdAt, Instant updatedAt, Instant receivedAt) {
+        this(id, tenantId, customerId, buyerId, orderNo, status, totalAmount, currency,
+                createdAt, updatedAt, receivedAt, List.of());
     }
 
     public SupportOrder {
+        items = items == null ? List.of() : List.copyOf(items);
+        if (items.size() > OrderItemSnapshot.MAX_ITEMS)
+            throw new IllegalArgumentException("Too many purchase-time product snapshots");
         if (buyerId <= 0) {
             throw new IllegalArgumentException("buyerId must be positive");
         }

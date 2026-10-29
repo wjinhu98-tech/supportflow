@@ -10,16 +10,24 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
+import dev.supportflow.chat.conversation.ConversationContextEngine;
+import dev.supportflow.chat.conversation.ConversationContextRef;
+import dev.supportflow.chat.conversation.ConversationMessageRequest;
 import dev.supportflow.assistant.orchestration.ConversationOrchestrator;
+import dev.supportflow.assistant.planning.ExplicitOrderNumbers;
+import dev.supportflow.chat.application.ProductOrderQuestion;
+import java.util.UUID;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
 
 @RestController
 public class ChatController {
 
+    private final ConversationContextEngine engine;
     private final ConversationOrchestrator orchestrator;
 
-    public ChatController(ConversationOrchestrator orchestrator) {
+    public ChatController(ConversationContextEngine engine, ConversationOrchestrator orchestrator) {
+        this.engine = engine;
         this.orchestrator = orchestrator;
     }
 
@@ -34,8 +42,15 @@ public class ChatController {
             @PathVariable("shopId") @Positive(message = "商铺ID必须为正整数") long shopId,
             @Valid @RequestBody ChatRequest request
     ) {
-        return ChatResponse.from(orchestrator.reply(
-                principal, shopId, request.message(), request.orderNo()));
+        // Preserve the existing stateless model/command contract; only the new product path needs resolution.
+        if (ExplicitOrderNumbers.extract(request.message()).isEmpty()
+                && (ProductOrderQuestion.parse(request.message()).isPresent()
+                || ProductOrderQuestion.isPublicShippingQuestion(request.message()))) {
+            return engine.reply(principal, shopId,
+                    new ConversationMessageRequest(UUID.randomUUID(), request.message(), request.orderNo()),
+                    ConversationContextRef.none());
+        }
+        return ChatResponse.from(orchestrator.reply(principal, shopId, request.message(), request.orderNo()));
     }
 
     /** 旧客户端得到明确迁移提示，不能再从无店铺入口执行跨店客服查询。 */

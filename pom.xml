@@ -19,9 +19,17 @@
 
     <properties>
         <java.version>21</java.version>
+        <onnxruntime.version>1.20.0</onnxruntime.version>
     </properties>
 
     <dependencies>
+        <!-- Local CPU embeddings; models are separately downloaded and checksum-verified. -->
+        <dependency>
+            <groupId>com.microsoft.onnxruntime</groupId>
+            <artifactId>onnxruntime</artifactId>
+            <!-- Compatible with the existing JDK 21.0.1 bundled Windows C++ runtime. -->
+            <version>${onnxruntime.version}</version>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
@@ -102,6 +110,30 @@
 
     <build>
         <plugins>
+            <!-- Keep native libraries on an executable read-only image layer, not the lab's noexec /tmp. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>rag-linux-native-libraries</id>
+                        <phase>package</phase>
+                        <goals><goal>unpack</goal></goals>
+                        <configuration>
+                            <artifactItems>
+                                <artifactItem>
+                                    <groupId>com.microsoft.onnxruntime</groupId>
+                                    <artifactId>onnxruntime</artifactId>
+                                    <version>${onnxruntime.version}</version>
+                                    <type>jar</type>
+                                    <includes>ai/onnxruntime/native/linux-x64/*.so</includes>
+                                    <outputDirectory>${project.build.directory}/rag-native</outputDirectory>
+                                </artifactItem>
+                            </artifactItems>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

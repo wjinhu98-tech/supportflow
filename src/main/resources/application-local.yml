@@ -23,6 +23,10 @@ spring:
       - "optional:file:./.local/deepseek-secrets.yml"
 
 supportflow:
+  rag:
+    enabled: "${SUPPORTFLOW_RAG_ENABLED:true}"
+    public-evidence-selection-enabled: "${SUPPORTFLOW_RAG_PUBLIC_SELECTION_ENABLED:true}"
+    model-directory: "${SUPPORTFLOW_RAG_MODEL_DIRECTORY:.local/models/bge-small-zh-v1.5}"
   after-sale:
     execution:
       enabled: true

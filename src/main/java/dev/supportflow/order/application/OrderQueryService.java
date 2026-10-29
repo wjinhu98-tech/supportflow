@@ -3,8 +3,10 @@ package dev.supportflow.order.application;
 import dev.supportflow.common.security.model.CustomerIdentity;
 import dev.supportflow.order.application.exception.OrderNotFoundException;
 import dev.supportflow.order.application.model.OrderPage;
+import dev.supportflow.order.application.model.OrderProductMatches;
 import dev.supportflow.order.domain.OrderQueryLimits;
 import dev.supportflow.order.domain.model.SupportOrder;
+import dev.supportflow.order.domain.model.ProductOrderKeyword;
 import dev.supportflow.order.domain.repository.SupportOrderRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -74,6 +76,17 @@ public class OrderQueryService {
         if (afterId < 0 || size < 1 || size > OrderQueryLimits.MAX_PAGE_SIZE) {
             throw new IllegalArgumentException("Invalid pagination range");
         }
+    }
+
+    /** Product text only locates current-shop owned orders; ambiguous matches never pick a newest order. */
+    public OrderProductMatches findOwnedOrdersByProduct(CustomerIdentity identity, long shopId, String keyword) {
+        Objects.requireNonNull(identity, "identity must not be null");
+        if (shopId <= 0) throw new IllegalArgumentException("Invalid product query shop");
+        ProductOrderKeyword search = new ProductOrderKeyword(keyword);
+        List<SupportOrder> rows = supportOrderRepository.findByProductName(shopId, identity.buyerId(),
+                search.value(), OrderQueryLimits.MAX_PRODUCT_FETCH_SIZE);
+        boolean hasMore = rows.size() > OrderQueryLimits.MAX_PRODUCT_MATCHES;
+        return new OrderProductMatches(hasMore ? rows.subList(0, OrderQueryLimits.MAX_PRODUCT_MATCHES) : rows, hasMore);
     }
 
     private static OrderPage toPage(List<SupportOrder> rows, int size) {

@@ -12,6 +12,8 @@ import dev.supportflow.chat.api.response.ChatResponse;
 import dev.supportflow.chat.application.model.ChatReply;
 import dev.supportflow.chat.application.model.ChatReplyType;
 import dev.supportflow.chat.application.model.KnowledgeStatus;
+import dev.supportflow.chat.application.ProductOrderQuestion;
+import dev.supportflow.chat.application.model.OrderSelectionIntent;
 import dev.supportflow.common.security.model.CustomerPrincipal;
 import dev.supportflow.order.application.OrderQueryService;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -42,7 +44,8 @@ public class ConversationContextEngine {
     private static final Pattern TRANSACTION_PRICE = Pattern.compile("实付|应付|总价|交易金额|交易总额");
     private static final Pattern LOGISTICS_SUBJECT = Pattern.compile("物流|快递|运单|到哪|配送进度|包裹");
     private static final Pattern SHORT_ORDER_READ = Pattern.compile(
-            "^(?:那|那么|现在|目前)?(?:发货了吗|是什么状态|状态怎么样|金额是多少|总价是多少|物流到哪了|查物流|查订单状态|订单状态|查一下状态)[？?！!。\\s]*$");
+            "^(?:那|那么|现在|目前)?(?:发货了吗|是什么状态|状态怎么样|金额是多少|总价是多少|物流到哪了|查物流|查订单状态|订单状态|查一下状态"
+                    + "|(?:快递|物流)(?:信息|进度|轨迹|到哪里了|到哪了|什么时候(?:能)?到|怎么样))[？?！!。\\s]*$");
     private static final Pattern KNOWLEDGE_FOLLOWUP = Pattern.compile(
             "怎么|如何|可以|能|填写|使用|说明|颜色|材质|保养|洗护|尺码|介绍|还有|具体");
 
@@ -85,6 +88,13 @@ public class ConversationContextEngine {
         }
         Set<String> explicit = ExplicitOrderNumbers.extract(message);
         if (explicit.size() > 1) return clarify("你提到了多笔订单，请先明确要查询哪一笔。 ");
+        if (explicit.isEmpty()) {
+            if (ProductOrderQuestion.isPublicShippingQuestion(message)) {
+                return knowledgeResponse(knowledge.answerDetailed(shopId, request.message()), now, shopId);
+            }
+            var product = ProductOrderQuestion.parse(message);
+            if (product.isPresent()) return productReply(principal, shopId, product.get(), request, runKey, now);
+        }
         String explicitOrder = explicit.isEmpty() ? request.orderNo() : explicit.iterator().next();
         boolean reference = REFERENCE.matcher(message).find();
         boolean readSubject = ORDER_READ_SUBJECT.matcher(message).find();
@@ -137,12 +147,34 @@ public class ConversationContextEngine {
 
         // Explicit FAQ subjects may change the topic; pronouns alone are never a new subject.
         if (!lookedUpCurrentKnowledge && explicitOrder == null && !reference
-                && !KnowledgeService.isOrderFactQuestion(message)) {
+                && !ORDER_SUBJECT.matcher(message).find() && !KnowledgeService.isOrderFactQuestion(message)) {
             var current = knowledge.tryAnswerDetailed(shopId, request.message());
             if (current.isPresent()) return knowledgeResponse(current.get(), now, shopId);
         }
         ChatResponse response = orchestrate(principal, shopId, request.message(), explicitOrder, runKey, request);
         return enrich(response, context, now, shopId);
+    }
+
+    private ChatResponse productReply(CustomerPrincipal principal, long shopId, ProductOrderQuestion question,
+                                      ConversationMessageRequest request, AgentRunKey key, Instant now) {
+        if (!question.validKeyword()) return clarify("请提供2至100字、最多4个关键词的商品名称或规格，或从「订单」选择要咨询的订单。");
+        var matches = orders.findOwnedOrdersByProduct(principal.getIdentity(), shopId, question.keyword());
+        if (matches.items().isEmpty()) {
+            return clarify("暂未找到本店包含「" + question.keyword() + "」且有商品信息的本人订单。"
+                    + "请换一个商品名称，或从「订单」选择；历史订单可能尚未补齐商品信息。");
+        }
+        if (matches.items().size() > 1 || matches.hasMore()) {
+            String text = "找到多笔包含「" + question.keyword() + "」的订单，请根据商品规格和下单时间选择一笔。"
+                    + (matches.hasMore() ? "匹配较多，先展示20笔；可补充更具体的商品名称或规格。" : "");
+            return ChatResponse.from(ChatReply.productSelection(text, matches.items(), question.intent()))
+                    .withContext(ConversationContextRef.none());
+        }
+        String number = matches.items().getFirst().orderNo();
+        String command = question.intent() == OrderSelectionIntent.LOGISTICS ? "查物流" : "查询此订单";
+        ChatResponse result = orchestrate(principal, shopId, command, number, key, request);
+        return new ChatResponse("以下是包含「" + question.keyword() + "」的订单信息（整单状态）：\n" + result.reply(),
+                result.type(), result.orders(), result.nextAfterId(), result.knowledge(),
+                ConversationContextRef.order(number, expiry(now)), result.selectionIntent());
     }
 
     private ChatResponse orchestrate(CustomerPrincipal principal, long shopId, String message, String orderNo,

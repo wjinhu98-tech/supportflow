@@ -14,6 +14,11 @@ public final class OrderQueryLimits {
 
     public static final int MAX_FETCH_SIZE = MAX_PAGE_SIZE + LOOKAHEAD_ROWS;
 
+    public static final int MAX_PRODUCT_KEYWORD_LENGTH = 100;
+    public static final int MAX_PRODUCT_SEARCH_TERMS = 4;
+    public static final int MAX_PRODUCT_MATCHES = 20;
+    public static final int MAX_PRODUCT_FETCH_SIZE = MAX_PRODUCT_MATCHES + LOOKAHEAD_ROWS;
+
     private OrderQueryLimits() {
     }
 }

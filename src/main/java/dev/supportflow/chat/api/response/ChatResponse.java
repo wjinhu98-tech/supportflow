@@ -3,6 +3,7 @@ package dev.supportflow.chat.api.response;
 import dev.supportflow.chat.application.model.ChatReply;
 import dev.supportflow.chat.application.model.ChatReplyType;
 import dev.supportflow.chat.application.model.KnowledgeEvidence;
+import dev.supportflow.chat.application.model.OrderSelectionIntent;
 import dev.supportflow.chat.conversation.ConversationContextRef;
 import dev.supportflow.order.api.response.OrderResponse;
 
@@ -15,16 +16,22 @@ public record ChatResponse(
         List<OrderResponse> orders,
         Long nextAfterId,
         KnowledgeEvidence knowledge,
-        ConversationContextRef context
+        ConversationContextRef context,
+        OrderSelectionIntent selectionIntent
 ) {
     /** Compatibility for existing callers and historical response_json without knowledge metadata. */
     public ChatResponse(String reply, ChatReplyType type, List<OrderResponse> orders, Long nextAfterId) {
-        this(reply, type, orders, nextAfterId, null, null);
+        this(reply, type, orders, nextAfterId, null, null, null);
     }
 
     public ChatResponse(String reply, ChatReplyType type, List<OrderResponse> orders,
                         Long nextAfterId, KnowledgeEvidence knowledge) {
-        this(reply, type, orders, nextAfterId, knowledge, null);
+        this(reply, type, orders, nextAfterId, knowledge, null, null);
+    }
+
+    public ChatResponse(String reply, ChatReplyType type, List<OrderResponse> orders, Long nextAfterId,
+                        KnowledgeEvidence knowledge, ConversationContextRef context) {
+        this(reply, type, orders, nextAfterId, knowledge, context, null);
     }
 
     public ChatResponse {
@@ -32,17 +39,20 @@ public record ChatResponse(
         if (knowledge != null && (type != ChatReplyType.TEXT || !orders.isEmpty() || nextAfterId != null)) {
             throw new IllegalArgumentException("Knowledge evidence cannot replace business results");
         }
+        if (selectionIntent != null && (type != ChatReplyType.ORDER_SELECTION || orders.isEmpty() || nextAfterId != null)) {
+            throw new IllegalArgumentException("Invalid read-only order selection");
+        }
     }
 
     public static ChatResponse from(ChatReply result) {
         return new ChatResponse(
                 result.reply(), result.type(),
                 result.orders().stream().map(OrderResponse::from).toList(),
-                result.nextAfterId(), result.knowledge());
+                result.nextAfterId(), result.knowledge(), null, result.selectionIntent());
     }
 
     public ChatResponse withContext(ConversationContextRef reference) {
         return new ChatResponse(reply, type, orders, nextAfterId, knowledge,
-                java.util.Objects.requireNonNull(reference, "server context must not be null"));
+                java.util.Objects.requireNonNull(reference, "server context must not be null"), selectionIntent);
     }
 }

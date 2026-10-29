@@ -1,5 +1,7 @@
 # 店铺内咨询：店铺来自页面，订单来自消息或卡片
 
+当前还支持“我买的耳机发货了吗”等商品名称问法，见[按商品名称咨询订单](product-order-lookup.md)。下面保留早期V3阶段的接口与订单号查询说明；最新会话、知识与商品定位以各模块文档为准。
+
 用户进入店铺100，点击客服，再问“SF10001发货了吗”。
 页面已知道正在咨询哪家店，不应要求用户再输入商铺ID。
 本次完成后端的店铺上下文、订单查询和可选订单数据，前端可按协议渲染卡片。
@@ -12,18 +14,18 @@ shopId由店铺页面构造进URL，买家身份由登录认证提供。
 
 自然语言请求无需商铺参数：
 
-~~~json
-{"message":"帮我看看SF10001订单发货了吗？"}
-~~~
+```json
+{ "message": "帮我看看SF10001订单发货了吗？" }
+```
 
 URL为/api/v1/shops/100/chat/messages时，后端只查询当前买家在店铺100的订单。
 模型只提取订单号，没有商铺或买家字段；消息中的其他商铺ID不能改变本次查询范围。
 
 点击订单卡片，或从订单详情页发起咨询：
 
-~~~json
-{"message":"咨询此订单","orderNo":"SF10001"}
-~~~
+```json
+{ "message": "咨询此订单", "orderNo": "SF10001" }
+```
 
 该请求直接查询，不调用模型。orderNo仍是不可信定位参数，必须和当前店铺、
 认证买家一起重新查询，不能因来自卡片就省略归属检查。
@@ -33,11 +35,11 @@ URL为/api/v1/shops/100/chat/messages时，后端只查询当前买家在店铺1
 
 响应保留reply，并增加字段：
 
-| 字段 | 含义 |
-| --- | --- |
-| type | TEXT、ORDER_DETAILS或ORDER_SELECTION |
-| orders | 公开OrderResponse列表，供前端显示详情或选择卡片 |
-| nextAfterId | 下一批游标，没有更多时为null |
+| 字段        | 含义                                            |
+| ----------- | ----------------------------------------------- |
+| type        | TEXT、ORDER_DETAILS或ORDER_SELECTION            |
+| orders      | 公开OrderResponse列表，供前端显示详情或选择卡片 |
+| nextAfterId | 下一批游标，没有更多时为null                    |
 
 TEXT的orders为空；ORDER_DETAILS含一笔实际订单；
 ORDER_SELECTION含当前店铺本人订单。卡片只包含商铺、订单号、状态、金额、
@@ -70,15 +72,15 @@ ORDER_SELECTION含当前店铺本人订单。卡片只包含商铺、订单号�
 第3步和第5步分别访问外部模型和数据库，其余主要是同一JVM内的方法调用。
 模型看不到服务端认证身份、权限或数据库订单结果。
 
-| 类或方法 | 输入 | 输出与职责 |
-| --- | --- | --- |
-| ChatRequest | message、可选orderNo | 接收消息与所选订单，校验格式和长度 |
-| ChatService.reply | 身份、URL店铺、消息、所选订单号 | ChatReply，组织查询和选单流程 |
-| OrderIntent | intent、orderNo | 模型识别结果，没有商铺和身份 |
-| listOwnedOrdersInShop | 身份、店铺、游标、批量大小 | OrderPage，按店铺与买家取候选订单 |
-| findByShopAndBuyerId | 店铺、买家、游标、读取上限 | SQL层过滤后返回订单 |
-| ChatReply、ChatReplyType | 文字、类型、订单、游标 | 区分文字、详情和选单的应用层结果 |
-| ChatResponse.from | ChatReply | 将领域订单映射为公开OrderResponse |
+| 类或方法                 | 输入                            | 输出与职责                         |
+| ------------------------ | ------------------------------- | ---------------------------------- |
+| ChatRequest              | message、可选orderNo            | 接收消息与所选订单，校验格式和长度 |
+| ChatService.reply        | 身份、URL店铺、消息、所选订单号 | ChatReply，组织查询和选单流程      |
+| OrderIntent              | intent、orderNo                 | 模型识别结果，没有商铺和身份       |
+| listOwnedOrdersInShop    | 身份、店铺、游标、批量大小      | OrderPage，按店铺与买家取候选订单  |
+| findByShopAndBuyerId     | 店铺、买家、游标、读取上限      | SQL层过滤后返回订单                |
+| ChatReply、ChatReplyType | 文字、类型、订单、游标          | 区分文字、详情和选单的应用层结果   |
+| ChatResponse.from        | ChatReply                       | 将领域订单映射为公开OrderResponse  |
 
 ## 翻页、安全和兼容性
 

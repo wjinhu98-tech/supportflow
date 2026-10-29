@@ -1,4 +1,11 @@
 /** Public backend DTOs only. Identity and internal order IDs are never UI input. */
+export interface OrderItem {
+  productName: string
+  specification: string | null
+  quantity: number
+  imageUrl?: string | null
+}
+
 export interface Order {
   shopId: number
   orderNo: string
@@ -9,6 +16,9 @@ export interface Order {
   createdAt: string
   updatedAt: string
   receivedAt?: string | null
+  /** Purchase-time snapshots; legacy orders and historical replies may omit these fields. */
+  items?: OrderItem[]
+  itemKinds?: number
 }
 
 export interface ReceiptConfirmation {
@@ -18,6 +28,7 @@ export interface ReceiptConfirmation {
 }
 
 export type ChatReplyType = 'TEXT' | 'ORDER_DETAILS' | 'ORDER_SELECTION' | 'AFTER_SALE_FORM'
+export type OrderSelectionIntent = 'ORDER_STATUS' | 'LOGISTICS'
 
 /** Immutable evidence carried with this reply, never a URL to fetch current article content. */
 export interface ChatKnowledgeSource {
@@ -48,6 +59,8 @@ export interface ChatResponse {
   knowledge: ChatKnowledge | null
   /** Optional for historical replies written before controlled context was introduced. */
   context?: ConversationContextRef | null
+  /** Read-only continuation for a current candidate list; never a replayable message. */
+  selectionIntent?: OrderSelectionIntent | null
 }
 
 export interface CsrfResponse {
@@ -65,6 +78,7 @@ export interface ChatMessage {
   orders?: Order[]
   knowledge?: ChatKnowledge | null
   context?: ConversationContextRef | null
+  selectionIntent?: OrderSelectionIntent | null
   /** Restored order cards are immutable historical snapshots, never current business state. */
   historical?: boolean
   pending?: boolean

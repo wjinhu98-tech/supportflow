@@ -47,4 +47,7 @@ public interface SupportOrderRepository {
      */
     List<SupportOrder> findByShopAndBuyerId(
             long shopId, long buyerId, long afterId, int limit);
+
+    /** Literal product-name/specification matching within the authenticated buyer and current shop. */
+    List<SupportOrder> findByProductName(long shopId, long buyerId, String keyword, int limit);
 }

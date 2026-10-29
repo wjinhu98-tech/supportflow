@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { ArrowUpRight, Check } from '@lucide/vue'
+import { ArrowUpRight, Check, Package } from '@lucide/vue'
+import { computed, ref, watch } from 'vue'
+import { isOrderProductImageUrl } from '../productImages'
 import type { Order } from '../types'
 import { formatAmount, formatDate } from './format'
 
-defineProps<{
+const props = defineProps<{
   order: Order
   selected?: boolean
   busy?: boolean
@@ -11,14 +13,93 @@ defineProps<{
   historical?: boolean
 }>()
 defineEmits<{ select: [order: Order]; confirmReceipt: [order: Order] }>()
+
+const failedImageUrls = ref(new Set<string>())
+const demoImageUrls = new Set([
+  '/products/demo/black-earbuds.png',
+  '/products/demo/white-mouse.png',
+  '/products/demo/white-mug.png',
+  '/products/demo/cotton-bedding.png',
+])
+const previewItems = computed(() =>
+  (props.order.items ?? []).slice(0, 3).map((item) => ({
+    ...item,
+    imageUrl: isOrderProductImageUrl(item.imageUrl) ? item.imageUrl : null,
+  })),
+)
+watch(
+  () => props.order,
+  () => {
+    failedImageUrls.value = new Set()
+  },
+)
 </script>
 
 <template>
   <article
     class="order-card"
-    :class="{ 'is-selected': selected, 'is-compact': compact }"
+    :class="{ 'is-selected': selected, 'is-compact': compact, 'has-products': order.items?.length }"
     data-testid="order-card"
   >
+    <ul
+      v-if="order.items?.length"
+      class="order-item-preview"
+      aria-label="购买商品"
+    >
+      <li
+        v-for="(item, index) in previewItems"
+        :key="index"
+        class="order-product-row"
+      >
+        <div class="order-product-image">
+          <template v-if="item.imageUrl && !failedImageUrls.has(item.imageUrl)">
+            <img
+              :src="item.imageUrl"
+              :alt="item.productName"
+              width="72"
+              height="72"
+              loading="lazy"
+              decoding="async"
+              @error="failedImageUrls.add(item.imageUrl)"
+            />
+            <span
+              v-if="demoImageUrls.has(item.imageUrl)"
+              class="order-product-demo"
+            >
+              演示图
+            </span>
+          </template>
+          <div
+            v-else
+            class="order-product-placeholder"
+          >
+            <Package
+              :size="23"
+              aria-hidden="true"
+            />
+            <span>暂无图片</span>
+          </div>
+        </div>
+        <div class="order-product-details">
+          <strong
+            class="order-product-name"
+            data-testid="order-product-name"
+          >
+            {{ item.productName }}
+          </strong>
+          <span class="order-product-meta">
+            <template v-if="item.specification">{{ item.specification }} ·</template>
+            数量 {{ item.quantity }}
+          </span>
+        </div>
+      </li>
+      <li
+        v-if="(order.itemKinds ?? order.items.length) > order.items.length"
+        class="order-product-more"
+      >
+        另有 {{ (order.itemKinds ?? order.items.length) - order.items.length }} 种商品
+      </li>
+    </ul>
     <div class="order-card-heading">
       <span class="order-number">{{ order.orderNo }}</span>
       <span
@@ -40,7 +121,10 @@ defineEmits<{ select: [order: Order]; confirmReceipt: [order: Order] }>()
       确认收货：{{ formatDate(order.receivedAt, true) }}
     </p>
     <div class="order-card-bottom">
-      <span class="order-amount">{{ formatAmount(order.totalAmount, order.currency) }}</span>
+      <span class="order-amount">
+        <span class="order-total-label">合计</span>
+        {{ formatAmount(order.totalAmount, order.currency) }}
+      </span>
       <button
         type="button"
         class="order-consult"

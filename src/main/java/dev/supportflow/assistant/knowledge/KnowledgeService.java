@@ -7,6 +7,7 @@ import dev.supportflow.merchant.knowledge.KnowledgeDraft;
 import dev.supportflow.merchant.knowledge.KnowledgeLimits;
 import dev.supportflow.merchant.knowledge.KnowledgeRepository;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -17,7 +18,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
-/** Retrieval -> selected source passages -> cited extractive answer; no external model or business database. */
+/** Current scoped retrieval -> optional public-only evidence selection -> complete, cited quotations. */
 @Service
 public class KnowledgeService {
 
@@ -27,6 +28,9 @@ public class KnowledgeService {
     private final KnowledgeRetriever retriever;
     private final List<KnowledgeDocument> catalog;
     private final KnowledgeRepository managed;
+    private final RagKnowledgeSearch rag;
+    private final PublicKnowledgeSelector publicSelector;
+    private final PublicReferenceCatalog publicReferences = new PublicReferenceCatalog();
     private static final String UNAVAILABLE = "当前店铺知识资料暂时不可用，请稍后重试或联系店铺客服。";
     private static final Pattern PROTECTED = Pattern.compile(
             "售后|退款|退货|收货|审批|到账|权限|密码|密钥|订单状态|物流|快递|运单|api.?key|系统提示|system.?prompt|"
@@ -52,17 +56,37 @@ public class KnowledgeService {
         this(new KnowledgeCatalog().load());
     }
 
-    @Autowired
     public KnowledgeService(KnowledgeRepository managed) {
         catalog = new KnowledgeCatalog().load();
         retriever = new KnowledgeRetriever(catalog);
         this.managed = managed;
+        rag = null;
+        publicSelector = null;
+    }
+
+    public KnowledgeService(KnowledgeRepository managed, RagKnowledgeSearch rag) {
+        this(managed, rag, (PublicKnowledgeSelector) null);
+    }
+
+    @Autowired
+    public KnowledgeService(KnowledgeRepository managed, RagKnowledgeSearch rag, ObjectProvider<PublicKnowledgeSelector> selectors) {
+        this(managed, rag, selectors.getIfAvailable());
+    }
+
+    KnowledgeService(KnowledgeRepository managed, RagKnowledgeSearch rag, PublicKnowledgeSelector publicSelector) {
+        catalog = new KnowledgeCatalog().load();
+        retriever = new KnowledgeRetriever(catalog);
+        this.managed = managed;
+        this.rag = rag;
+        this.publicSelector = publicSelector;
     }
 
     KnowledgeService(List<KnowledgeDocument> documents) {
         catalog = List.copyOf(documents);
         retriever = new KnowledgeRetriever(catalog);
         managed = null;
+        rag = null;
+        publicSelector = null;
     }
 
     /** Public evidence supports tests and future trace views; content is immutable and versioned. */
@@ -82,7 +106,7 @@ public class KnowledgeService {
         try {
             var documents = new ArrayList<>(catalog);
             documents.addAll(shopDocuments(shopId));
-            return render(message, new KnowledgeRetriever(documents).retrieve(retrievalQuery(message)));
+            return render(message, search(shopId, documents, message));
         } catch (RuntimeException unavailable) {
             // Never use another shop, a silently truncated corpus or a model-generated substitute.
             return UNAVAILABLE;
@@ -93,7 +117,7 @@ public class KnowledgeService {
     public Optional<String> tryAnswer(long shopId, String message) {
         if (managed == null || !valid(message) || isProtected(message)) return Optional.empty();
         try {
-            List<KnowledgeMatch> matches = new KnowledgeRetriever(shopDocuments(shopId)).retrieve(retrievalQuery(message));
+            List<KnowledgeMatch> matches = search(shopId, shopDocuments(shopId), message);
             return matches.isEmpty() ? Optional.empty() : Optional.of(render(message, matches));
         } catch (RuntimeException unavailable) {
             return Optional.of(UNAVAILABLE);
@@ -108,7 +132,7 @@ public class KnowledgeService {
         try {
             var documents = new ArrayList<>(catalog);
             documents.addAll(shopDocuments(shopId));
-            return renderDetailed(new KnowledgeRetriever(documents).retrieve(retrievalQuery(message)));
+            return renderDetailed(shopId, message, search(shopId, documents, message));
         } catch (RuntimeException unavailable) {
             return unavailableAnswer();
         }
@@ -118,9 +142,8 @@ public class KnowledgeService {
     public Optional<KnowledgeAnswer> tryAnswerDetailed(long shopId, String message) {
         if (managed == null || !valid(message) || isProtected(message)) return Optional.empty();
         try {
-            List<KnowledgeMatch> matches = new KnowledgeRetriever(shopDocuments(shopId))
-                    .retrieve(retrievalQuery(message));
-            return matches.isEmpty() ? Optional.empty() : Optional.of(renderDetailed(matches));
+            List<KnowledgeMatch> matches = search(shopId, shopDocuments(shopId), message);
+            return matches.isEmpty() ? Optional.empty() : Optional.of(renderDetailed(shopId, message, matches));
         } catch (RuntimeException unavailable) {
             return Optional.of(unavailableAnswer());
         }
@@ -135,7 +158,7 @@ public class KnowledgeService {
         if (isProtected(message)) return answerDetailed(shopId, message);
         try {
             String requested = sourceIds.getFirst();
-            List<KnowledgeDocument> current = requested.startsWith("kb-")
+            List<KnowledgeDocument> current = requested.startsWith("kb-") || requested.startsWith("ref-")
                     ? managed == null ? List.of() : shopDocuments(shopId) : catalog;
             var matches = current.stream().filter(document -> document.sourceId().equals(requested))
                     .map(document -> new KnowledgeMatch(document.sourceId(), document.version(), document.title(),
@@ -148,6 +171,40 @@ public class KnowledgeService {
 
     private static KnowledgeAnswer unavailableAnswer() {
         return new KnowledgeAnswer(UNAVAILABLE, new KnowledgeEvidence(KnowledgeStatus.UNAVAILABLE, List.of()));
+    }
+
+    /** Evidence lookup uses only local CPU embeddings and current scoped publications. */
+    public KnowledgeAnswer searchEvidence(long shopId, String message) {
+        if (!valid(message)) return renderDetailed(List.of());
+        if (isProtected(message)) return renderDetailed(retrieve(message));
+        try {
+            var documents = new ArrayList<>(catalog);
+            documents.addAll(shopDocuments(shopId));
+            return renderDetailed(search(shopId, documents, message));
+        } catch (RuntimeException unavailable) { return unavailableAnswer(); }
+    }
+
+    private List<KnowledgeMatch> search(long shopId, List<KnowledgeDocument> documents, String message) {
+        return rag == null ? new KnowledgeRetriever(documents).retrieve(retrievalQuery(message))
+                : rag.search(shopId, documents, retrievalQuery(message));
+    }
+
+    private KnowledgeAnswer renderDetailed(long shopId, String message, List<KnowledgeMatch> matches) {
+        if (rag != null && rag.publicSelectionEnabled() && publicSelector != null && !isProtected(message)
+                && !matches.isEmpty() && matches.stream().allMatch(match -> publicReferences.containsExact(shopId, match))) {
+            try {
+                var selection = publicSelector.select(shopId, message, matches);
+                if (selection.isPresent()) {
+                    List<String> ids = selection.get();
+                    Set<String> allowed = matches.stream().map(KnowledgeMatch::sourceId).collect(java.util.stream.Collectors.toSet());
+                    if (ids.size() <= 2 && ids.stream().distinct().count() == ids.size() && allowed.containsAll(ids))
+                        return renderDetailed(matches.stream().filter(match -> ids.contains(match.sourceId())).toList());
+                }
+            } catch (RuntimeException unavailable) {
+                // The original scoped evidence remains usable; never expose remote failures or rerun business work.
+            }
+        }
+        return renderDetailed(matches);
     }
 
     private KnowledgeAnswer renderDetailed(List<KnowledgeMatch> matches) {
@@ -179,7 +236,7 @@ public class KnowledgeService {
         if (snapshots.size() > KnowledgeLimits.MAX_PUBLISHED) {
             throw new IllegalStateException("Published corpus exceeds the enforced shop bound");
         }
-        return snapshots.stream()
+        var documents = new ArrayList<>(snapshots.stream()
                 .filter(source -> !isProtected(source.title() + " " + String.join(" ", source.keywords())
                         + " " + source.content()))
                 .map(source -> {
@@ -187,7 +244,9 @@ public class KnowledgeService {
                     if (source.revision() <= 0) throw new IllegalStateException("Invalid published revision");
                     return new KnowledgeDocument("kb-" + source.articleId(), "v" + source.revision(),
                             checked.title(), checked.keywords(), checked.content());
-                }).toList();
+                }).toList());
+        if (rag != null) documents.addAll(rag.references(shopId));
+        return List.copyOf(documents);
     }
 
     private static boolean valid(String message) {

@@ -53,7 +53,7 @@ Spring 在模型启用时创建一个执行器，并注入两个适配器；关�
 deepseek_call operation=TOOL_PLAN outcome=SUCCESS durationMs=42 inFlight=1 limit=4 httpStatus=200
 ```
 
-示例数字只说明格式，不是项目测量结果。`operation` 是 `ORDER_INTENT / TOOL_PLAN` 固定枚举；`outcome` 区分成功、容量已满、超时、中断、供应商限流/错误、无效响应、传输错误和取消。`durationMs` 包含执行器内的解析时间，不代表用户请求全链路延迟；`inFlight` 是记录时占用许可数的并发采样值，`limit` 是配置上限，未获得完整响应时 `httpStatus=0`。
+示例数字只说明格式，不是项目测量结果。当前`operation`为固定枚举`ORDER_INTENT / TOOL_PLAN / AGENT_DECISION / PUBLIC_KNOWLEDGE_EVIDENCE`；`outcome`区分成功、容量已满、超时、中断、供应商限流/错误、无效响应、传输错误、取消和熔断拒绝。`durationMs` 包含执行器内的解析时间，不代表用户请求全链路延迟；`inFlight` 是记录时占用许可数的并发采样值，`limit` 是配置上限，未获得完整响应时 `httpStatus=0`。
 
 日志不包含 Key、Authorization、用户消息、订单号、买家/店铺 ID、请求体、供应商正文或异常堆栈。对外仍只抛固定异常，不附供应商异常作为 cause。429 只作内部分类，不重试，也不把供应商正文传给用户。
 
@@ -61,15 +61,16 @@ deepseek_call operation=TOOL_PLAN outcome=SUCCESS durationMs=42 inFlight=1 limit
 
 ## 类的作用
 
-| 类 | 输入与返回 | 职责 |
-| --- | --- | --- |
-| `DeepSeekProperties` | 后端配置 → 校验后的值对象 | 开关、Key、模型、超时和并发上限；字符串表示隐藏 Key |
-| `DeepSeekConfiguration` | Spring 配置 → 条件 Bean | 管理客户端生命周期，将同一执行器注入两个适配器 |
-| `DeepSeekOrderIntentRecognizer` | 当前消息 → `OrderIntent` | 构造意图识别请求，严格解析模型输出 |
-| `DeepSeekToolPlanner` | 允许工具、消息、显式选单 → `PlannedToolCall` | 只接受一个受限工具和合法参数，不执行工具 |
-| `DeepSeekCallExecutor` | 固定操作、请求 JSON、解析函数 → 校验结果 | 共享并发、HTTP、期限、取消、异常隔离和安全日志 |
-| `DeepSeekResponseBodySubscriber` | 字节块 → 有界字节数组 | 超过累计大小限制前停止收取 |
-| `DeepSeekCallOperation / DeepSeekCallOutcome` | 固定枚举 | 不以用户输入生成诊断标签 |
+| 类                                            | 输入与返回                                    | 职责                                                                                  |
+| --------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `DeepSeekProperties`                          | 后端配置 → 校验后的值对象                     | 开关、Key、模型、超时和并发上限；字符串表示隐藏 Key                                   |
+| `DeepSeekConfiguration`                       | Spring 配置 → 条件 Bean                       | 管理客户端生命周期，将共享执行器注入模型适配器                                        |
+| `DeepSeekOrderIntentRecognizer`               | 当前消息 → `OrderIntent`                      | 构造意图识别请求，严格解析模型输出                                                    |
+| `DeepSeekToolPlanner`                         | 允许工具、消息、显式选单 → `PlannedToolCall`  | 只接受一个受限工具和合法参数，不执行工具                                              |
+| `DeepSeekPublicKnowledgeSelector`             | 当前知识问题、规范公开命中 → 可选的来源ID列表 | 最多两篇公开摘要，私有/混合资料不外发，异常回退本地引用；由`RagConfiguration`条件装配 |
+| `DeepSeekCallExecutor`                        | 固定操作、请求 JSON、解析函数 → 校验结果      | 共享并发、HTTP、期限、取消、异常隔离和安全日志                                        |
+| `DeepSeekResponseBodySubscriber`              | 字节块 → 有界字节数组                         | 超过累计大小限制前停止收取                                                            |
+| `DeepSeekCallOperation / DeepSeekCallOutcome` | 固定枚举                                      | 不以用户输入生成诊断标签                                                              |
 
 ## 为什么采用这个边界
 

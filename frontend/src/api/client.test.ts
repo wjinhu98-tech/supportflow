@@ -85,6 +85,214 @@ const assistantMessage = {
 }
 const storedPair = { conversation, messages: [userMessage, assistantMessage] }
 
+describe('purchase item snapshots and candidate continuation', () => {
+  const item = { productName: '无线耳机', specification: '白色', quantity: 1 }
+
+  it('accepts a bounded purchase preview and a read-only candidate intent', async () => {
+    const productOrder = {
+      ...order,
+      items: [item, { productName: '耳机收纳盒', specification: null, quantity: 2 }],
+      itemKinds: 5,
+    }
+    const response = {
+      ...reply,
+      type: 'ORDER_SELECTION',
+      orders: [productOrder],
+      selectionIntent: 'LOGISTICS',
+    }
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json(response))
+    await expect(
+      new ApiClient('buyer', 'test', request).chat('100', '耳机物流到哪了'),
+    ).resolves.toEqual(response)
+  })
+
+  it('preserves missing historical product information instead of inventing an empty purchase', async () => {
+    const request = fetchMock().mockResolvedValueOnce(json(csrf)).mockResolvedValueOnce(json(reply))
+    const result = await new ApiClient('buyer', 'test', request).chat(
+      '100',
+      '咨询此订单',
+      order.orderNo,
+    )
+    expect(Object.hasOwn(result.orders[0]!, 'items')).toBe(false)
+    expect(Object.hasOwn(result.orders[0]!, 'itemKinds')).toBe(false)
+  })
+
+  it.each([
+    null,
+    '/products/demo/black-earbuds.png',
+    '/products/demo/white-mouse.webp',
+    '/products/demo/white_mug-2.jpg',
+    '/products/demo/cotton-bedding.jpeg',
+    `/products/demo/${'a'.repeat(240 - '/products/demo/'.length - '.png'.length)}.png`,
+  ])('preserves a valid optional product image %j', async (imageUrl) => {
+    const response = {
+      ...reply,
+      orders: [{ ...order, items: [{ ...item, imageUrl }], itemKinds: 1 }],
+    }
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json(response))
+    await expect(
+      new ApiClient('buyer', 'test', request).chat('100', '查询此订单', order.orderNo),
+    ).resolves.toEqual(response)
+  })
+
+  it.each([
+    '',
+    true,
+    42,
+    {},
+    [],
+    'https://example.com/products/demo/white-mug.png',
+    '//example.com/products/demo/white-mug.png',
+    'data:image/png;base64,aW1hZ2U=',
+    'javascript:alert(1)',
+    '/products/demo/../white-mug.png',
+    '/products/demo/%2e%2e/white-mug.png',
+    '/products/demo/subfolder/white-mug.png',
+    '/products/demo/white-mug.png?v=1',
+    '/products/demo/white-mug.png#image',
+    '/products/demo/white:mug.png',
+    '/products/demo/white\\mug.png',
+    '/products/demo/White-mug.png',
+    '/products/demo/white-mug.PNG',
+    '/products/demo/white mug.png',
+    '/products/demo/白杯.png',
+    '/products/demo/.png',
+    '/products/demo/white-mug.svg',
+    '/products/demo/white-mug.png\n',
+    `/products/demo/${'a'.repeat(241 - '/products/demo/'.length - '.png'.length)}.png`,
+  ])('rejects an unsafe or malformed product image %j', async (imageUrl) => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(
+        json({ ...reply, orders: [{ ...order, items: [{ ...item, imageUrl }], itemKinds: 1 }] }),
+      )
+    await expect(
+      new ApiClient('buyer', 'test', request).chat('100', '查询此订单', order.orderNo),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+  })
+
+  it('accepts item and kind-count boundaries and explicit null continuation on a details response', async () => {
+    const response = {
+      ...reply,
+      orders: [
+        {
+          ...order,
+          items: [
+            { productName: '名'.repeat(100), specification: '规'.repeat(80), quantity: 9999 },
+          ],
+          itemKinds: 20,
+        },
+      ],
+      selectionIntent: null,
+    }
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json(response))
+    await expect(
+      new ApiClient('buyer', 'test', request).chat('100', '咨询此订单', order.orderNo),
+    ).resolves.toEqual(response)
+  })
+
+  it.each([
+    { items: null },
+    { items: {} },
+    { items: [item, item, item, item] },
+    { items: [null] },
+    { items: [{ ...item, productName: '' }] },
+    { items: [{ ...item, productName: '  ' }] },
+    { items: [{ ...item, productName: 100 }] },
+    { items: [{ ...item, productName: '名'.repeat(101) }] },
+    { items: [{ ...item, specification: undefined }] },
+    { items: [{ ...item, specification: '规'.repeat(81) }] },
+    { items: [{ ...item, quantity: 0 }] },
+    { items: [{ ...item, quantity: 10000 }] },
+    { items: [{ ...item, quantity: 1.5 }] },
+    { items: [{ ...item, quantity: '1' }] },
+    { items: [item], itemKinds: 0 },
+    { items: [], itemKinds: -1 },
+    { items: [], itemKinds: 21 },
+    { items: [], itemKinds: 1.5 },
+    { items: [], itemKinds: '1' },
+  ])('rejects invalid purchase metadata %j', async (invalid) => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json({ ...reply, orders: [{ ...order, ...invalid }] }))
+    await expect(
+      new ApiClient('buyer', 'test', request).chat('100', '咨询此订单', order.orderNo),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+  })
+
+  it.each(['AFTER_SALE_REQUEST', 'APPROVE', true, 1, {}, ['LOGISTICS']])(
+    'rejects non-enumerated selection intent %j',
+    async (selectionIntent) => {
+      const response = { ...reply, type: 'ORDER_SELECTION', selectionIntent }
+      const request = fetchMock()
+        .mockResolvedValueOnce(json(csrf))
+        .mockResolvedValueOnce(json(response))
+      await expect(
+        new ApiClient('buyer', 'test', request).chat('100', '耳机发货了吗'),
+      ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+    },
+  )
+
+  it('rejects continuation metadata on a non-selection response', async () => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json({ ...reply, selectionIntent: 'LOGISTICS' }))
+    await expect(
+      new ApiClient('buyer', 'test', request).chat('100', '耳机发货了吗'),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+  })
+
+  it.each([
+    { orders: [], nextAfterId: null },
+    { orders: [order], nextAfterId: 7347 },
+  ])('rejects a continuation without bounded candidate orders %j', async (invalid) => {
+    const response = { ...reply, type: 'ORDER_SELECTION', selectionIntent: 'LOGISTICS', ...invalid }
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json(response))
+    await expect(
+      new ApiClient('buyer', 'test', request).chat('100', '耳机物流到哪了'),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+  })
+
+  it('normalizes an omitted cursor on a nonempty candidate continuation to no cursor', async () => {
+    const response = {
+      reply: '请选择耳机订单',
+      type: 'ORDER_SELECTION',
+      orders: [order],
+      knowledge: null,
+      selectionIntent: 'ORDER_STATUS',
+    }
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json(response))
+    await expect(
+      new ApiClient('buyer', 'test', request).chat('100', '耳机发货了吗'),
+    ).resolves.toEqual({ ...response, nextAfterId: null })
+  })
+
+  it('still rejects a product match from another shop', async () => {
+    const response = {
+      ...reply,
+      type: 'ORDER_SELECTION',
+      selectionIntent: 'ORDER_STATUS',
+      orders: [{ ...order, shopId: 101, items: [item], itemKinds: 1 }],
+    }
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json(response))
+    await expect(
+      new ApiClient('buyer', 'test', request).chat('100', '耳机发货了吗'),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+  })
+})
+
 describe('ApiClient', () => {
   it('opens one shop window, reads its combined history and deletes it once with fresh CSRF', async () => {
     const context = { kind: 'NONE', orderNo: null, sourceIds: [], expiresAt: null }

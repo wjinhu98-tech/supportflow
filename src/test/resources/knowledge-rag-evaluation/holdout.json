@@ -1,0 +1,18 @@
+[
+ {"id":"holdout-android","shop":101,"question":"我的安卓设备不认这副耳机，怎么重新连？","expected":["ref-android-bluetooth-reconnect","ref-android-bluetooth-pair"]},
+ {"id":"holdout-windows","shop":102,"question":"Windows笔记本已经开了无线功能，可是那对耳塞还是无法建立连接。","expected":["ref-windows-bluetooth-reconnect","ref-windows-bluetooth-pair"]},
+ {"id":"holdout-pointer","shop":100,"question":"电脑指针完全没反应，我可以换台电脑验证这个设备吗？","expected":["ref-mouse-device-check"]},
+ {"id":"holdout-dongle","shop":102,"question":"无线键鼠的小USB适配器不响应了，可以先拔掉再接回去吗？","expected":["ref-wireless-usb-receiver"]},
+ {"id":"holdout-wash-temperature","shop":103,"question":"床单的盆形标签写着30，我能直接用60度程序吗？","expected":["ref-textile-washing-label"]},
+ {"id":"holdout-dryer-symbol","shop":103,"question":"什么洗护图示表示不可用滚筒干衣设备？","expected":["ref-textile-drying-label"]},
+ {"id":"holdout-size","shop":100,"question":"买被套时，是看床有多宽还是看被芯的长宽？","expected":["ref-bedding-size-example"]},
+ {"id":"holdout-mug","shop":103,"question":"杯子是陶瓷的就一定能在微波炉里热水吗？","expected":["ref-ceramic-mug-appliances"]},
+ {"id":"holdout-mouse-surface","shop":101,"question":"鼠标滚轮脏了，清理前要先断开连接吗？","expected":["ref-mouse-cleaning"]},
+ {"id":"holdout-airpods-case","shop":100,"question":"AirPods的盒子充电口积了碎屑，要注意什么？","expected":["ref-airpods-case-clean"]},
+ {"id":"holdout-cotton-limits","shop":103,"question":"所有棉质床上套件都可以照宜家这个型号的洗涤程序处理吗？","expected":["ref-cotton-bedding-example","ref-textile-washing-label"]},
+ {"id":"holdout-driver","shop":102,"question":"Windows适配器软件可能过期了，在哪里检查新版本？","expected":["ref-windows-bluetooth-drivers"]},
+ {"id":"holdout-astronomy","shop":100,"question":"木星的卫星有哪些？","expected":[]},
+ {"id":"holdout-cooking","shop":103,"question":"今晚红烧肉怎么做比较好吃？","expected":[]},
+ {"id":"holdout-shop-scope","shop":103,"question":"我的安卓设备不认这副耳机，怎么重新连？","expected":[]},
+ {"id":"holdout-no-shop","shop":888,"question":"杯子是陶瓷的就一定能在微波炉里热水吗？","expected":[]}
+]

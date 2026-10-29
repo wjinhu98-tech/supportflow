@@ -23,6 +23,7 @@ import type {
   ReceiptConfirmation,
 } from '../types'
 import { validKnowledgeArticle, validKnowledgeAudit, validKnowledgeInput } from './knowledge'
+import { isOrderProductImageUrl } from '../productImages'
 
 export class ApiError extends Error {
   constructor(
@@ -45,6 +46,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function validOrder(value: unknown): value is Order {
   if (!isRecord(value)) return false
+  const items = value.items
+  if (
+    items !== undefined &&
+    (!Array.isArray(items) ||
+      items.length > 3 ||
+      items.some(
+        (item) =>
+          !isRecord(item) ||
+          typeof item.productName !== 'string' ||
+          !item.productName.trim() ||
+          item.productName.length > 100 ||
+          !(
+            item.specification === null ||
+            (typeof item.specification === 'string' && item.specification.length <= 80)
+          ) ||
+          (item.imageUrl !== undefined &&
+            item.imageUrl !== null &&
+            !isOrderProductImageUrl(item.imageUrl)) ||
+          typeof item.quantity !== 'number' ||
+          !Number.isSafeInteger(item.quantity) ||
+          item.quantity < 1 ||
+          item.quantity > 9999,
+      ))
+  )
+    return false
+  if (
+    value.itemKinds !== undefined &&
+    (typeof value.itemKinds !== 'number' ||
+      !Number.isSafeInteger(value.itemKinds) ||
+      value.itemKinds < (Array.isArray(items) ? items.length : 0) ||
+      value.itemKinds > 20)
+  )
+    return false
   return (
     typeof value.shopId === 'number' &&
     Number.isSafeInteger(value.shopId) &&
@@ -148,11 +182,21 @@ function parseChat(value: unknown, shopId: string): ChatResponse {
     value.orders.some((order) => order.shopId !== Number(shopId)) ||
     (Object.hasOwn(value, 'knowledge') && !validChatKnowledge(value.knowledge)) ||
     (Object.hasOwn(value, 'context') && !validConversationContext(value.context)) ||
+    (value.selectionIntent !== undefined &&
+      value.selectionIntent !== null &&
+      (typeof value.selectionIntent !== 'string' ||
+        value.type !== 'ORDER_SELECTION' ||
+        !['ORDER_STATUS', 'LOGISTICS'].includes(value.selectionIntent) ||
+        value.orders.length === 0 ||
+        value.nextAfterId != null)) ||
     (value.knowledge != null &&
       (value.type !== 'TEXT' || value.orders.length !== 0 || value.nextAfterId !== null)) ||
     (value.type === 'AFTER_SALE_FORM' && (value.orders.length > 1 || value.nextAfterId !== null)) ||
     !(
       value.nextAfterId === null ||
+      (value.nextAfterId === undefined &&
+        value.type === 'ORDER_SELECTION' &&
+        value.selectionIntent != null) ||
       (typeof value.nextAfterId === 'number' &&
         Number.isSafeInteger(value.nextAfterId) &&
         value.nextAfterId > 0)
@@ -163,6 +207,7 @@ function parseChat(value: unknown, shopId: string): ChatResponse {
   const response = value as unknown as ChatResponse
   return {
     ...response,
+    nextAfterId: response.nextAfterId ?? null,
     orders: response.orders.map((order) => ({ ...order, receivedAt: order.receivedAt ?? null })),
     knowledge: response.knowledge
       ? {

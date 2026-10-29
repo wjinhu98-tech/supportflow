@@ -9,6 +9,7 @@ import type {
   ConversationContextRef,
   StoredChatMessage,
   Order,
+  OrderSelectionIntent,
   ReceiptConfirmation,
 } from '../types'
 
@@ -288,6 +289,11 @@ export function useSupportDesk() {
             orders: message.response.orders,
             knowledge: message.response.knowledge ?? null,
             context: message.response.context ?? null,
+            ...(!historical &&
+            message.response.type === 'ORDER_SELECTION' &&
+            message.response.selectionIntent
+              ? { selectionIntent: message.response.selectionIntent }
+              : {}),
           }
         : {}),
     }
@@ -415,9 +421,10 @@ export function useSupportDesk() {
       upsertConversation(result.conversation)
       const response = result.messages.find((item) => item.role === 'ASSISTANT')!.response!
       if (
-        response.context &&
-        (response.context.kind !== 'ORDER' ||
-          selectedOrder.value?.orderNo !== response.context.orderNo)
+        response.type === 'ORDER_SELECTION' ||
+        (response.context &&
+          (response.context.kind !== 'ORDER' ||
+            selectedOrder.value?.orderNo !== response.context.orderNo))
       )
         selectedOrder.value = null
       setConversationContext(response.context)
@@ -447,7 +454,7 @@ export function useSupportDesk() {
     }
   }
 
-  async function selectOrder(order: Order) {
+  async function selectOrder(order: Order, selectionIntent: OrderSelectionIntent | null = null) {
     if (
       !connected.value ||
       busy.value ||
@@ -457,7 +464,8 @@ export function useSupportDesk() {
       return
     // Re-query ownership and state before treating a historical snapshot as current.
     selectedOrder.value = null
-    await sendMessage('咨询此订单', order.orderNo)
+    // A candidate can continue only these two reads; never replay the user's original text.
+    await sendMessage(selectionIntent === 'LOGISTICS' ? '查物流' : '咨询此订单', order.orderNo)
   }
 
   function clearSelectedOrder() {

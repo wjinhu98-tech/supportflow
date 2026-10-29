@@ -37,6 +37,8 @@ public final class LabDeploymentTool {
                 case "migrate" -> migrate();
                 case "seed" -> seed();
                 case "seed-shops" -> seedShops();
+                case "seed-products" -> seedProducts();
+                case "seed-product-images" -> seedProductImages();
                 case "verify" -> verifyRuntime();
                 default -> throw new IllegalArgumentException("Unknown lab command");
             }
@@ -176,6 +178,40 @@ public final class LabDeploymentTool {
                 connection.commit();
                 System.out.println("LAB_DEMO_SHOPS_READY ids=102,103 shopsInserted=" + seeded.shopsInserted()
                         + " ordersInserted=" + seeded.ordersInserted() + " staffGrantsChanged=0");
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            }
+        }
+    }
+
+    private static void seedProducts() throws IOException, SQLException {
+        try (Connection connection = DriverManager.getConnection(JDBC_URL, "lab_migrator", migrationPassword())) {
+            connection.setAutoCommit(false);
+            try {
+                verifyExistingFixture(connection);
+                var seeded = DemoProductData.seed(connection);
+                connection.commit();
+                System.out.println("LAB_DEMO_PRODUCTS_READY shops=102,103 snapshotsInserted=" + seeded.snapshotsInserted()
+                        + " snapshotsPreserved=" + seeded.snapshotsPreserved() + " staffGrantsChanged=0");
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            }
+        }
+    }
+
+    private static void seedProductImages() throws IOException, SQLException {
+        try (Connection connection = DriverManager.getConnection(JDBC_URL, "lab_migrator", migrationPassword())) {
+            connection.setAutoCommit(false);
+            try {
+                verifyExistingFixture(connection);
+                var products = DemoProductData.seed(connection);
+                var images = DemoProductImageData.seed(connection);
+                connection.commit();
+                System.out.println("LAB_DEMO_PRODUCT_IMAGES_READY shops=102,103 snapshotsInserted=" + products.snapshotsInserted()
+                        + " imagesInserted=" + images.imagesInserted() + " imagesPreserved=" + images.imagesPreserved()
+                        + " staffGrantsChanged=0");
             } catch (SQLException | RuntimeException failure) {
                 connection.rollback();
                 throw failure;

@@ -4,5 +4,6 @@ package dev.supportflow.chat.infrastructure.deepseek;
 public enum DeepSeekCallOperation {
     ORDER_INTENT,
     TOOL_PLAN,
-    AGENT_DECISION
+    AGENT_DECISION,
+    PUBLIC_KNOWLEDGE_EVIDENCE
 }

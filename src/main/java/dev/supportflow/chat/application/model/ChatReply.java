@@ -11,10 +11,15 @@ public record ChatReply(
         ChatReplyType type,
         List<SupportOrder> orders,
         Long nextAfterId,
-        KnowledgeEvidence knowledge
+        KnowledgeEvidence knowledge,
+        OrderSelectionIntent selectionIntent
 ) {
     public ChatReply(String reply, ChatReplyType type, List<SupportOrder> orders, Long nextAfterId) {
-        this(reply, type, orders, nextAfterId, null);
+        this(reply, type, orders, nextAfterId, null, null);
+    }
+
+    public ChatReply(String reply, ChatReplyType type, List<SupportOrder> orders, Long nextAfterId, KnowledgeEvidence knowledge) {
+        this(reply, type, orders, nextAfterId, knowledge, null);
     }
 
     public ChatReply {
@@ -33,6 +38,9 @@ public record ChatReply(
         if (knowledge != null && type != ChatReplyType.TEXT) {
             throw new IllegalArgumentException("Knowledge evidence cannot replace business results");
         }
+        if (selectionIntent != null && (type != ChatReplyType.ORDER_SELECTION || orders.isEmpty() || nextAfterId != null)) {
+            throw new IllegalArgumentException("Read-only selection intent requires bounded candidate orders");
+        }
     }
 
     public static ChatReply text(String reply) {
@@ -50,6 +58,10 @@ public record ChatReply(
 
     public static ChatReply selection(String reply, List<SupportOrder> orders, Long nextAfterId) {
         return new ChatReply(reply, ChatReplyType.ORDER_SELECTION, orders, nextAfterId);
+    }
+
+    public static ChatReply productSelection(String reply, List<SupportOrder> orders, OrderSelectionIntent intent) {
+        return new ChatReply(reply, ChatReplyType.ORDER_SELECTION, orders, null, null, Objects.requireNonNull(intent));
     }
 
     public static ChatReply refundForm(String reply, SupportOrder order) {

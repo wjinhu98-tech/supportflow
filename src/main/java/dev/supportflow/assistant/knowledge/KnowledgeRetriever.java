@@ -42,7 +42,7 @@ final class KnowledgeRetriever {
         List<KnowledgeMatch> matches = new ArrayList<>();
         for (KnowledgeDocument document : documents) {
             String normalizedContent = normalize(document.title() + " " + document.content());
-            boolean shopDocument = document.sourceId().startsWith("kb-");
+            boolean shopDocument = document.sourceId().startsWith("kb-") || document.sourceId().startsWith("ref-");
             if (shopDocument && KnowledgeQueryExpansion.conflicts(query, normalizedContent)) continue;
             LinkedHashSet<String> evidence = new LinkedHashSet<>();
             int keywordHits = 0;

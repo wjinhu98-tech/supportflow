@@ -45,12 +45,13 @@ public final class DemoShopData {
                             if (row.getLong(2) != 200) throw new SQLException("A demo order belongs to another buyer");
                             orderId = row.getLong(1);
                         } else try (var insert = connection.prepareStatement("""
-                                INSERT INTO support_order(tenant_id,customer_id,buyer_id,order_no,status,total_amount,currency)
-                                VALUES (?,200,200,?,?,?,'CNY')
+                                INSERT INTO support_order(tenant_id,customer_id,buyer_id,order_no,status,total_amount,currency,product_items_json)
+                                VALUES (?,200,200,?,?,?,'CNY',?)
                                 """, java.sql.Statement.RETURN_GENERATED_KEYS)) {
                             insert.setLong(1, shop.id()); insert.setString(2, number);
                             insert.setString(3, index == 1 ? "SHIPPED" : "PAID");
                             insert.setBigDecimal(4, new BigDecimal(index == 1 ? shop.shippedAmount() : shop.paidAmount()));
+                            insert.setString(5, DemoProductData.snapshotFor(shop.id(), number));
                             orders += insert.executeUpdate();
                             try (var keys = insert.getGeneratedKeys()) {
                                 if (!keys.next()) throw new SQLException("Demo order ID unavailable");

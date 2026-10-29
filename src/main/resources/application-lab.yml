@@ -63,6 +63,10 @@ management:
         http.server.requests: true
 
 supportflow:
+  rag:
+    enabled: "${SUPPORTFLOW_RAG_ENABLED:false}"
+    public-evidence-selection-enabled: "${SUPPORTFLOW_RAG_PUBLIC_SELECTION_ENABLED:false}"
+    model-directory: "${SUPPORTFLOW_RAG_MODEL_DIRECTORY:/app/models/bge-small-zh-v1.5}"
   ai:
     deepseek:
       enabled: false

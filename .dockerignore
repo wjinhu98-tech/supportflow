@@ -2,6 +2,12 @@
 **
 !target/
 !target/supportflow-backend-0.1.0-SNAPSHOT.jar
+!target/rag-native/
+!target/rag-native/ai/
+!target/rag-native/ai/onnxruntime/
+!target/rag-native/ai/onnxruntime/native/
+!target/rag-native/ai/onnxruntime/native/linux-x64/
+!target/rag-native/ai/onnxruntime/native/linux-x64/*.so
 !frontend/
 !frontend/package.json
 !frontend/package-lock.json

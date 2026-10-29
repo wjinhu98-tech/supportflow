@@ -1228,6 +1228,100 @@ describe('useSupportDesk', () => {
     ])
   })
 
+  it('continues a fresh product candidate with only the fixed logistics read', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const another = { ...order, orderNo: 'SF10002' }
+    mocks.reply.mockResolvedValueOnce({
+      ...selection([order, another]),
+      selectionIntent: 'LOGISTICS',
+      context: noTopic,
+    })
+    await desk.sendMessage('我买的耳机物流到哪了？这句话不会在选择后被重放')
+    const candidates = desk.messages.value.at(-1)!
+    expect(candidates.selectionIntent).toBe('LOGISTICS')
+    expect(candidates.historical).toBe(false)
+    mocks.reply.mockResolvedValueOnce({ ...textReply, context: orderTopic(another.orderNo) })
+    await desk.selectOrder(another, candidates.selectionIntent)
+    expect(mocks.reply.mock.calls[1]?.slice(0, 3)).toEqual(['100', '查物流', 'SF10002'])
+    expect(mocks.sendConversationMessage).toHaveBeenCalledTimes(2)
+    expect(mocks.applyAfterSale).not.toHaveBeenCalled()
+    expect(mocks.confirmReceipt).not.toHaveBeenCalled()
+  })
+
+  it('uses a fresh status candidate to requery the selected order', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const another = { ...order, orderNo: 'SF10002' }
+    mocks.reply.mockResolvedValueOnce({
+      ...selection([order, another]),
+      selectionIntent: 'ORDER_STATUS',
+    })
+    await desk.sendMessage('耳机发货了吗？')
+    mocks.reply.mockResolvedValueOnce({
+      ...textReply,
+      type: 'ORDER_DETAILS',
+      orders: [another],
+      context: orderTopic(another.orderNo),
+    })
+    await desk.selectOrder(another, desk.messages.value.at(-1)!.selectionIntent)
+    expect(mocks.reply.mock.calls[1]?.slice(0, 3)).toEqual(['100', '咨询此订单', 'SF10002'])
+    expect(desk.selectedOrder.value?.orderNo).toBe('SF10002')
+  })
+
+  it('never restores a logistics continuation from a historical candidate card', async () => {
+    mocks.shopWindowMessages.mockResolvedValueOnce({
+      conversation,
+      messages: storedPair('过去的耳机物流问题', {
+        ...selection(),
+        selectionIntent: 'LOGISTICS',
+        context: noTopic,
+      }),
+      nextBeforeId: null,
+    })
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const historical = desk.messages.value.at(-1)!
+    expect(historical.historical).toBe(true)
+    expect(historical.selectionIntent).toBeUndefined()
+    await desk.selectOrder(historical.orders![0]!, historical.selectionIntent)
+    expect(mocks.reply.mock.calls[0]?.slice(0, 3)).toEqual(['100', '咨询此订单', 'SF10001'])
+  })
+
+  it('clears a prior selection when a new product has multiple candidates even in a legacy response', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    mocks.reply.mockResolvedValueOnce({ ...textReply, type: 'ORDER_DETAILS', orders: [order] })
+    await desk.selectOrder(order)
+    expect(desk.selectedOrder.value?.orderNo).toBe(order.orderNo)
+    mocks.reply.mockResolvedValueOnce({ ...selection([order]), selectionIntent: 'ORDER_STATUS' })
+    await desk.sendMessage('我买的鼠标发货了吗？')
+    expect(desk.selectedOrder.value).toBeNull()
+    expect(mocks.reply).toHaveBeenCalledTimes(2)
+  })
+
+  it('clears product candidates and their continuation when switching shops', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    mocks.reply.mockResolvedValueOnce({
+      ...selection(),
+      selectionIntent: 'LOGISTICS',
+      context: noTopic,
+    })
+    await desk.sendMessage('耳机物流到哪了？')
+    expect(desk.messages.value.at(-1)?.selectionIntent).toBe('LOGISTICS')
+    mocks.shopWindowMessages.mockResolvedValueOnce({
+      conversation: { ...conversation, shopId: 101 },
+      messages: [],
+      nextBeforeId: null,
+    })
+    await desk.changeShop('101')
+    expect(desk.messages.value).toEqual([])
+    expect(desk.selectedOrder.value).toBeNull()
+    await desk.selectOrder(order, 'LOGISTICS')
+    expect(mocks.reply).toHaveBeenCalledTimes(1)
+  })
+
   it('refuses selecting a card from another shop', async () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')

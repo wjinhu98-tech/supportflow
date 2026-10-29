@@ -2,6 +2,7 @@ package dev.supportflow.order.infrastructure.persistence.jdbc;
 
 import dev.supportflow.order.domain.OrderQueryLimits;
 import dev.supportflow.order.domain.model.OrderStatus;
+import dev.supportflow.order.domain.model.ProductOrderKeyword;
 import dev.supportflow.order.domain.model.SupportOrder;
 import dev.supportflow.order.domain.repository.SupportOrderRepository;
 import org.springframework.dao.DataRetrievalFailureException;
@@ -10,6 +11,7 @@ import org.springframework.stereotype.Repository;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -35,7 +37,8 @@ public class JdbcSupportOrderRepository implements SupportOrderRepository {
                    currency,
                    created_at,
                    updated_at,
-                   received_at
+                   received_at,
+                   product_items_json
             FROM support_order
             WHERE tenant_id = :tenantId
               AND buyer_id = :buyerId
@@ -44,7 +47,7 @@ public class JdbcSupportOrderRepository implements SupportOrderRepository {
 
     private static final String FIND_BY_BUYER_ID_SQL = """
             SELECT id, tenant_id, customer_id, buyer_id, order_no, status,
-                   total_amount, currency, created_at, updated_at, received_at
+                   total_amount, currency, created_at, updated_at, received_at, product_items_json
             FROM support_order
             WHERE buyer_id = :buyerId
               AND id > :afterId
@@ -54,12 +57,43 @@ public class JdbcSupportOrderRepository implements SupportOrderRepository {
 
     private static final String FIND_BY_SHOP_AND_BUYER_ID_SQL = """
             SELECT id, tenant_id, customer_id, buyer_id, order_no, status,
-                   total_amount, currency, created_at, updated_at, received_at
+                   total_amount, currency, created_at, updated_at, received_at, product_items_json
             FROM support_order
             WHERE buyer_id = :buyerId
               AND tenant_id = :shopId
               AND id > :afterId
             ORDER BY id ASC
+            LIMIT :limit
+            """;
+
+    // A correlated scalar count returns each owned order once even with several matching product items.
+    // Explicit ESCAPE avoids treating product punctuation as wildcards or depending on backslash SQL modes.
+    // Counting at most 20 items avoids MySQL 8.0's incorrect EXISTS/JSON_TABLE semijoin (MySQL bug #114897).
+    private static final String FIND_BY_PRODUCT_NAME_SQL = """
+            SELECT o.id, o.tenant_id, o.customer_id, o.buyer_id, o.order_no, o.status,
+                   o.total_amount, o.currency, o.created_at, o.updated_at, o.received_at, o.product_items_json
+            FROM support_order o
+            WHERE o.tenant_id=:shopId AND o.buyer_id=:buyerId
+              AND (
+                SELECT COUNT(*)
+                FROM JSON_TABLE(COALESCE(o.product_items_json, JSON_ARRAY()), '$[*]' COLUMNS (
+                    product_name VARCHAR(100) PATH '$.productName' ERROR ON EMPTY ERROR ON ERROR,
+                    specification VARCHAR(80) PATH '$.specification' NULL ON EMPTY ERROR ON ERROR
+                )) AS product
+                WHERE CONVERT(CONCAT(product.product_name, ' ', COALESCE(product.specification, '')) USING utf8mb4)
+                          COLLATE utf8mb4_0900_ai_ci LIKE :pattern ESCAPE '!'
+                   OR (
+                     CONVERT(CONCAT(product.product_name, ' ', COALESCE(product.specification, '')) USING utf8mb4)
+                          COLLATE utf8mb4_0900_ai_ci LIKE :term0 ESCAPE '!'
+                     AND (:term1 IS NULL OR CONVERT(CONCAT(product.product_name, ' ', COALESCE(product.specification, '')) USING utf8mb4)
+                          COLLATE utf8mb4_0900_ai_ci LIKE :term1 ESCAPE '!')
+                     AND (:term2 IS NULL OR CONVERT(CONCAT(product.product_name, ' ', COALESCE(product.specification, '')) USING utf8mb4)
+                          COLLATE utf8mb4_0900_ai_ci LIKE :term2 ESCAPE '!')
+                     AND (:term3 IS NULL OR CONVERT(CONCAT(product.product_name, ' ', COALESCE(product.specification, '')) USING utf8mb4)
+                          COLLATE utf8mb4_0900_ai_ci LIKE :term3 ESCAPE '!')
+                   )
+              ) > 0
+            ORDER BY o.id ASC
             LIMIT :limit
             """;
 
@@ -115,6 +149,24 @@ public class JdbcSupportOrderRepository implements SupportOrderRepository {
                 .list();
     }
 
+    @Override
+    public List<SupportOrder> findByProductName(long shopId, long buyerId, String keyword, int limit) {
+        if (shopId <= 0 || buyerId <= 0 || limit < 1 || limit > OrderQueryLimits.MAX_PRODUCT_FETCH_SIZE) {
+            throw new IllegalArgumentException("Invalid scoped product query");
+        }
+        ProductOrderKeyword search = new ProductOrderKeyword(keyword);
+        List<String> terms = search.terms();
+        var query = jdbcClient.sql(FIND_BY_PRODUCT_NAME_SQL).param("shopId", shopId).param("buyerId", buyerId)
+                .param("pattern", literalPattern(search.value())).param("limit", limit);
+        for (int index = 0; index < OrderQueryLimits.MAX_PRODUCT_SEARCH_TERMS; index++)
+            query = query.param("term" + index, index < terms.size() ? literalPattern(terms.get(index)) : null, Types.VARCHAR);
+        return query.query(JdbcSupportOrderRepository::mapRow).list();
+    }
+
+    private static String literalPattern(String value) {
+        return "%" + value.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%";
+    }
+
     /**
      * 将数据库当前行转换为订单对象。
      *
@@ -133,7 +185,8 @@ public class JdbcSupportOrderRepository implements SupportOrderRepository {
                     resultSet.getString("currency"),
                     resultSet.getObject("created_at", LocalDateTime.class).toInstant(ZoneOffset.UTC),
                     resultSet.getObject("updated_at", LocalDateTime.class).toInstant(ZoneOffset.UTC),
-                    nullableInstant(resultSet, "received_at")
+                    nullableInstant(resultSet, "received_at"),
+                    OrderItemSnapshotJson.read(resultSet.getString("product_items_json"))
             );
         } catch (IllegalArgumentException | NullPointerException exception) {
             throw new DataRetrievalFailureException(

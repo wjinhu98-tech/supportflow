@@ -51,7 +51,8 @@ public class ApiSecurityConfiguration {
                                 HttpMethod.GET,
                                 "/api/v1/orders",
                                 "/api/v1/shops/*/orders/*",
-                                "/api/v1/shops/*/orders/*/after-sale-eligibility"
+                                "/api/v1/shops/*/orders/*/after-sale-eligibility",
+                                "/api/v1/shops/*/knowledge/search"
                         ).access(accountAccess(AccountType.BUYER, SecurityPermission.ORDER_READ))
                         .requestMatchers(HttpMethod.POST, "/api/v1/shops/*/orders/*/after-sales")
                         .access(accountAccess(AccountType.BUYER, SecurityPermission.ORDER_READ))

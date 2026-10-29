@@ -102,6 +102,10 @@ services:
       SERVER_FORWARD_HEADERS_STRATEGY: framework
       MANAGEMENT_SERVER_PORT: "9091"
       TZ: UTC
+      SUPPORTFLOW_RAG_ENABLED: "true"
+      SUPPORTFLOW_RAG_MODEL_DIRECTORY: /app/models/bge-small-zh-v1.5
+    volumes:
+      - ../.local/models/bge-small-zh-v1.5:/app/models/bge-small-zh-v1.5:ro
     secrets:
       - lab_app_password
       - lab_buyer_hash

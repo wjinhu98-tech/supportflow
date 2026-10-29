@@ -29,7 +29,7 @@ import RefundDialog from './components/RefundDialog.vue'
 import ReceiptConfirmationDialog from './components/ReceiptConfirmationDialog.vue'
 import { formatAmount, formatDate, formatTime } from './components/format'
 import { useSupportDesk } from './composables/useSupportDesk'
-import type { Order } from './types'
+import type { Order, OrderSelectionIntent } from './types'
 
 const {
   activeConversation,
@@ -209,10 +209,10 @@ async function requestOrders(loadMore = false) {
   await loadOrders(loadMore)
 }
 
-async function consultOrder(order: Order) {
+async function consultOrder(order: Order, selectionIntent: OrderSelectionIntent | null = null) {
   retryAction = refreshConversation
   await focusConversation()
-  await selectOrder(order)
+  await selectOrder(order, selectionIntent)
 }
 
 async function refreshConversation() {
@@ -758,8 +758,11 @@ watch(
             </span>
             <div>
               <span class="context-label">正在咨询</span>
-              <strong>{{ selectedOrder.orderNo }}</strong>
+              <strong>{{ selectedOrder.items?.[0]?.productName || selectedOrder.orderNo }}</strong>
               <span class="context-description">
+                <template v-if="selectedOrder.items?.length">
+                  {{ selectedOrder.orderNo }} ·
+                </template>
                 {{ selectedOrder.statusDescription }} ·
                 {{ formatAmount(selectedOrder.totalAmount, selectedOrder.currency) }}
               </span>
@@ -902,7 +905,12 @@ watch(
                         selectedOrder?.orderNo === order.orderNo &&
                         selectedOrder?.shopId === order.shopId
                       "
-                      @select="consultOrder"
+                      @select="
+                        consultOrder(
+                          $event,
+                          message.historical ? null : (message.selectionIntent ?? null),
+                        )
+                      "
                       @confirm-receipt="openReceiptConfirmation"
                     />
                   </div>
@@ -962,8 +970,8 @@ watch(
                 :placeholder="
                   connected
                     ? selectedOrder
-                      ? `关于 ${selectedOrder.orderNo}，你想了解什么？`
-                      : '输入订单号或你的问题，例如：SF10001 发货了吗？'
+                      ? `关于 ${selectedOrder.items?.[0]?.productName || selectedOrder.orderNo}，你想了解什么？`
+                      : '直接说商品名称和问题，例如：我买的耳机发货了吗？'
                     : '请先连接账号，再开始咨询…'
                 "
                 @keydown="onComposerKeydown"
@@ -1442,7 +1450,7 @@ watch(
             <div>
               <strong>选择订单，开始咨询</strong>
               <p>
-                点击「咨询此订单」，或发送订单号与问题。收到商品后可确认收货；申请退款需选择原因并确认提交。
+                直接说商品名称和问题，或点击「咨询此订单」。收到商品后可确认收货；申请退款需选择原因并确认提交。
               </p>
             </div>
           </li>
