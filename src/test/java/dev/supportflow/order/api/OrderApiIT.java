@@ -1,6 +1,7 @@
 package dev.supportflow.order.api;
 
 import dev.supportflow.testsupport.KnowledgeFixtures;
+import dev.supportflow.testsupport.OrderVisibilityFixtures;
 
 import dev.supportflow.SupportFlowApplication;
 import dev.supportflow.chat.application.ModelUnavailableException;
@@ -21,6 +22,9 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.mock.web.MockHttpSession;
 import org.springframework.security.crypto.factory.PasswordEncoderFactories;
+import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
+import dev.supportflow.common.security.model.CustomerPrincipal;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -175,6 +179,7 @@ class OrderApiIT {
             createUser.setString(1, QUERY_PASSWORD);
             createUser.execute();
             KnowledgeFixtures.grantRead(connection, "supportflow_api_test", "order_reader");
+            OrderVisibilityFixtures.grantRead(connection, "supportflow_api_test", "order_reader");
             statement.execute(
                     """
                     GRANT SELECT
@@ -471,9 +476,11 @@ class OrderApiIT {
     }
 
     @Test
-    @DisplayName("CSRF入口也要求完成身份认证")
-    void shouldProtectCsrfEndpoint() throws Exception {
-        expectUnauthorized(mockMvc.perform(get("/api/v1/security/csrf")));
+    @DisplayName("匿名客户端可在登录前取得CSRF令牌")
+    void shouldExposePreLoginCsrfToken() throws Exception {
+        mockMvc.perform(get("/api/v1/security/csrf"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.token").isNotEmpty());
     }
 
     @Test
@@ -495,11 +502,23 @@ class OrderApiIT {
     }
 
     @Test
-    @DisplayName("普通订单GET不创建认证session")
-    void shouldNotPersistAuthenticationInSession() throws Exception {
+    @DisplayName("兼容Basic认证得到的会话不保留密码或凭据且能安全重放")
+    void shouldPersistOnlyCredentialFreeAuthenticationInSession() throws Exception {
         MvcResult result = orderGet("customer-200", "SF10001")
                 .andExpect(status().isOk()).andReturn();
-        assertThat(result.getRequest().getSession(false)).isNull();
+        var session = (MockHttpSession) result.getRequest().getSession(false);
+        assertThat(session).isNotNull();
+        var context = (SecurityContext) session.getAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY);
+        assertThat(context).isNotNull();
+        assertThat(context.getAuthentication().getCredentials()).isNull();
+        assertThat(context.getAuthentication().getPrincipal()).isInstanceOf(CustomerPrincipal.class);
+        var principal = (CustomerPrincipal) context.getAuthentication().getPrincipal();
+        assertThat(principal.getPassword()).isNull();
+        assertThat(principal.getUsername()).isEqualTo("customer-200");
+        mockMvc.perform(get("/api/v1/shops/100/orders/SF10001").session(session))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.orderNo").value("SF10001"));
+        mockMvc.perform(get("/api/v1/security/me").session(session))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.username").value("customer-200"));
     }
 
     @Test

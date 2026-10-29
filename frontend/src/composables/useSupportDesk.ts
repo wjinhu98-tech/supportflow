@@ -58,6 +58,14 @@ export function useSupportDesk() {
   const receiptSubmitting = ref(false)
   const receiptError = ref<string | null>(null)
   const receiptResult = ref<ReceiptConfirmation | null>(null)
+  const orderDeletionOpen = ref(false)
+  const orderDeletionOrder = ref<Order | null>(null)
+  const orderDeletionSubmitting = ref(false)
+  const orderDeletionError = ref<string | null>(null)
+  const orderDeletionNotice = ref<string | null>(null)
+  const deletedOrderKeys = ref(new Set<string>())
+  let orderDeletionRequest = new AbortController()
+  let orderDeletionVersion = 0
   const selectedEligibility = ref<AfterSaleEligibility | null>(null)
   const selectedEligibilityLoading = ref(false)
   const selectedEligibilityError = ref<string | null>(null)
@@ -67,6 +75,7 @@ export function useSupportDesk() {
   let refundRequest = new AbortController()
   let refundVersion = 0
   let client: ApiClient | null = null
+  let connectingClient: ApiClient | null = null
   let context = new AbortController()
   let messageId = 0
 
@@ -129,6 +138,8 @@ export function useSupportDesk() {
     conversationError.value = null
     deletingConversation.value = false
     resetReceiptConfirmation()
+    resetOrderDeletion()
+    orderDeletionNotice.value = null
     detailRequest.abort()
     selectedEligibility.value = null
     selectedEligibilityLoading.value = false
@@ -148,22 +159,37 @@ export function useSupportDesk() {
     afterSalesError.value = null
   }
 
-  function disconnect() {
+  function resetAccount() {
+    client?.dispose()
+    connectingClient?.dispose()
     resetContext()
     client = null
+    connectingClient = null
     username.value = ''
     connected.value = false
     connecting.value = false
     loginError.value = null
     shopOptions.value = []
     shopDirectoryError.value = null
+    deletedOrderKeys.value = new Set()
+  }
+
+  function disconnect() {
+    const previous = client ?? connectingClient
+    const logout = previous?.logout()
+    resetAccount()
+    const signal = context.signal
+    void logout?.catch(() => {
+      if (!signal.aborted && !connected.value)
+        loginError.value = '页面数据已清除，但退出登录未能确认。请重新登录，或关闭此页面。'
+    })
   }
 
   function report(failure: unknown, signal: AbortSignal) {
     if (signal.aborted) return
     const text = failure instanceof ApiError ? failure.message : '操作失败，请稍后重试。'
     if (failure instanceof ApiError && failure.status === 401) {
-      disconnect()
+      resetAccount()
       loginError.value = text
     }
     error.value = text
@@ -174,8 +200,17 @@ export function useSupportDesk() {
     disconnect()
     connecting.value = true
     const signal = context.signal
+    let candidate: ApiClient | null = null
     try {
-      const candidate = new ApiClient(account.trim(), password)
+      candidate = new ApiClient(account.trim(), password, fetch, {
+        authentication: 'session',
+        onSessionInvalidated: () => {
+          if (signal.aborted) return
+          resetAccount()
+          loginError.value = '账号已在其他页面切换或退出，请重新登录。'
+        },
+      })
+      connectingClient = candidate
       await candidate.authenticate(signal)
       if (signal.aborted) return false
       const identity = await candidate.currentAccount(signal)
@@ -184,6 +219,7 @@ export function useSupportDesk() {
         throw new ApiError('这是商家员工账号，请使用商家管理端登录。', 0, 'WRONG_ACCOUNT_TYPE')
       }
       client = candidate
+      connectingClient = null
       username.value = identity.username
       connected.value = true
       connecting.value = false
@@ -193,6 +229,8 @@ export function useSupportDesk() {
       if (!signal.aborted) await loadConversations()
       return connected.value
     } catch (failure) {
+      void candidate?.logout().catch(() => undefined)
+      if (connectingClient === candidate) connectingClient = null
       if (!signal.aborted) {
         loginError.value = failure instanceof Error ? failure.message : '连接失败，请检查账号信息。'
       }
@@ -203,7 +241,14 @@ export function useSupportDesk() {
   }
 
   async function loadOrders(loadMore = false) {
-    if (!client || !connected.value || ordersBusy.value || receiptSubmitting.value) return
+    if (
+      !client ||
+      !connected.value ||
+      ordersBusy.value ||
+      receiptSubmitting.value ||
+      orderDeletionSubmitting.value
+    )
+      return
     if (loadMore && nextAfterId.value === null) return
     const signal = context.signal
     const cursor = loadMore ? nextAfterId.value : null
@@ -223,7 +268,11 @@ export function useSupportDesk() {
         throw new ApiError('分页游标没有前进，请刷新订单后重试。')
       }
       const items = loadMore ? [...orders.value, ...response.orders] : response.orders
-      orders.value = Array.from(new Map(items.map((order) => [order.orderNo, order])).values())
+      orders.value = Array.from(
+        new Map(
+          items.filter((order) => !isOrderDeleted(order)).map((order) => [order.orderNo, order]),
+        ).values(),
+      )
       nextAfterId.value = response.nextAfterId
     } catch (failure) {
       report(failure, signal)
@@ -300,11 +349,17 @@ export function useSupportDesk() {
   }
 
   function businessWriteInProgress() {
-    return refundSubmitting.value || receiptSubmitting.value || deletingConversation.value
+    return (
+      refundSubmitting.value ||
+      receiptSubmitting.value ||
+      orderDeletionSubmitting.value ||
+      deletingConversation.value
+    )
   }
 
   async function loadConversations() {
-    if (!client || !connected.value || conversationsLoading.value) return
+    if (!client || !connected.value || conversationsLoading.value || orderDeletionSubmitting.value)
+      return
     const signal = context.signal
     conversationsLoading.value = true
     conversationError.value = null
@@ -331,6 +386,7 @@ export function useSupportDesk() {
       !connected.value ||
       historyLoading.value ||
       busy.value ||
+      orderDeletionSubmitting.value ||
       deletingConversation.value
     )
       return
@@ -380,12 +436,17 @@ export function useSupportDesk() {
       historyLoading.value ||
       conversationsLoading.value ||
       receiptSubmitting.value ||
+      orderDeletionSubmitting.value ||
       deletingConversation.value
     )
       return
     const signal = AbortSignal.any([context.signal, conversationRequest.signal])
     const activeShop = shopId.value
     const selected = orderNo ?? selectedOrder.value?.orderNo
+    if (selected && deletedOrderKeys.value.has(`${activeShop}/${selected}`)) {
+      error.value = '这笔订单已从你的订单记录中删除。'
+      return
+    }
     const resetTopic = contextResetPending.value
     const clientMessageId = crypto.randomUUID()
     busy.value = true
@@ -459,6 +520,8 @@ export function useSupportDesk() {
       !connected.value ||
       busy.value ||
       receiptSubmitting.value ||
+      orderDeletionSubmitting.value ||
+      isOrderDeleted(order) ||
       order.shopId !== Number(shopId.value)
     )
       return
@@ -505,9 +568,16 @@ export function useSupportDesk() {
   }
   function clearConversation() {
     // A pending refund or receipt confirmation must not lose its result.
-    if (connecting.value || refundSubmitting.value || receiptSubmitting.value) return
+    if (
+      connecting.value ||
+      refundSubmitting.value ||
+      receiptSubmitting.value ||
+      orderDeletionSubmitting.value
+    )
+      return
     resetConversationContext()
     resetReceiptConfirmation()
+    resetOrderDeletion()
     closeRefundForm()
     detailRequest.abort()
     selectedEligibility.value = null
@@ -539,6 +609,120 @@ export function useSupportDesk() {
     return left?.shopId === right.shopId && left.orderNo === right.orderNo
   }
 
+  function isOrderDeleted(order: Order): boolean {
+    return deletedOrderKeys.value.has(`${order.shopId}/${order.orderNo}`)
+  }
+
+  function orderDeletionBlocked(order: Order): boolean {
+    return ownedAfterSales.value.some(
+      (ticket) =>
+        ticket.shopId === order.shopId &&
+        ticket.orderNo === order.orderNo &&
+        (ticket.status === 'PENDING_REVIEW' ||
+          (ticket.status === 'APPROVED' && ticket.execution?.status !== 'SUCCEEDED')),
+    )
+  }
+
+  function resetOrderDeletion() {
+    orderDeletionRequest.abort()
+    orderDeletionRequest = new AbortController()
+    orderDeletionVersion++
+    orderDeletionOpen.value = false
+    orderDeletionOrder.value = null
+    orderDeletionSubmitting.value = false
+    orderDeletionError.value = null
+  }
+
+  function closeOrderDeletion() {
+    if (!orderDeletionSubmitting.value) resetOrderDeletion()
+  }
+
+  function openOrderDeletion(order: Order) {
+    if (
+      !client ||
+      !connected.value ||
+      busy.value ||
+      ordersBusy.value ||
+      historyLoading.value ||
+      conversationsLoading.value ||
+      businessWriteInProgress() ||
+      order.shopId !== Number(shopId.value) ||
+      !['COMPLETED', 'CANCELLED'].includes(order.status) ||
+      isOrderDeleted(order) ||
+      orderDeletionBlocked(order)
+    )
+      return
+    resetOrderDeletion()
+    orderDeletionNotice.value = null
+    orderDeletionOrder.value = order
+    orderDeletionOpen.value = true
+  }
+
+  async function confirmOrderDeletion() {
+    const order = orderDeletionOrder.value
+    if (
+      !client ||
+      !connected.value ||
+      !orderDeletionOpen.value ||
+      orderDeletionSubmitting.value ||
+      busy.value ||
+      ordersBusy.value ||
+      historyLoading.value ||
+      conversationsLoading.value ||
+      refundSubmitting.value ||
+      receiptSubmitting.value ||
+      deletingConversation.value ||
+      !order ||
+      order.shopId !== Number(shopId.value) ||
+      !['COMPLETED', 'CANCELLED'].includes(order.status) ||
+      isOrderDeleted(order) ||
+      orderDeletionBlocked(order)
+    )
+      return
+    const signal = AbortSignal.any([context.signal, orderDeletionRequest.signal])
+    const version = orderDeletionVersion
+    orderDeletionSubmitting.value = true
+    orderDeletionError.value = null
+    try {
+      await client.deleteOrder(shopId.value, order.orderNo, signal)
+      if (signal.aborted || version !== orderDeletionVersion) return
+      deletedOrderKeys.value = new Set([
+        ...deletedOrderKeys.value,
+        `${order.shopId}/${order.orderNo}`,
+      ])
+      orders.value = orders.value.filter((item) => !sameOrder(item, order))
+      if (sameOrder(selectedOrder.value, order)) selectedOrder.value = null
+      if (
+        conversationContext.value?.kind === 'ORDER' &&
+        conversationContext.value.orderNo === order.orderNo
+      ) {
+        setConversationContext(null)
+        contextResetPending.value = true
+      }
+      if (sameOrder(refundOrder.value, order)) closeRefundForm()
+      if (sameOrder(receiptOrder.value, order)) resetReceiptConfirmation()
+      messages.value = messages.value.map((message) => {
+        if (message.historical || !message.orders?.some((item) => sameOrder(item, order)))
+          return message
+        return message.type === 'ORDER_SELECTION'
+          ? { ...message, orders: message.orders.filter((item) => !sameOrder(item, order)) }
+          : { ...message, historical: true }
+      })
+      resetOrderDeletion()
+      orderDeletionNotice.value = '订单已从你的订单记录中删除。'
+    } catch (failure) {
+      if (!signal.aborted && version === orderDeletionVersion) {
+        orderDeletionError.value =
+          failure instanceof ApiError && [400, 403, 404, 409].includes(failure.status)
+            ? failure.message
+            : '删除结果暂时无法确认，请先刷新订单核实，不会自动重复提交。'
+        if (failure instanceof ApiError && failure.status === 401) report(failure, signal)
+      }
+    } finally {
+      if (!signal.aborted && version === orderDeletionVersion) orderDeletionSubmitting.value = false
+    }
+  }
+
   function resetReceiptConfirmation() {
     receiptRequest.abort()
     receiptRequest = new AbortController()
@@ -562,6 +746,8 @@ export function useSupportDesk() {
       ordersBusy.value ||
       receiptSubmitting.value ||
       refundSubmitting.value ||
+      orderDeletionSubmitting.value ||
+      isOrderDeleted(order) ||
       order.shopId !== Number(shopId.value) ||
       order.status !== 'SHIPPED' ||
       order.receivedAt
@@ -580,6 +766,7 @@ export function useSupportDesk() {
       !receiptOpen.value ||
       receiptSubmitting.value ||
       receiptResult.value ||
+      orderDeletionSubmitting.value ||
       !order ||
       order.shopId !== Number(shopId.value) ||
       order.status !== 'SHIPPED' ||
@@ -684,7 +871,15 @@ export function useSupportDesk() {
   }
 
   async function openRefundForm(order: Order | null = selectedOrder.value) {
-    if (!client || !connected.value || refundSubmitting.value || receiptSubmitting.value) return
+    if (
+      !client ||
+      !connected.value ||
+      refundSubmitting.value ||
+      receiptSubmitting.value ||
+      orderDeletionSubmitting.value
+    )
+      return
+    if (order && isOrderDeleted(order)) return
     closeRefundForm()
     refundOpen.value = true
     if (order?.shopId === Number(shopId.value)) await chooseRefundOrder(order)
@@ -697,6 +892,8 @@ export function useSupportDesk() {
       !connected.value ||
       !refundOpen.value ||
       refundSubmitting.value ||
+      orderDeletionSubmitting.value ||
+      isOrderDeleted(order) ||
       order.shopId !== Number(shopId.value)
     )
       return
@@ -729,6 +926,7 @@ export function useSupportDesk() {
       !connected.value ||
       !refundOpen.value ||
       refundLoading.value ||
+      orderDeletionSubmitting.value ||
       refundSubmitting.value
     )
       return
@@ -793,9 +991,12 @@ export function useSupportDesk() {
     }
   }
   onScopeDispose(() => {
+    client?.dispose()
+    void connectingClient?.logout().catch(() => undefined)
     if (contextExpiryTimer !== null) clearTimeout(contextExpiryTimer)
     conversationRequest.abort()
     resetReceiptConfirmation()
+    resetOrderDeletion()
     detailRequest.abort()
     closeRefundForm()
     context.abort()
@@ -829,6 +1030,16 @@ export function useSupportDesk() {
     openReceiptConfirmation,
     closeReceiptConfirmation,
     confirmReceipt,
+    orderDeletionOpen,
+    orderDeletionOrder,
+    orderDeletionSubmitting,
+    orderDeletionError,
+    orderDeletionNotice,
+    openOrderDeletion,
+    closeOrderDeletion,
+    confirmOrderDeletion,
+    isOrderDeleted,
+    orderDeletionBlocked,
     refundOpen,
     refundOrder,
     refundReason,

@@ -39,18 +39,20 @@ public class JdbcSupportOrderRepository implements SupportOrderRepository {
                    updated_at,
                    received_at,
                    product_items_json
-            FROM support_order
+            FROM support_order o
             WHERE tenant_id = :tenantId
               AND buyer_id = :buyerId
               AND order_no = :orderNo
+              AND NOT EXISTS (SELECT 1 FROM support_order_buyer_deletion d WHERE d.order_id=o.id)
             """;
 
     private static final String FIND_BY_BUYER_ID_SQL = """
             SELECT id, tenant_id, customer_id, buyer_id, order_no, status,
                    total_amount, currency, created_at, updated_at, received_at, product_items_json
-            FROM support_order
+            FROM support_order o
             WHERE buyer_id = :buyerId
               AND id > :afterId
+              AND NOT EXISTS (SELECT 1 FROM support_order_buyer_deletion d WHERE d.order_id=o.id)
             ORDER BY id ASC
             LIMIT :limit
             """;
@@ -58,10 +60,11 @@ public class JdbcSupportOrderRepository implements SupportOrderRepository {
     private static final String FIND_BY_SHOP_AND_BUYER_ID_SQL = """
             SELECT id, tenant_id, customer_id, buyer_id, order_no, status,
                    total_amount, currency, created_at, updated_at, received_at, product_items_json
-            FROM support_order
+            FROM support_order o
             WHERE buyer_id = :buyerId
               AND tenant_id = :shopId
               AND id > :afterId
+              AND NOT EXISTS (SELECT 1 FROM support_order_buyer_deletion d WHERE d.order_id=o.id)
             ORDER BY id ASC
             LIMIT :limit
             """;
@@ -74,6 +77,7 @@ public class JdbcSupportOrderRepository implements SupportOrderRepository {
                    o.total_amount, o.currency, o.created_at, o.updated_at, o.received_at, o.product_items_json
             FROM support_order o
             WHERE o.tenant_id=:shopId AND o.buyer_id=:buyerId
+              AND NOT EXISTS (SELECT 1 FROM support_order_buyer_deletion d WHERE d.order_id=o.id)
               AND (
                 SELECT COUNT(*)
                 FROM JSON_TABLE(COALESCE(o.product_items_json, JSON_ARRAY()), '$[*]' COLUMNS (

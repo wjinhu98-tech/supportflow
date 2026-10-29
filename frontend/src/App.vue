@@ -27,6 +27,7 @@ import ConversationContextNotice from './components/ConversationContextNotice.vu
 import AfterSalesPanel from './components/AfterSalesPanel.vue'
 import RefundDialog from './components/RefundDialog.vue'
 import ReceiptConfirmationDialog from './components/ReceiptConfirmationDialog.vue'
+import OrderDeletionDialog from './components/OrderDeletionDialog.vue'
 import { formatAmount, formatDate, formatTime } from './components/format'
 import { useSupportDesk } from './composables/useSupportDesk'
 import type { Order, OrderSelectionIntent } from './types'
@@ -58,6 +59,16 @@ const {
   openReceiptConfirmation,
   closeReceiptConfirmation,
   confirmReceipt,
+  orderDeletionOpen,
+  orderDeletionOrder,
+  orderDeletionSubmitting,
+  orderDeletionError,
+  orderDeletionNotice,
+  openOrderDeletion,
+  closeOrderDeletion,
+  confirmOrderDeletion,
+  isOrderDeleted,
+  orderDeletionBlocked,
   refundOpen,
   refundOrder,
   refundReason,
@@ -124,6 +135,7 @@ const canSend = computed(
     !historyLoading.value &&
     !conversationsLoading.value &&
     !deletingConversation.value &&
+    !orderDeletionSubmitting.value &&
     messageDraft.value.trim().length > 0,
 )
 const orderCountLabel = computed(
@@ -150,7 +162,9 @@ function onLoginClosed() {
 async function submitConnection() {
   if (connecting.value) return
   try {
-    const success = await connect(loginUsername.value.trim(), loginPassword.value)
+    const connection = connect(loginUsername.value.trim(), loginPassword.value)
+    loginPassword.value = ''
+    const success = await connection
     if (success) {
       closeLogin()
       await nextTick()
@@ -499,6 +513,29 @@ watch(
       </div>
 
       <div
+        v-if="orderDeletionNotice"
+        class="global-notice order-deletion-notice"
+        role="status"
+        data-testid="order-deletion-notice"
+      >
+        <Check
+          :size="16"
+          aria-hidden="true"
+        />
+        <span>{{ orderDeletionNotice }}</span>
+        <button
+          class="icon-button"
+          type="button"
+          aria-label="关闭删除提示"
+          @click="orderDeletionNotice = null"
+        >
+          <X
+            :size="16"
+            aria-hidden="true"
+          />
+        </button>
+      </div>
+      <div
         class="workspace"
         :class="{
           'workspace-chat': activeView === 'chat',
@@ -630,9 +667,12 @@ watch(
                 :selected="
                   selectedOrder?.orderNo === order.orderNo && selectedOrder?.shopId === order.shopId
                 "
-                :busy="busy || receiptSubmitting"
+                :busy="busy || receiptSubmitting || orderDeletionSubmitting"
+                :deleted="isOrderDeleted(order)"
+                :deletion-blocked="orderDeletionBlocked(order)"
                 @select="consultOrder"
                 @confirm-receipt="openReceiptConfirmation"
+                @delete-order="openOrderDeletion"
               />
               <button
                 v-if="nextAfterId !== null"
@@ -900,7 +940,9 @@ watch(
                       :order="order"
                       compact
                       :historical="message.historical"
-                      :busy="busy || receiptSubmitting"
+                      :busy="busy || receiptSubmitting || orderDeletionSubmitting"
+                      :deleted="isOrderDeleted(order)"
+                      :deletion-blocked="orderDeletionBlocked(order)"
                       :selected="
                         selectedOrder?.orderNo === order.orderNo &&
                         selectedOrder?.shopId === order.shopId
@@ -912,6 +954,7 @@ watch(
                         )
                       "
                       @confirm-receipt="openReceiptConfirmation"
+                      @delete-order="openOrderDeletion"
                     />
                   </div>
                 </div>
@@ -1123,6 +1166,24 @@ watch(
             <p>此处展示查询时的订单信息。发送消息可再次查询最新状态。</p>
           </div>
           <button
+            v-if="
+              ['COMPLETED', 'CANCELLED'].includes(selectedOrder.status) &&
+              !isOrderDeleted(selectedOrder)
+            "
+            class="button button-secondary detail-query"
+            type="button"
+            :disabled="
+              busy || ordersBusy || orderDeletionSubmitting || orderDeletionBlocked(selectedOrder)
+            "
+            @click="openOrderDeletion(selectedOrder)"
+          >
+            <Trash2
+              :size="14"
+              aria-hidden="true"
+            />
+            {{ orderDeletionBlocked(selectedOrder) ? '售后处理中，暂不能删除' : '删除订单' }}
+          </button>
+          <button
             class="button button-secondary detail-query"
             type="button"
             :disabled="busy"
@@ -1224,7 +1285,7 @@ watch(
             aria-hidden="true"
           />
           <span>
-            凭证仅保存在内存中，刷新或断开连接后清除。
+            密码仅用于本次登录，登录后通过安全会话访问。刷新后需重新登录。
             <br />
             仅用于本地开发联调，不是生产环境登录方案。
           </span>
@@ -1480,6 +1541,14 @@ watch(
     :result="receiptResult"
     @close="closeReceiptConfirmation"
     @confirm="confirmReceipt"
+  />
+  <OrderDeletionDialog
+    v-if="orderDeletionOpen && orderDeletionOrder && connected"
+    :order="orderDeletionOrder"
+    :submitting="orderDeletionSubmitting"
+    :error="orderDeletionError"
+    @close="closeOrderDeletion"
+    @confirm="confirmOrderDeletion"
   />
   <RefundDialog
     v-if="refundOpen && connected"

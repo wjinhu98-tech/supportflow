@@ -9,6 +9,7 @@ import dev.supportflow.chat.conversation.ConversationException;
 import dev.supportflow.chat.conversation.ConversationMessageRequest;
 import dev.supportflow.chat.conversation.ConversationStore;
 import dev.supportflow.testsupport.KnowledgeFixtures;
+import dev.supportflow.testsupport.OrderVisibilityFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -137,6 +138,7 @@ class AgentRuntimeApiIT {
             create.setString(1, DATABASE_PASSWORD);
             create.execute();
             KnowledgeFixtures.grantRead(connection, DATABASE, RUNTIME);
+            OrderVisibilityFixtures.grantRead(connection, DATABASE, RUNTIME);
             for (String table : List.of("support_order", "support_shipment_event")) {
                 grants.execute("GRANT SELECT ON " + DATABASE + "." + table + " TO '" + RUNTIME + "'@'%'");
             }

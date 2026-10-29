@@ -132,6 +132,19 @@ class AgentLoopPersistenceIT {
         verifyNoInteractions(logistics);
     }
 
+    @Test void userModelQuotaRejectionPausesOnceWithoutRetryOrToolExecution() {
+        var limited = new dev.supportflow.common.traffic.TrafficLimitExceededException(20);
+        doThrow(limited).when(model).decide(any());
+        AgentRun claimed = claim();
+        assertThatThrownBy(() -> loop.advance(buyer, claimed)).isSameAs(limited);
+        AgentRun paused = store.find(claimed.key());
+        assertThat(paused.status()).isEqualTo(AgentRunStatus.PAUSED);
+        assertThat(paused.failureCode()).isEqualTo(AgentFailureCode.MODEL_UNAVAILABLE);
+        assertThat(paused.attempts()).isEqualTo(1);
+        verify(model, times(1)).decide(any());
+        verifyNoInteractions(orderTool, logistics);
+    }
+
     @Test void aTransientModelFailureRetriesOnceWithAnotherDurableReservationAndTheSameOperationId() {
         var registry = new SimpleMeterRegistry();
         loop = new AgentLoopExecutor(store, model, orderTool, logistics, authorization, defaults,
@@ -492,7 +505,7 @@ class AgentLoopPersistenceIT {
         }
         var migration = Flyway.configure().dataSource(url, MYSQL.getUsername(), MYSQL.getPassword())
                 .locations("classpath:db/migration").cleanDisabled(true).load().migrate();
-        assertThat(migration.migrationsExecuted).isEqualTo(5);
+        assertThat(migration.migrationsExecuted).isEqualTo(9);
         var upgraded = new JdbcAgentRunStore(upgradeJdbc, json, manager);
         AgentRun old = upgraded.find(key);
         assertThat(old.workflowVersion()).isEqualTo(1);
@@ -542,7 +555,7 @@ class AgentLoopPersistenceIT {
                 .param("conversation", conversation.id().toString()).update();
         var migrated = Flyway.configure().dataSource(url, MYSQL.getUsername(), MYSQL.getPassword())
                 .locations("classpath:db/migration").cleanDisabled(true).load().migrate();
-        assertThat(migrated.migrationsExecuted).isEqualTo(4);
+        assertThat(migrated.migrationsExecuted).isEqualTo(8);
         var upgraded = new JdbcAgentRunStore(upgradeJdbc, json, manager);
         assertThat(upgraded.find(key).retryPolicy().maxRetries()).isZero();
         assertThat(upgraded.find(key).workflowVersion()).isEqualTo(2);

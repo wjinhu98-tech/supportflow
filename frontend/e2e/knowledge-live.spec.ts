@@ -1,18 +1,14 @@
-import { expect, request, test, type APIRequestContext, type Page } from '@playwright/test'
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
 import type { ChatResponse, KnowledgeArticle, KnowledgeAuditPage } from '../src/types'
 import { connect, send } from './helpers'
+import { sessionAccount } from './session'
 
 // Public isolated-launcher identities, never daily business credentials.
 const password = 'Frontend-Test-Only!'
 const base = '/api/v1/merchant/shops/100/knowledge'
 
 async function account(username: string): Promise<APIRequestContext> {
-  return request.newContext({
-    baseURL: test.info().project.use.baseURL,
-    extraHTTPHeaders: {
-      Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`,
-    },
-  })
+  return sessionAccount(username, password)
 }
 
 async function call<T>(
@@ -80,6 +76,79 @@ async function act(page: Page, id: string, action: 'publish' | 'offline') {
   expect(response.status()).toBe(200)
   return (await response.json()) as KnowledgeArticle
 }
+
+test('merchant file import previews without writes then saves a draft, reuses it and respects publication', async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(60_000)
+  const editor = await account('frontend-editor'),
+    buyer = await account('frontend-buyer')
+  const token = `导入${Date.now()}`,
+    content = `星河收纳盒整理说明 ${token}\n请使用随附软布整理。\n<img src=x onerror=alert(1)>`
+  const upload = {
+    name: '收纳盒.md',
+    mimeType: 'text/markdown',
+    buffer: Buffer.from(content, 'utf8'),
+  }
+  try {
+    await login(page)
+    const before = await call<{ items: KnowledgeArticle[] }>(editor, 'GET', base)
+    await page.getByTestId('knowledge-import').click()
+    await page.getByTestId('knowledge-import-file').setInputFiles(upload)
+    await expect(page.getByTestId('knowledge-import-preview')).toHaveText(content)
+    expect(await page.getByTestId('knowledge-import-dialog').locator('img,script').count()).toBe(0)
+    await page.getByRole('button', { name: '取消导入', exact: true }).click()
+    expect((await call<{ items: KnowledgeArticle[] }>(editor, 'GET', base)).items).toEqual(
+      before.items,
+    )
+    async function submitFile() {
+      await page.getByTestId('knowledge-import').click()
+      await page.getByTestId('knowledge-import-file').setInputFiles(upload)
+      await expect(page.getByTestId('knowledge-import-preview')).toHaveText(content)
+      await page.getByTestId('knowledge-import-keywords').fill(`星河收纳盒,${token}`)
+      const pending = page.waitForResponse(
+        (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === base + '/imports',
+      )
+      await page.getByTestId('knowledge-import-confirm').click()
+      const response = await pending
+      expect(response.status()).toBe(200)
+      await expect(page.getByTestId('knowledge-import-dialog')).toHaveCount(0)
+      return response.json() as Promise<{ articleId: string; reused: boolean }>
+    }
+    const created = await submitFile()
+    expect(created.reused).toBe(false)
+    const draft = await call<KnowledgeArticle>(editor, 'GET', `${base}/${created.articleId}`)
+    expect(draft.status).toBe('DRAFT')
+    expect(await answer(buyer, '100', `知识库 星河收纳盒 ${token}`)).not.toContain(token)
+    await act(page, created.articleId, 'publish')
+    expect(await answer(buyer, '100', `知识库 星河收纳盒 ${token}`)).toContain(token)
+    expect(await answer(buyer, '101', `知识库 星河收纳盒 ${token}`)).not.toContain(token)
+    const published = await call<KnowledgeArticle>(editor, 'GET', `${base}/${created.articleId}`)
+    const reused = await submitFile()
+    expect(reused).toEqual({ articleId: created.articleId, reused: true })
+    expect(await call<KnowledgeArticle>(editor, 'GET', `${base}/${created.articleId}`)).toEqual(
+      published,
+    )
+    await act(page, created.articleId, 'offline')
+    expect(await answer(buyer, '100', `知识库 星河收纳盒 ${token}`)).not.toContain(token)
+    const csrf = await (await editor.get('/api/v1/security/csrf')).json()
+    const oversized = await editor.post(base + '/imports/preview', {
+      headers: { [csrf.headerName]: csrf.token },
+      multipart: {
+        file: { name: 'too-large.txt', mimeType: 'text/plain', buffer: Buffer.alloc(65537, 120) },
+      },
+    })
+    expect(oversized.status()).toBe(413)
+    expect((await oversized.json()).code).toBe('KNOWLEDGE_IMPORT_INVALID')
+    await page.screenshot({
+      path: testInfo.outputPath('knowledge-import-complete.png'),
+      fullPage: true,
+    })
+  } finally {
+    await editor.dispose()
+    await buyer.dispose()
+  }
+})
 
 test('knowledge-only staff publish, edit drafts without replacing live snapshots, and take articles offline', async ({
   page,

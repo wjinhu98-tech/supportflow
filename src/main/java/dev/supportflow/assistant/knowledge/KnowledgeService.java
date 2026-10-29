@@ -189,6 +189,14 @@ public class KnowledgeService {
                 : rag.search(shopId, documents, retrievalQuery(message));
     }
 
+    /** Management counts/builds exactly the same current publication set used by scoped retrieval. */
+    public KnowledgeIndexStatus index(long shopId, boolean warmup) {
+        if (rag == null || !rag.enabled()) return new KnowledgeIndexStatus("DISABLED", 0, 0, null);
+        var documents = new ArrayList<>(catalog);
+        documents.addAll(shopDocuments(shopId));
+        return rag.index(shopId, documents, warmup);
+    }
+
     private KnowledgeAnswer renderDetailed(long shopId, String message, List<KnowledgeMatch> matches) {
         if (rag != null && rag.publicSelectionEnabled() && publicSelector != null && !isProtected(message)
                 && !matches.isEmpty() && matches.stream().allMatch(match -> publicReferences.containsExact(shopId, match))) {

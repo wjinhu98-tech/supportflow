@@ -3,6 +3,7 @@ package dev.supportflow.chat.api;
 import dev.supportflow.SupportFlowApplication;
 import dev.supportflow.assistant.tool.LogisticsTool;
 import dev.supportflow.testsupport.KnowledgeFixtures;
+import dev.supportflow.testsupport.OrderVisibilityFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -112,6 +113,7 @@ class ProductOrderChatIT {
             create.setString(1, DATABASE_PASSWORD);
             create.execute();
             KnowledgeFixtures.grantRead(connection, DATABASE, RUNTIME);
+            OrderVisibilityFixtures.grantRead(connection, DATABASE, RUNTIME);
             for (String table : List.of("support_order", "support_shipment_event", "support_merchant", "support_merchant_shop"))
                 grants.execute("GRANT SELECT ON " + DATABASE + "." + table + " TO '" + RUNTIME + "'@'%'");
             for (String table : List.of("support_after_sale", "support_after_sale_execution", "support_chat_conversation",
@@ -380,6 +382,69 @@ class ProductOrderChatIT {
         mvc.perform(post(runUrl(shop, conversation, messageId) + "/resume").with(httpBasic("buyer", PASSWORD)).with(csrf()))
                 .andExpect(status().isNotFound());
         assertThat(messageCount(conversation)).isZero();
+    }
+
+    @Test
+    void deletedOrdersDisappearFromNewQueriesButKeepTheirHistoricalChatEvidence() throws Exception {
+        var deleted = order(shop, 200, "COMPLETED", "99.90", List.of(item("蓝牙耳机", "黑色", 1)));
+        String conversation = create("buyer", shop);
+        JsonNode before = assistant(send("buyer", shop, conversation, id(), "咨询此订单", deleted.number())
+                .andExpect(status().isOk()).andReturn());
+        assertThat(numbers(before)).containsExactly(deleted.number());
+        var firstVisible = order(shop, 200, "COMPLETED", "29.90", List.of(item("陶瓷杯", "白色", 1)));
+        var secondVisible = order(shop, 200, "CANCELLED", "39.90", List.of(item("棉质床单", "白色", 1)));
+        hide(deleted);
+
+        mvc.perform(get("/api/v1/shops/" + shop + "/orders/" + deleted.number()).with(httpBasic("buyer", PASSWORD)))
+                .andExpect(status().isNotFound());
+        JsonNode list = body(mvc.perform(get("/api/v1/orders").param("afterId", Long.toString(deleted.id() - 1))
+                        .param("size", "1").with(httpBasic("buyer", PASSWORD)))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(list.path("items").size()).isEqualTo(1);
+        assertThat(list.path("items").get(0).path("orderNo").asString()).isEqualTo(firstVisible.number());
+        JsonNode next = body(mvc.perform(get("/api/v1/orders").param("afterId", list.path("nextAfterId").asString())
+                        .param("size", "1").with(httpBasic("buyer", PASSWORD)))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(next.path("items").get(0).path("orderNo").asString()).isEqualTo(secondVisible.number());
+        assertThat(next.path("nextAfterId").isNull()).isTrue();
+        JsonNode shopList = assistant(send("buyer", shop, conversation, id(), "我的订单", null)
+                .andExpect(status().isOk()).andReturn());
+        assertThat(numbers(shopList)).containsExactly(firstVisible.number(), secondVisible.number());
+        JsonNode product = assistant(send("buyer", shop, conversation, id(), "耳机发货了吗", null)
+                .andExpect(status().isOk()).andReturn());
+        assertThat(numbers(product)).isEmpty();
+        assertThat(product.path("reply").asString()).contains("暂未找到").doesNotContain(deleted.number());
+        send("buyer", shop, conversation, id(), "咨询此订单", deleted.number()).andExpect(status().isNotFound());
+
+        JsonNode historic = history(shop, conversation).path("messages").get(1).path("response");
+        assertThat(numbers(historic)).containsExactly(deleted.number());
+        assertThat(historic.path("orders").get(0).path("items").get(0).path("productName").asString())
+                .isEqualTo("蓝牙耳机");
+        assertThat(inspection.sql("SELECT COUNT(*) FROM support_order WHERE id=:id")
+                .param("id", deleted.id()).query(Long.class).single()).isEqualTo(1);
+    }
+
+    @Test
+    void deletedOrderCannotResumeAnOlderPausedAgentRun() throws Exception {
+        var headset = order(shop, 200, "SHIPPED", "99.90", List.of(item("蓝牙耳机", "黑色", 1)));
+        String conversation = create("buyer", shop), messageId = id();
+        failNextLogistics(headset);
+        send("buyer", shop, conversation, messageId, "耳机物流到哪了", null).andExpect(status().isServiceUnavailable());
+        // Simulate receipt completion followed by an eligible deletion while this old run is paused.
+        inspection.sql("UPDATE support_order SET status='COMPLETED',received_at=UTC_TIMESTAMP(3) WHERE id=:id")
+                .param("id", headset.id()).update();
+        hide(headset);
+        mvc.perform(post(runUrl(shop, conversation, messageId) + "/resume").with(httpBasic("buyer", PASSWORD)).with(csrf()))
+                .andExpect(status().isNotFound());
+        assertThat(messageCount(conversation)).isZero();
+    }
+
+    private void hide(Fixture order) {
+        // Read-side fixture only; delete authorization/transactions are covered in OrderDeletionIT.
+        inspection.sql("""
+                INSERT INTO support_order_buyer_deletion(order_id,tenant_id,buyer_id,order_no,actor)
+                VALUES (:id,:shop,200,:number,'read-side-test')
+                """).param("id", order.id()).param("shop", shop).param("number", order.number()).update();
     }
 
     private Fixture order(long targetShop, long buyer, String status, String amount, List<Map<String, Object>> items) throws Exception {

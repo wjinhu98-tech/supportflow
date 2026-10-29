@@ -6,6 +6,7 @@ type RecordedRequest = {
   method: string
   path: string
   authenticated: boolean
+  hasAuthorization: boolean
   hasSessionCookie: boolean
   hasCsrf: boolean
   accepted: boolean
@@ -37,6 +38,62 @@ test('chat is the default view and order navigation opens a separate workspace',
   await showChat(page)
   await expect(orderNavigation).not.toHaveAttribute('aria-current', 'page')
   await expect(page.getByTestId('orders-panel')).not.toBeVisible()
+})
+
+test('buyer confirms order deletion, sees pending-after-sale conflicts, and removes only the selected card', async ({
+  page,
+}, testInfo) => {
+  const target = 'SF10001'
+  let deletions = 0
+  await page.route('**/api/v1/shops/100/chat/messages', async (route) => {
+    const response = await route.fetch()
+    const data = await response.json()
+    if (data.type === 'ORDER_SELECTION')
+      data.orders = data.orders.map((order: { orderNo: string }) =>
+        order.orderNo === target
+          ? { ...order, status: 'COMPLETED', statusDescription: '已完成' }
+          : order,
+      )
+    await route.fulfill({ response, json: data })
+  })
+  await page.route(`**/api/v1/shops/100/orders/${target}`, async (route) => {
+    expect(route.request().method()).toBe('DELETE')
+    expect(route.request().headers()['x-csrf-token']).toBeTruthy()
+    expect(route.request().postData()).toBeNull()
+    deletions++
+    if (deletions === 1)
+      return route.fulfill({
+        status: 409,
+        json: {
+          code: 'ORDER_DELETION_CONFLICT',
+          message: '该订单仍有待处理售后，请处理完成后再删除。',
+        },
+      })
+    await route.fulfill({ status: 204 })
+  })
+  await connect(page)
+  await showOrders(page)
+  const panel = page.getByTestId('orders-panel')
+  const count = await panel.getByTestId('order-card').count()
+  const action = panel.getByRole('button', { name: `删除订单 ${target}`, exact: true })
+  await action.click()
+  const dialog = page.getByTestId('order-deletion-dialog')
+  await expect(dialog).toContainText('商家记录及售后凭证会保留')
+  await dialog.getByRole('button', { name: '暂不删除', exact: true }).click()
+  expect(deletions).toBe(0)
+  await action.click()
+  await page.getByTestId('confirm-order-deletion').click()
+  await expect(dialog.getByRole('alert')).toContainText('待处理售后')
+  await expect(action).toBeVisible()
+  await page.getByTestId('confirm-order-deletion').click()
+  await expect(dialog).not.toBeVisible()
+  await expect(panel.getByTestId('order-card')).toHaveCount(count - 1)
+  await expect(action).not.toBeVisible()
+  await expect(page.getByTestId('order-deletion-notice')).toContainText(
+    '订单已从你的订单记录中删除',
+  )
+  expect(deletions).toBe(2)
+  await page.screenshot({ path: testInfo.outputPath('order-deleted.png'), fullPage: true })
 })
 
 test('shop options include the new shops and deleting a window requires explicit confirmation', async ({
@@ -322,7 +379,7 @@ test('disconnected users cannot send, and invalid credentials do not connect', a
   await expect(page.getByTestId('disconnect-button')).toHaveCount(0)
 })
 
-test('proxy forwards Basic authentication, HttpOnly session cookie and CSRF header', async ({
+test('login exchanges credentials once, then proxy uses HttpOnly session cookie and CSRF without Basic', async ({
   page,
   request,
 }) => {
@@ -330,14 +387,24 @@ test('proxy forwards Basic authentication, HttpOnly session cookie and CSRF head
   await showOrders(page)
   await expect(page.getByTestId('orders-panel').getByTestId('order-card')).toHaveCount(20)
   const posts = (await recorded(request)).filter((entry) => entry.method === 'POST')
-  expect(posts.length).toBeGreaterThan(0)
+  const login = posts.filter((entry) => entry.path === '/api/v1/security/login')
+  expect(login).toHaveLength(1)
+  expect(login[0]).toMatchObject({
+    hasCsrf: true,
+    hasSessionCookie: true,
+    accepted: true,
+    hasAuthorization: false,
+  })
+  const business = posts.filter((entry) => entry.path !== '/api/v1/security/login')
+  expect(business.length).toBeGreaterThan(0)
   expect(
-    posts.every(
+    business.every(
       (entry) => entry.authenticated && entry.hasSessionCookie && entry.hasCsrf && entry.accepted,
     ),
   ).toBe(true)
-  expect(posts[0]?.path).toBe('/api/v1/shops/100/chat/messages')
-  expect(posts[0]?.body).toEqual({ message: '我的订单' })
+  expect((await recorded(request)).every((entry) => !entry.hasAuthorization)).toBe(true)
+  expect(business[0]?.path).toBe('/api/v1/shops/100/chat/messages')
+  expect(business[0]?.body).toEqual({ message: '我的订单' })
   const sessionCookie = (await page.context().cookies()).find(
     (cookie) => cookie.name === 'JSESSIONID',
   )
@@ -356,6 +423,36 @@ test('credentials and CSRF token are not persisted in browser storage', async ({
   await page.reload()
   await expect(page.getByTestId('disconnect-button')).toHaveCount(0)
   await expect(page.getByTestId('send-button')).toBeDisabled()
+})
+
+test('logout invalidates the cookie and new page login clears a stale account without leaking its data', async ({
+  page,
+  context,
+  request,
+}) => {
+  await connect(page)
+  await send(page, '第一位买家的咨询')
+  await expect(page.getByTestId('chat-message').last()).toContainText('第一位买家的咨询')
+  const other = await context.newPage()
+  await other.goto('/?shopId=100')
+  await expect(other.getByTestId('disconnect-button')).toHaveCount(0)
+  await connect(other, 'slow-buyer')
+  await expect(page.getByTestId('disconnect-button')).toHaveCount(0)
+  await expect(page.getByTestId('chat-message')).toHaveCount(0)
+  await expect(other.getByTestId('chat-message')).toHaveCount(0)
+  await other.getByTestId('disconnect-button').click()
+  await expect
+    .poll(
+      async () =>
+        (await recorded(request)).filter(
+          (entry) => entry.path === '/api/v1/security/logout' && entry.accepted,
+        ).length,
+    )
+    .toBe(1)
+  const identity = await context.request.get('/api/v1/security/me')
+  expect(identity.status()).toBe(401)
+  expect((await recorded(request)).every((entry) => !entry.hasAuthorization)).toBe(true)
+  await other.close()
 })
 
 test('pagination uses the opaque server cursor and appends without losing earlier orders', async ({

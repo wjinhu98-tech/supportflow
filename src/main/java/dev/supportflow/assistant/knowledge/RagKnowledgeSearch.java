@@ -20,15 +20,30 @@ public final class RagKnowledgeSearch {
     private final PublicReferenceCatalog references = new PublicReferenceCatalog();
     private final MeterRegistry meters;
     private final Map<Key, float[]> vectors;
+    private final KnowledgeVectorStore persistent;
+    private final java.util.concurrent.Semaphore warming = new java.util.concurrent.Semaphore(1);
 
     RagKnowledgeSearch(RagProperties properties, KnowledgeEmbedding embedding, MeterRegistry meters) {
-        this.properties = properties; this.embedding = embedding; this.meters = meters;
+        this(properties, embedding, meters, null);
+    }
+
+    RagKnowledgeSearch(RagProperties properties, KnowledgeEmbedding embedding, MeterRegistry meters,
+                       KnowledgeVectorStore persistent) {
+        this.properties = properties;
+        this.embedding = embedding;
+        this.meters = meters;
+        this.persistent = properties.persistentIndexEnabled() ? persistent : null;
         vectors = new LinkedHashMap<>(128, 0.75f, true) {
-            @Override protected boolean removeEldestEntry(Map.Entry<Key, float[]> eldest) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<Key, float[]> eldest) {
                 return size() > properties.cacheEntries();
             }
         };
-        meters.gauge("supportflow.rag.cached.chunks", vectors, cache -> { synchronized (cache) { return cache.size(); } });
+        meters.gauge("supportflow.rag.cached.chunks", vectors, cache -> {
+            synchronized (cache) {
+                return cache.size();
+            }
+        });
     }
 
     public boolean enabled() { return properties.enabled(); }
@@ -61,17 +76,34 @@ public final class RagKnowledgeSearch {
                 if (KnowledgeQueryExpansion.conflicts(normalized, KnowledgeRetriever.normalize(source.title() + " " + source.content()))) continue;
                 double best = -1;
                 String fingerprint = fingerprint(source.title() + "\n" + source.content());
+                Map<Integer, float[]> stored = null;
+                var sourceKey = new KnowledgeVectorStore.SourceKey(shopId, source.sourceId(), source.version(), fingerprint);
                 for (KnowledgeChunk chunk : KnowledgeChunk.split(source)) {
                     if (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) > properties.buildDeadlineMillis())
                         return fallback(lexical, "deadline");
                     Key key = new Key(shopId, source.sourceId(), source.version(), fingerprint, chunk.ordinal());
                     float[] vector;
-                    synchronized (vectors) { vector = vectors.get(key); }
+                    synchronized (vectors) {
+                        vector = vectors.get(key);
+                    }
                     if (vector == null) {
-                        vector = embedding.embed(chunk.text(), false);
-                        synchronized (vectors) { vectors.put(key, vector); }
-                        meters.counter("supportflow.rag.embedding.cache", "result", "miss").increment();
-                    } else meters.counter("supportflow.rag.embedding.cache", "result", "hit").increment();
+                        if (persistent != null && stored == null) {
+                            stored = loadStored(sourceKey);
+                        }
+                        vector = stored == null ? null : stored.get(chunk.ordinal());
+                        if (vector != null) {
+                            meters.counter("supportflow.rag.persistent", "result", "hit").increment();
+                        } else {
+                            vector = embedding.embed(chunk.text(), false);
+                            saveStored(sourceKey, chunk.ordinal(), vector);
+                            meters.counter("supportflow.rag.embedding.cache", "result", "miss").increment();
+                        }
+                        synchronized (vectors) {
+                            vectors.put(key, vector);
+                        }
+                    } else {
+                        meters.counter("supportflow.rag.embedding.cache", "result", "hit").increment();
+                    }
                     best = Math.max(best, cosine(query, vector));
                 }
                 dense.add(new Dense(source, best));
@@ -108,6 +140,81 @@ public final class RagKnowledgeSearch {
             return fallback(lexical, "embedding_unavailable");
         } finally {
             meters.timer("supportflow.rag.retrieval.duration").record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+        }
+    }
+
+    private Map<Integer, float[]> loadStored(KnowledgeVectorStore.SourceKey key) {
+        try {
+            return persistent.load(key);
+        } catch (RuntimeException unavailable) {
+            meters.counter("supportflow.rag.persistent", "result", "read_unavailable").increment();
+            return Map.of();
+        }
+    }
+
+    private void saveStored(KnowledgeVectorStore.SourceKey key, int chunk, float[] vector) {
+        if (persistent == null) {
+            return;
+        }
+        try {
+            persistent.save(key, chunk, vector);
+            meters.counter("supportflow.rag.persistent", "result", "stored").increment();
+        } catch (RuntimeException unavailable) {
+            meters.counter("supportflow.rag.persistent", "result", "write_unavailable").increment();
+        }
+    }
+
+    void clearMemoryCache() {
+        synchronized (vectors) {
+            vectors.clear();
+        }
+    }
+
+    KnowledgeIndexStatus index(long shopId, List<KnowledgeDocument> sources, boolean warmup) {
+        if (!enabled() || persistent == null || embedding == null) {
+            return new KnowledgeIndexStatus("DISABLED", 0, 0, null);
+        }
+        if (warmup && !warming.tryAcquire()) {
+            return new KnowledgeIndexStatus("BUSY", 0, 0, JdbcKnowledgeVectorStore.MODEL_FINGERPRINT);
+        }
+        long started = System.nanoTime();
+        int expected = sources.stream().mapToInt(source -> KnowledgeChunk.split(source).size()).sum();
+        int indexed = 0;
+        boolean unavailable = false;
+        try {
+            for (KnowledgeDocument source : sources) {
+                if (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) >= properties.buildDeadlineMillis()) {
+                    break;
+                }
+                var chunks = KnowledgeChunk.split(source);
+                var key = new KnowledgeVectorStore.SourceKey(shopId, source.sourceId(), source.version(),
+                        fingerprint(source.title() + "\n" + source.content()));
+                try {
+                    Map<Integer, float[]> stored = persistent.load(key);
+                    for (KnowledgeChunk chunk : chunks) {
+                        if (!stored.containsKey(chunk.ordinal()) && warmup
+                                && TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < properties.buildDeadlineMillis()) {
+                            persistent.save(key, chunk.ordinal(), embedding.embed(chunk.text(), false));
+                        }
+                    }
+                    // Count what was actually persisted, never the process-local cache or attempted writes.
+                    Map<Integer, float[]> actual = warmup ? persistent.load(key) : stored;
+                    for (KnowledgeChunk chunk : chunks) {
+                        if (actual.containsKey(chunk.ordinal())) {
+                            indexed++;
+                        }
+                    }
+                } catch (RuntimeException failure) {
+                    unavailable = true;
+                    break;
+                }
+            }
+            String status = unavailable ? "UNAVAILABLE" : expected == 0 ? "EMPTY" : indexed == expected ? "READY" : "PARTIAL";
+            return new KnowledgeIndexStatus(status, expected, indexed, JdbcKnowledgeVectorStore.MODEL_FINGERPRINT);
+        } finally {
+            if (warmup) {
+                warming.release();
+            }
         }
     }
 

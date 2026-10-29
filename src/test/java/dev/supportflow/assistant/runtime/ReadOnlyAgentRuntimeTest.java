@@ -144,6 +144,36 @@ class ReadOnlyAgentRuntimeTest {
     }
 
     @Test
+    void legacyRuntimePreservesQuotaRejectionAndNeverCallsBusinessTools() {
+        var limited = new dev.supportflow.common.traffic.TrafficLimitExceededException(30);
+        when(planner.plan(ToolName.LOGISTICS_LOOKUP, input.message(), null)).thenThrow(limited);
+        assertThatThrownBy(() -> runtime.execute(buyer, input)).isSameAs(limited);
+        verify(store).pause(eq(key), anyLong(), eq(AgentFailureCode.MODEL_UNAVAILABLE));
+        verifyNoInteractions(orderTool, logistics);
+    }
+
+    @Test
+    void persistedRunCorrelationReachesPlanningAndToolsOnTheCallerThread() {
+        UUID persistedRunId = state.get().id();
+        var trace = new AtomicReference<String>();
+        when(planner.plan(ToolName.LOGISTICS_LOOKUP, input.message(), null)).thenAnswer(ignored -> {
+            assertThat(dev.supportflow.common.observability.TraceContext.traceId()).isEqualTo(trace.get());
+            assertThat(dev.supportflow.common.observability.TraceContext.agentRunId()).isEqualTo(persistedRunId.toString());
+            return new PlannedToolCall(ToolName.LOGISTICS_LOOKUP, "SF10001");
+        });
+        when(logistics.lookup(order)).thenAnswer(ignored -> {
+            assertThat(dev.supportflow.common.observability.TraceContext.traceId()).isEqualTo(trace.get());
+            assertThat(dev.supportflow.common.observability.TraceContext.agentRunId()).isEqualTo(persistedRunId.toString());
+            return "safe logistics result";
+        });
+        try (var scope = dev.supportflow.common.observability.TraceContext.beginRequest()) {
+            trace.set(dev.supportflow.common.observability.TraceContext.traceId());
+            runtime.execute(buyer, input);
+            assertThat(dev.supportflow.common.observability.TraceContext.agentRunId()).isEqualTo("none");
+        }
+    }
+
+    @Test
     void aNewRuntimeResumesAfterTheSavedOrderResultWithoutRepeatingCompletedTools() {
         state.set(run(AgentPhase.LOGISTICS_LOOKUP, AgentRunStatus.PAUSED, "SF10001", "safe order result", 2, 1));
         AgentRun resumed = runtime().resume(buyer, key);

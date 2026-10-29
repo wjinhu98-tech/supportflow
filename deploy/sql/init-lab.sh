@@ -60,6 +60,7 @@ SQL
         mysql --defaults-extra-file="$client_file" <<'SQL'
 GRANT UPDATE (status, received_at) ON `supportflow_lab`.`support_order` TO 'lab_app'@'%';
 GRANT INSERT ON `supportflow_lab`.`support_order_receipt_audit` TO 'lab_app'@'%';
+GRANT INSERT ON `supportflow_lab`.`support_order_buyer_deletion` TO 'lab_app'@'%';
 GRANT INSERT, UPDATE ON `supportflow_lab`.`support_after_sale` TO 'lab_app'@'%';
 GRANT INSERT ON `supportflow_lab`.`support_after_sale_audit` TO 'lab_app'@'%';
 GRANT INSERT, UPDATE ON `supportflow_lab`.`support_after_sale_execution` TO 'lab_app'@'%';
@@ -72,6 +73,8 @@ GRANT INSERT ON `supportflow_lab`.`support_chat_message` TO 'lab_app'@'%';
 GRANT INSERT, UPDATE ON `supportflow_lab`.`support_knowledge_article` TO 'lab_app'@'%';
 GRANT INSERT ON `supportflow_lab`.`support_knowledge_revision` TO 'lab_app'@'%';
 GRANT INSERT ON `supportflow_lab`.`support_knowledge_audit` TO 'lab_app'@'%';
+GRANT INSERT ON `supportflow_lab`.`support_knowledge_import` TO 'lab_app'@'%';
+GRANT INSERT ON `supportflow_lab`.`support_knowledge_vector` TO 'lab_app'@'%';
 SQL
         printf '%s\n' 'Isolated lab application table and column grants applied.'
     fi

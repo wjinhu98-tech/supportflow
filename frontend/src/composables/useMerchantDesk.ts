@@ -24,6 +24,7 @@ export function useMerchantDesk() {
   const needsVerification = ref(false)
   const error = ref<string | null>(null)
   let client: ApiClient | null = null
+  let connectingClient: ApiClient | null = null
   let accountContext = new AbortController()
   let shopContext = new AbortController()
   const knowledge = useMerchantKnowledge({
@@ -38,6 +39,7 @@ export function useMerchantDesk() {
     () =>
       submitting.value ||
       knowledge.knowledgeDirty.value ||
+      knowledge.knowledgeImportOpen.value ||
       knowledge.knowledgeNeedsVerification.value,
   )
 
@@ -61,10 +63,13 @@ export function useMerchantDesk() {
   }
 
   function resetAccount() {
+    client?.dispose()
+    connectingClient?.dispose()
     accountContext.abort()
     accountContext = new AbortController()
     resetShop()
     client = null
+    connectingClient = null
     connected.value = false
     connecting.value = false
     username.value = ''
@@ -78,7 +83,14 @@ export function useMerchantDesk() {
   function disconnect(): boolean {
     // Do not cancel a business POST and leave the operator unsure whether it committed.
     if (navigationBlocked.value) return false
+    const previous = client ?? connectingClient
+    const logout = previous?.logout()
     resetAccount()
+    const signal = accountContext.signal
+    void logout?.catch(() => {
+      if (!signal.aborted && !connected.value)
+        loginError.value = '页面数据已清除，但退出登录未能确认。请重新登录，或关闭此页面。'
+    })
     return true
   }
 
@@ -100,11 +112,20 @@ export function useMerchantDesk() {
 
   async function connect(account: string, password: string): Promise<boolean> {
     if (connecting.value || navigationBlocked.value) return false
-    resetAccount()
+    disconnect()
     connecting.value = true
     const signal = accountContext.signal
+    let candidate: ApiClient | null = null
     try {
-      const candidate = new ApiClient(account.trim(), password)
+      candidate = new ApiClient(account.trim(), password, fetch, {
+        authentication: 'session',
+        onSessionInvalidated: () => {
+          if (signal.aborted) return
+          resetAccount()
+          loginError.value = '账号已在其他页面切换或退出，请重新登录。'
+        },
+      })
+      connectingClient = candidate
       await candidate.authenticate(signal)
       if (signal.aborted) return false
       const identity = await candidate.currentAccount(signal)
@@ -118,6 +139,7 @@ export function useMerchantDesk() {
           : []
       if (signal.aborted) return false
       client = candidate
+      connectingClient = null
       username.value = identity.username
       shops.value = granted
       capabilities.value = identity.capabilities
@@ -127,6 +149,8 @@ export function useMerchantDesk() {
       if (granted[0]) await changeShop(String(granted[0].id))
       return connected.value
     } catch (failure) {
+      void candidate?.logout().catch(() => undefined)
+      if (connectingClient === candidate) connectingClient = null
       if (!signal.aborted) {
         client = null
         loginError.value = failure instanceof Error ? failure.message : '登录失败，请检查账号信息。'
@@ -148,7 +172,10 @@ export function useMerchantDesk() {
     resetShop()
     shopId.value = nextId
     if (activeModule.value === 'after-sales') await loadReviews('pending')
-    else await knowledge.loadKnowledge()
+    else {
+      await knowledge.loadKnowledge()
+      await knowledge.loadKnowledgeIndex()
+    }
   }
 
   async function switchModule(next: 'after-sales' | 'knowledge') {
@@ -161,7 +188,10 @@ export function useMerchantDesk() {
     resetShop()
     activeModule.value = next
     if (next === 'after-sales') await loadReviews('pending')
-    else await knowledge.loadKnowledge()
+    else {
+      await knowledge.loadKnowledge()
+      await knowledge.loadKnowledgeIndex()
+    }
   }
 
   async function loadReviews(nextView: 'pending' | 'history' = view.value) {
@@ -285,6 +315,8 @@ export function useMerchantDesk() {
   }
 
   onScopeDispose(() => {
+    client?.dispose()
+    void connectingClient?.logout().catch(() => undefined)
     window.removeEventListener('beforeunload', guardNavigation)
     accountContext.abort()
     shopContext.abort()

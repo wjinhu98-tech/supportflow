@@ -70,7 +70,8 @@ public class ConversationService {
                     failure.getClass().getSimpleName());
             if (failure instanceof AccessDeniedException || failure instanceof OrderNotFoundException
                     || failure instanceof InvalidChatCommandException || failure instanceof AssistantBusinessException
-                    || failure instanceof ModelUnavailableException || failure instanceof ConversationException) {
+                    || failure instanceof ModelUnavailableException || failure instanceof ConversationException
+                    || failure instanceof dev.supportflow.common.traffic.TrafficLimitExceededException) {
                 throw failure;
             }
             throw ConversationException.unavailable();

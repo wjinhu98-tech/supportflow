@@ -7,6 +7,7 @@ import dev.supportflow.assistant.execution.ExecutionClaim;
 import dev.supportflow.assistant.execution.ExecutionFailureCode;
 import dev.supportflow.assistant.execution.SimulatedRefundGateway;
 import dev.supportflow.testsupport.MerchantFixtures;
+import dev.supportflow.testsupport.OrderVisibilityFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -139,6 +140,7 @@ class AfterSaleExecutionIT {
             grant.execute("GRANT SELECT, INSERT, UPDATE ON supportflow_execution_test.support_after_sale_execution TO 'execution_runtime'@'%'");
             grant.execute("GRANT SELECT, INSERT ON supportflow_execution_test.support_simulated_refund TO 'execution_runtime'@'%'");
             MerchantFixtures.grantRuntimeRead(connection, DATABASE, RUNTIME);
+            OrderVisibilityFixtures.grantRead(connection, DATABASE, RUNTIME);
             MerchantFixtures.standardReviewers(connection);
         }
         prepared = true;

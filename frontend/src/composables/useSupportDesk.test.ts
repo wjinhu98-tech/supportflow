@@ -15,6 +15,9 @@ import type {
 
 const mocks = vi.hoisted(() => ({
   authenticate: vi.fn(),
+  logout: vi.fn(),
+  dispose: vi.fn(),
+  options: vi.fn(),
   currentAccount: vi.fn(),
   chat: vi.fn(),
   reply: vi.fn(),
@@ -31,13 +34,19 @@ const mocks = vi.hoisted(() => ({
   afterSaleEligibility: vi.fn(),
   applyAfterSale: vi.fn(),
   confirmReceipt: vi.fn(),
+  deleteOrder: vi.fn(),
 }))
 vi.mock('../api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api/client')>()
   return {
     ...actual,
     ApiClient: class {
+      constructor(_username: string, _password: string, _fetch: typeof fetch, options: unknown) {
+        mocks.options(options)
+      }
       authenticate = mocks.authenticate
+      logout = mocks.logout
+      dispose = mocks.dispose
       currentAccount = mocks.currentAccount
       chat = mocks.chat
       openShopWindow = mocks.openShopWindow
@@ -66,6 +75,7 @@ vi.mock('../api/client', async (importOriginal) => {
       afterSaleEligibility = mocks.afterSaleEligibility
       applyAfterSale = mocks.applyAfterSale
       confirmReceipt = mocks.confirmReceipt
+      deleteOrder = mocks.deleteOrder
     },
   }
 })
@@ -165,6 +175,9 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  mocks.logout.mockReset().mockResolvedValue(undefined)
+  mocks.dispose.mockReset()
+  mocks.options.mockReset()
   window.history.replaceState(null, '', '/?shopId=100')
   localStorage.clear()
   sessionStorage.clear()
@@ -215,6 +228,7 @@ beforeEach(() => {
     alreadyConfirmed: false,
     eligibility: eligible,
   })
+  mocks.deleteOrder.mockReset().mockResolvedValue(undefined)
 })
 afterEach(() => {
   for (const scope of scopes.splice(0)) scope.stop()
@@ -222,6 +236,216 @@ afterEach(() => {
 })
 
 describe('useSupportDesk', () => {
+  it('uses browser sessions and clears buyer state when another page switches the session', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test-only')
+    expect(mocks.options).toHaveBeenCalledWith(
+      expect.objectContaining({ authentication: 'session' }),
+    )
+    const pending = deferred<ChatResponse>()
+    mocks.reply.mockReturnValueOnce(pending.promise)
+    const sending = desk.sendMessage('旧账号的问题')
+    const options = mocks.options.mock.calls[0]![0] as { onSessionInvalidated: () => void }
+    options.onSessionInvalidated()
+    expect(desk.connected.value).toBe(false)
+    expect(desk.username.value).toBe('')
+    expect(desk.shopOptions.value).toEqual([])
+    expect(desk.orders.value).toEqual([])
+    expect(desk.messages.value).toEqual([])
+    expect(desk.loginError.value).toContain('其他页面')
+    expect(mocks.logout).not.toHaveBeenCalled()
+    pending.resolve(textReply)
+    await sending
+    expect(desk.messages.value).toEqual([])
+  })
+
+  it('clears local buyer data immediately and invalidates the server session on disconnect', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test-only')
+    const pending = deferred<void>()
+    mocks.logout.mockReturnValueOnce(pending.promise)
+    desk.disconnect()
+    expect(mocks.logout).toHaveBeenCalledOnce()
+    expect(desk.connected.value).toBe(false)
+    expect(desk.orders.value).toEqual([])
+    expect(desk.shopOptions.value).toEqual([])
+    pending.resolve()
+  })
+  const completed = {
+    ...order,
+    status: 'COMPLETED',
+    statusDescription: '已完成',
+    receivedAt: eligible.receivedAt,
+  }
+
+  it('requires explicit deletion confirmation and removes current candidates while retaining history', async () => {
+    mocks.chat.mockResolvedValueOnce(selection([completed]))
+    const history = {
+      id: 'historical',
+      role: 'assistant' as const,
+      text: '历史订单',
+      createdAt: order.createdAt,
+      type: 'ORDER_DETAILS' as const,
+      orders: [completed],
+      historical: true,
+    }
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    desk.messages.value = [
+      history,
+      { ...history, id: 'candidate', historical: false, type: 'ORDER_SELECTION' },
+      { ...history, id: 'current', historical: false },
+    ]
+    desk.selectedOrder.value = completed
+    desk.conversationContext.value = {
+      kind: 'ORDER',
+      orderNo: completed.orderNo,
+      sourceIds: [],
+      expiresAt: null,
+    }
+    await desk.openRefundForm(completed)
+    desk.openOrderDeletion(completed)
+    expect(desk.orderDeletionOpen.value).toBe(true)
+    expect(mocks.deleteOrder).not.toHaveBeenCalled()
+    desk.closeOrderDeletion()
+    expect(mocks.deleteOrder).not.toHaveBeenCalled()
+    desk.openOrderDeletion(completed)
+    await desk.confirmOrderDeletion()
+    expect(mocks.deleteOrder).toHaveBeenCalledExactlyOnceWith(
+      '100',
+      completed.orderNo,
+      expect.any(AbortSignal),
+    )
+    expect(desk.orders.value).toEqual([])
+    expect(desk.selectedOrder.value).toBeNull()
+    expect(desk.refundOpen.value).toBe(false)
+    expect(desk.conversationContext.value).toBeNull()
+    expect(desk.contextResetPending.value).toBe(true)
+    expect(desk.messages.value[0]).toEqual(history)
+    expect(desk.messages.value[1]?.orders).toEqual([])
+    expect(desk.messages.value[2]?.historical).toBe(true)
+    expect(desk.isOrderDeleted(completed)).toBe(true)
+    expect(desk.orderDeletionOpen.value).toBe(false)
+    expect(desk.orderDeletionNotice.value).toContain('已从你的订单记录中删除')
+    mocks.sendConversationMessage.mockClear()
+    await desk.selectOrder(completed)
+    await desk.sendMessage('咨询此订单', completed.orderNo)
+    expect(mocks.sendConversationMessage).not.toHaveBeenCalled()
+    desk.openOrderDeletion(completed)
+    expect(desk.orderDeletionOpen.value).toBe(false)
+  })
+
+  it('blocks duplicate deletion and other business actions while deletion is pending', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    desk.openOrderDeletion(completed)
+    const pending = deferred<void>()
+    mocks.deleteOrder.mockReturnValueOnce(pending.promise)
+    const deletion = desk.confirmOrderDeletion()
+    await desk.confirmOrderDeletion()
+    desk.closeOrderDeletion()
+    desk.clearConversation()
+    await desk.openRefundForm(completed)
+    await desk.selectOrder(order)
+    const listCalls = mocks.chat.mock.calls.length
+    await desk.loadOrders()
+    expect(mocks.chat.mock.calls.length).toBe(listCalls)
+    expect(desk.orderDeletionSubmitting.value).toBe(true)
+    expect(desk.orderDeletionOpen.value).toBe(true)
+    expect(desk.refundOpen.value).toBe(false)
+    expect(mocks.deleteOrder).toHaveBeenCalledOnce()
+    pending.resolve()
+    await deletion
+  })
+
+  it.each(['PAID', 'SHIPPED', 'CREATED'])(
+    'does not offer deletion for an active %s order',
+    async (status) => {
+      const desk = createDesk()
+      await desk.connect('buyer', 'test')
+      desk.openOrderDeletion({ ...completed, status })
+      await desk.confirmOrderDeletion()
+      expect(desk.orderDeletionOpen.value).toBe(false)
+      expect(mocks.deleteOrder).not.toHaveBeenCalled()
+    },
+  )
+
+  it('blocks another shop and locally known pending or failed after-sales, but allows rejected after-sales', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    desk.openOrderDeletion({ ...completed, shopId: 101 })
+    expect(desk.orderDeletionOpen.value).toBe(false)
+    for (const pending of [ticket, reviewedTicket]) {
+      desk.ownedAfterSales.value = [pending]
+      expect(desk.orderDeletionBlocked(completed)).toBe(true)
+      desk.openOrderDeletion(completed)
+      expect(desk.orderDeletionOpen.value).toBe(false)
+    }
+    desk.ownedAfterSales.value = [{ ...ticket, status: 'REJECTED' }]
+    desk.openOrderDeletion({ ...completed, status: 'CANCELLED' })
+    expect(desk.orderDeletionOpen.value).toBe(true)
+  })
+
+  it.each(['logout', 'shop switch'] as const)(
+    'ignores late deletion success after %s',
+    async (transition) => {
+      const desk = createDesk()
+      await desk.connect('buyer', 'test')
+      desk.openOrderDeletion(completed)
+      const pending = deferred<void>()
+      mocks.deleteOrder.mockReturnValueOnce(pending.promise)
+      const deletion = desk.confirmOrderDeletion()
+      const signal = mocks.deleteOrder.mock.calls[0]?.[2] as AbortSignal
+      if (transition === 'logout') desk.disconnect()
+      else {
+        mocks.chat.mockResolvedValueOnce(selection([{ ...completed, shopId: 101 }]))
+        await desk.changeShop('101')
+      }
+      pending.resolve()
+      await deletion
+      expect(signal.aborted).toBe(true)
+      expect(desk.orderDeletionOpen.value).toBe(false)
+      expect(desk.orderDeletionNotice.value).toBeNull()
+      expect(desk.isOrderDeleted(completed)).toBe(false)
+      if (transition === 'shop switch') expect(desk.orders.value[0]?.shopId).toBe(101)
+    },
+  )
+
+  it.each([
+    [
+      new ApiError('该订单仍有待处理售后，请处理完成后再删除。', 409, 'ORDER_DELETION_CONFLICT'),
+      '待处理售后',
+    ],
+    [new ApiError('network', 0, 'NETWORK_ERROR'), '请先刷新订单核实'],
+  ])(
+    'retains the order and does not replay failed or uncertain deletion',
+    async (failure, text) => {
+      const desk = createDesk()
+      await desk.connect('buyer', 'test')
+      mocks.deleteOrder.mockRejectedValueOnce(failure)
+      desk.openOrderDeletion(completed)
+      await desk.confirmOrderDeletion()
+      expect(desk.orderDeletionError.value).toContain(text)
+      expect(desk.orders.value).toEqual([order])
+      expect(desk.isOrderDeleted(completed)).toBe(false)
+      expect(mocks.deleteOrder).toHaveBeenCalledOnce()
+    },
+  )
+
+  it('keeps deletion markers across shop switches but clears them when changing accounts', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    desk.openOrderDeletion(completed)
+    await desk.confirmOrderDeletion()
+    await desk.changeShop('101')
+    expect(desk.isOrderDeleted(completed)).toBe(true)
+    await desk.changeShop('100')
+    expect(desk.orders.value).toEqual([])
+    await desk.connect('another-buyer', 'test')
+    expect(desk.isOrderDeleted(completed)).toBe(false)
+    expect(desk.orders.value).toEqual([order])
+  })
+
   const orderTopic = (orderNo = order.orderNo): ConversationContextRef => ({
     kind: 'ORDER',
     orderNo,

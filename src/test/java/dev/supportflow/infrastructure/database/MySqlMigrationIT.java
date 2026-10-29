@@ -74,7 +74,7 @@ class MySqlMigrationIT {
         MigrateResult firstMigration = flyway.migrate();
 
         assertThat(firstMigration.success).isTrue();
-        assertThat(firstMigration.migrationsExecuted).isEqualTo(16);
+        assertThat(firstMigration.migrationsExecuted).isEqualTo(20);
 
         MigrateResult secondMigration = flyway.migrate();
 
@@ -88,10 +88,11 @@ class MySqlMigrationIT {
              Statement statement = connection.createStatement()) {
             for (String table : List.of("support_merchant", "support_merchant_shop",
                     "support_merchant_staff", "support_merchant_staff_shop_grant",
-                    "support_knowledge_article", "support_knowledge_revision", "support_knowledge_audit")) {
+                    "support_knowledge_article", "support_knowledge_revision", "support_knowledge_audit",
+                    "support_order_buyer_deletion", "support_knowledge_import", "support_security_account", "support_knowledge_vector")) {
                 try (ResultSet rows = statement.executeQuery("SELECT COUNT(*) FROM " + table)) {
                     assertThat(rows.next()).isTrue();
-                    assertThat(rows.getLong(1)).as("Migration must not invent authorization or publish knowledge: " + table).isZero();
+                    assertThat(rows.getLong(1)).as("Migration must not invent authorization, import/publish knowledge or hide orders: " + table).isZero();
                 }
             }
         }
@@ -165,7 +166,7 @@ class MySqlMigrationIT {
                     FROM flyway_schema_history
                     ORDER BY installed_rank
                     """)) {
-                for (String version : List.of("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17")) {
+                for (String version : List.of("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21")) {
                     assertThat(history.next()).isTrue();
                     assertThat(history.getString("version")).isEqualTo(version);
                     assertThat(history.getBoolean("success")).isTrue();

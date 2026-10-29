@@ -12,17 +12,27 @@ public record RagProperties(
         @DefaultValue("0.025") double minimumMargin,
         @DefaultValue("4096") int cacheEntries,
         @DefaultValue("8000") int buildDeadlineMillis,
-        @DefaultValue("false") boolean publicEvidenceSelectionEnabled) {
+        @DefaultValue("false") boolean publicEvidenceSelectionEnabled,
+        @DefaultValue("false") boolean persistentIndexEnabled) {
+
     public RagProperties(boolean enabled, String modelDirectory, double minimumSimilarity, double minimumMargin,
                          int cacheEntries, int buildDeadlineMillis) {
-        this(enabled, modelDirectory, minimumSimilarity, minimumMargin, cacheEntries, buildDeadlineMillis, false);
+        this(enabled, modelDirectory, minimumSimilarity, minimumMargin, cacheEntries, buildDeadlineMillis, false, false);
     }
+
+    public RagProperties(boolean enabled, String modelDirectory, double minimumSimilarity, double minimumMargin,
+                         int cacheEntries, int buildDeadlineMillis, boolean publicEvidenceSelectionEnabled) {
+        this(enabled, modelDirectory, minimumSimilarity, minimumMargin, cacheEntries, buildDeadlineMillis,
+                publicEvidenceSelectionEnabled, false);
+    }
+
     @ConstructorBinding
     public RagProperties {
         if (modelDirectory == null || modelDirectory.isBlank() || modelDirectory.length() > 1000
                 || !Double.isFinite(minimumSimilarity) || minimumSimilarity < 0.5 || minimumSimilarity > 1
                 || !Double.isFinite(minimumMargin) || minimumMargin < 0 || minimumMargin > 0.3
-                || cacheEntries < 32 || cacheEntries > 16384 || buildDeadlineMillis < 100 || buildDeadlineMillis > 15000)
+                || cacheEntries < 32 || cacheEntries > 16384 || buildDeadlineMillis < 100 || buildDeadlineMillis > 15000) {
             throw new IllegalArgumentException("Invalid local knowledge retrieval configuration");
+        }
     }
 }

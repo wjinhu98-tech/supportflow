@@ -4,6 +4,7 @@ import dev.supportflow.common.security.model.CustomerIdentity;
 import dev.supportflow.order.application.OrderQueryService;
 import dev.supportflow.order.domain.model.OrderItemSnapshot;
 import dev.supportflow.order.domain.model.SupportOrder;
+import dev.supportflow.testsupport.OrderVisibilityFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -28,7 +29,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/** Actual MySQL JSON_TABLE search, database constraints and an unchanged pre-V16 SELECT-only account. */
+/** Actual MySQL JSON_TABLE search and constraints with only order/visibility SELECT privileges. */
 @Testcontainers
 @Execution(ExecutionMode.SAME_THREAD)
 class JdbcOrderProductSearchIT {
@@ -70,7 +71,10 @@ class JdbcOrderProductSearchIT {
                     WHERE order_no='SFV16'
                     """)).isInstanceOfSatisfying(SQLException.class, error -> assertThat(error.getErrorCode()).isEqualTo(3819));
         }
-        assertThat(migration(null)).isEqualTo(1);
+        assertThat(migration(null)).isEqualTo(5);
+        try (var connection = admin()) {
+            OrderVisibilityFixtures.grantRead(connection, "order_product_test", "product_reader");
+        }
         repository = new JdbcSupportOrderRepository(JdbcClient.create(new DriverManagerDataSource(
                 MYSQL.getJdbcUrl(), "product_reader", PASSWORD)));
         try (var connection = admin()) {

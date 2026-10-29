@@ -29,6 +29,25 @@ import java.util.Objects;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    @ExceptionHandler(org.springframework.web.multipart.MaxUploadSizeExceededException.class)
+    public ResponseEntity<ApiErrorResponse> handleUploadTooLarge() {
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(new ApiErrorResponse(
+                ErrorCode.KNOWLEDGE_IMPORT_INVALID, "文件不能超过64KiB，请拆分后再导入。"));
+    }
+
+    @ExceptionHandler(org.springframework.web.multipart.MultipartException.class)
+    public ResponseEntity<ApiErrorResponse> handleInvalidUpload() {
+        return ResponseEntity.badRequest().body(new ApiErrorResponse(
+                ErrorCode.KNOWLEDGE_IMPORT_INVALID, "上传内容无法读取，请重新选择一个TXT或Markdown文件。"));
+    }
+
+    @ExceptionHandler(dev.supportflow.order.application.exception.OrderDeletionConflictException.class)
+    public ResponseEntity<ApiErrorResponse> handleOrderDeletionConflict(
+            dev.supportflow.order.application.exception.OrderDeletionConflictException exception) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(
+                new ApiErrorResponse(ErrorCode.ORDER_DELETION_CONFLICT, exception.getMessage()));
+    }
+
     @ExceptionHandler(OrderReceiptConflictException.class)
     public ResponseEntity<ApiErrorResponse> handleOrderReceiptConflict() {
         ErrorCode code = ErrorCode.ORDER_RECEIPT_CONFLICT;

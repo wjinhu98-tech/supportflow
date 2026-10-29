@@ -5,6 +5,9 @@ import { knowledgeDraft } from '../test/knowledgeFixtures'
 
 const mocks = vi.hoisted(() => ({
   authenticate: vi.fn(),
+  logout: vi.fn(),
+  dispose: vi.fn(),
+  options: vi.fn(),
   currentAccount: vi.fn(),
   merchantShops: vi.fn(),
   pendingReviews: vi.fn(),
@@ -12,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   decideReview: vi.fn(),
   retryExecution: vi.fn(),
   knowledgeArticles: vi.fn(),
+  knowledgeIndex: vi.fn(),
+  warmKnowledgeIndex: vi.fn(),
   knowledgeArticle: vi.fn(),
   knowledgeAudit: vi.fn(),
   createKnowledgeArticle: vi.fn(),
@@ -24,7 +29,12 @@ vi.mock('../api/client', async (importOriginal) => {
   return {
     ...actual,
     ApiClient: class {
+      constructor(_username: string, _password: string, _fetch: typeof fetch, options: unknown) {
+        mocks.options(options)
+      }
       authenticate = mocks.authenticate
+      logout = mocks.logout
+      dispose = mocks.dispose
       currentAccount = mocks.currentAccount
       merchantShops = mocks.merchantShops
       pendingReviews = mocks.pendingReviews
@@ -32,6 +42,8 @@ vi.mock('../api/client', async (importOriginal) => {
       decideReview = mocks.decideReview
       retryExecution = mocks.retryExecution
       knowledgeArticles = mocks.knowledgeArticles
+      knowledgeIndex = mocks.knowledgeIndex
+      warmKnowledgeIndex = mocks.warmKnowledgeIndex
       knowledgeArticle = mocks.knowledgeArticle
       knowledgeAudit = mocks.knowledgeAudit
       createKnowledgeArticle = mocks.createKnowledgeArticle
@@ -100,7 +112,20 @@ function desk() {
 }
 beforeEach(() => {
   for (const mock of Object.values(mocks)) mock.mockReset()
+  mocks.logout.mockResolvedValue(undefined)
   mocks.knowledgeArticles.mockResolvedValue({ items: [], nextBeforeId: null })
+  mocks.knowledgeIndex.mockResolvedValue({
+    status: 'DISABLED',
+    expectedChunks: 0,
+    indexedChunks: 0,
+    modelFingerprint: null,
+  })
+  mocks.warmKnowledgeIndex.mockResolvedValue({
+    status: 'READY',
+    expectedChunks: 2,
+    indexedChunks: 2,
+    modelFingerprint: 'test-model',
+  })
   mocks.knowledgeAudit.mockResolvedValue({ items: [], nextBeforeId: null })
   mocks.authenticate.mockResolvedValue(undefined)
   mocks.currentAccount.mockResolvedValue({
@@ -124,6 +149,41 @@ afterEach(() => {
 })
 
 describe('useMerchantDesk', () => {
+  it('uses browser sessions and clears staff identity, grants, and pending results on another page login', async () => {
+    const state = desk()
+    await state.connect('staff', 'test-only')
+    expect(mocks.options).toHaveBeenCalledWith(
+      expect.objectContaining({ authentication: 'session' }),
+    )
+    const pending = deferred<AfterSaleTicket[]>()
+    mocks.pendingReviews.mockReturnValueOnce(pending.promise)
+    const loading = state.loadReviews()
+    const options = mocks.options.mock.calls[0]![0] as { onSessionInvalidated: () => void }
+    options.onSessionInvalidated()
+    expect(state.connected.value).toBe(false)
+    expect(state.shops.value).toEqual([])
+    expect(state.shopId.value).toBe('')
+    expect(state.tickets.value).toEqual([])
+    expect(state.canManageKnowledge.value).toBe(false)
+    expect(state.canReviewAfterSales.value).toBe(false)
+    expect(state.loginError.value).toContain('其他页面')
+    expect(mocks.logout).not.toHaveBeenCalled()
+    pending.resolve([ticket])
+    await loading
+    expect(state.tickets.value).toEqual([])
+  })
+
+  it('invalidates the server session and clears staff shop grants immediately on logout', async () => {
+    const state = desk()
+    await state.connect('staff', 'test-only')
+    const pending = deferred<void>()
+    mocks.logout.mockReturnValueOnce(pending.promise)
+    expect(state.disconnect()).toBe(true)
+    expect(mocks.logout).toHaveBeenCalledOnce()
+    expect(state.connected.value).toBe(false)
+    expect(state.shops.value).toEqual([])
+    pending.resolve()
+  })
   it('opens knowledge-only staff directly in knowledge without querying after-sale APIs', async () => {
     const state = desk()
     mocks.currentAccount.mockResolvedValueOnce({

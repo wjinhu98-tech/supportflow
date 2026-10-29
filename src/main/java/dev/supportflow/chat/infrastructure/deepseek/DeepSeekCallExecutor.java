@@ -34,14 +34,22 @@ public final class DeepSeekCallExecutor {
     private final Semaphore slots;
     private final DeepSeekCallMetrics metrics;
     private final DeepSeekCircuitBreaker circuit;
+    private final dev.supportflow.common.traffic.TrafficQuotaService quotas;
 
     public DeepSeekCallExecutor(HttpClient client, DeepSeekProperties properties) {
         this(client, properties, new SimpleMeterRegistry());
     }
 
     public DeepSeekCallExecutor(HttpClient client, DeepSeekProperties properties, MeterRegistry registry) {
+        this(client, properties, registry, new dev.supportflow.common.traffic.TrafficQuotaService(
+                dev.supportflow.common.traffic.TrafficProperties.disabled(), registry, System::nanoTime));
+    }
+
+    public DeepSeekCallExecutor(HttpClient client, DeepSeekProperties properties, MeterRegistry registry,
+                               dev.supportflow.common.traffic.TrafficQuotaService quotas) {
         this.client = Objects.requireNonNull(client, "HTTP client is required");
         this.properties = Objects.requireNonNull(properties, "DeepSeek configuration is required");
+        this.quotas = Objects.requireNonNull(quotas, "Model quotas are required");
         slots = new Semaphore(properties.maxConcurrentRequests());
         metrics = new DeepSeekCallMetrics(registry, slots, properties.maxConcurrentRequests());
         circuit = new DeepSeekCircuitBreaker(properties.circuit(), registry, System::nanoTime);
@@ -58,6 +66,9 @@ public final class DeepSeekCallExecutor {
         if (remainingTime == null || remainingTime.isNegative() || remainingTime.isZero())
             throw new IllegalArgumentException("A positive call deadline is required");
         Duration effectiveTimeout = remainingTime.compareTo(properties.requestTimeout()) < 0 ? remainingTime : properties.requestTimeout();
+        // Count attempts before concurrency/circuit admission, including every durable-runtime retry.
+        // A conservative debit is never refunded after an unknown provider result or a parser failure.
+        quotas.requireModelCall();
         long started = System.nanoTime();
         if (!slots.tryAcquire()) {
             record(operation, DeepSeekCallOutcome.BUSY, started, 0);
@@ -178,8 +189,10 @@ public final class DeepSeekCallExecutor {
         long elapsedNanos = Math.max(0, System.nanoTime() - started);
         metrics.record(operation, outcome, elapsedNanos);
         long millis = TimeUnit.NANOSECONDS.toMillis(elapsedNanos);
-        LOG.info("deepseek_call operation={} outcome={} durationMs={} inFlight={} limit={} httpStatus={}",
+        LOG.info("deepseek_call operation={} outcome={} durationMs={} inFlight={} limit={} httpStatus={} traceId={} agentRunId={}",
                 operation, outcome, millis, properties.maxConcurrentRequests() - slots.availablePermits(),
-                properties.maxConcurrentRequests(), httpStatus);
+                properties.maxConcurrentRequests(), httpStatus,
+                dev.supportflow.common.observability.TraceContext.traceId(),
+                dev.supportflow.common.observability.TraceContext.agentRunId());
     }
 }

@@ -56,6 +56,8 @@ public final class DeepSeekToolPlanner implements ToolPlanner {
         try {
             return executor.execute(DeepSeekCallOperation.TOOL_PLAN, requestBody(permittedTool, message, selectedOrderNo),
                     body -> parse(body, permittedTool, message, selectedOrderNo));
+        } catch (dev.supportflow.common.traffic.TrafficLimitExceededException limited) {
+            throw limited;
         } catch (ModelUnavailableException unavailable) {
             throw unavailable;
         } catch (RuntimeException ignored) {

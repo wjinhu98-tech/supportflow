@@ -2,6 +2,7 @@ package dev.supportflow.assistant.knowledge;
 
 import dev.supportflow.SupportFlowApplication;
 import dev.supportflow.testsupport.KnowledgeFixtures;
+import dev.supportflow.testsupport.OrderVisibilityFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -23,11 +24,16 @@ import org.testcontainers.mysql.MySQLContainer;
 import tools.jackson.databind.ObjectMapper;
 
 import java.sql.DriverManager;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.List;
 import java.util.UUID;
 import java.util.Map;
 import java.util.function.Function;
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import dev.supportflow.chat.infrastructure.deepseek.DeepSeekCallExecutor;
 import dev.supportflow.chat.infrastructure.deepseek.DeepSeekCallOperation;
 
@@ -45,7 +51,8 @@ import static org.mockito.ArgumentMatchers.*;
 @SpringBootTest(classes = SupportFlowApplication.class, properties = {
         "spring.config.location=classpath:/application-day4-test.yml", "spring.main.banner-mode=off",
         "supportflow.ai.deepseek.enabled=true", "supportflow.ai.deepseek.api-key=test-only-not-a-real-api-key",
-        "supportflow.rag.enabled=true", "supportflow.rag.public-evidence-selection-enabled=true"})
+        "supportflow.rag.enabled=true", "supportflow.rag.public-evidence-selection-enabled=true",
+        "supportflow.rag.persistent-index-enabled=true"})
 @Testcontainers
 @ActiveProfiles("local")
 @Execution(ExecutionMode.SAME_THREAD)
@@ -61,6 +68,9 @@ class LocalRagKnowledgeIT {
     @Autowired WebApplicationContext context;
     @Autowired ObjectMapper json;
     @Autowired KnowledgeService knowledge;
+    @Autowired KnowledgeEmbedding embedding;
+    @Autowired KnowledgeVectorStore vectorStore;
+    @Autowired RagProperties ragProperties;
     @MockitoBean DeepSeekCallExecutor model;
     private MockMvc mvc;
 
@@ -71,6 +81,10 @@ class LocalRagKnowledgeIT {
              var create = connection.prepareStatement("CREATE USER 'rag_reader'@'%' IDENTIFIED BY ?")) {
             create.setString(1, DB_PASSWORD); create.execute();
             KnowledgeFixtures.grantRead(connection, "rag_test", "rag_reader");
+            OrderVisibilityFixtures.grantRead(connection, "rag_test", "rag_reader");
+            try (var grant = connection.createStatement()) {
+                grant.execute("GRANT SELECT,INSERT ON rag_test.support_knowledge_vector TO 'rag_reader'@'%'");
+            }
         }
         registry.add("spring.datasource.url", MYSQL::getJdbcUrl);
         registry.add("spring.datasource.username", () -> "rag_reader");
@@ -86,6 +100,67 @@ class LocalRagKnowledgeIT {
     }
 
     @BeforeEach void http() { reset(model); mvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build(); }
+
+    @Test void actualOnnxVectorsSurviveAColdCacheWithoutRepeatingSourceInference() throws Exception {
+        long shop = 30002;
+        String sourceId = "kb-onnx-" + UUID.randomUUID();
+        var document = new KnowledgeDocument(sourceId, "v1", "合成水杯清洗说明", List.of("水杯", "清洗"),
+                "合成测试资料：水杯请使用温水清洗，清洗后擦干保存。");
+        var sourceCalls = new AtomicInteger();
+        var queryCalls = new AtomicInteger();
+        var actualSourceVector = new AtomicReference<float[]>();
+        KnowledgeEmbedding countedActualEmbedding = (text, query) -> {
+            float[] vector = embedding.embed(text, query); // Real local ONNX, never a fake normalized vector.
+            if (query) queryCalls.incrementAndGet();
+            else { sourceCalls.incrementAndGet(); actualSourceVector.set(vector.clone()); }
+            return vector;
+        };
+        var meters = new SimpleMeterRegistry();
+        try {
+            var first = new RagKnowledgeSearch(ragProperties, countedActualEmbedding, meters, vectorStore);
+            assertThat(first.search(shop, List.of(document), "水杯怎么清洗")).isNotEmpty();
+            assertThat(sourceCalls).hasValue(1);
+            assertThat(queryCalls).hasValue(1);
+            try (var connection = DriverManager.getConnection(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword());
+                 var select = connection.prepareStatement("""
+                         SELECT dimensions, vector_bytes, model_fingerprint
+                         FROM support_knowledge_vector WHERE tenant_id=? AND source_id=? AND source_version='v1'
+                         """)) {
+                select.setLong(1, shop);
+                select.setString(2, sourceId);
+                try (var rows = select.executeQuery()) {
+                    assertThat(rows.next()).isTrue();
+                    assertThat(rows.getInt("dimensions")).isEqualTo(512);
+                    assertThat(rows.getString("model_fingerprint")).isEqualTo(JdbcKnowledgeVectorStore.MODEL_FINGERPRINT);
+                    byte[] bytes = rows.getBytes("vector_bytes");
+                    assertThat(bytes).hasSize(2048);
+                    var decoded = new float[512];
+                    var buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
+                    double squaredNorm = 0;
+                    for (int index = 0; index < decoded.length; index++) {
+                        decoded[index] = buffer.getFloat();
+                        assertThat(Float.isFinite(decoded[index])).isTrue();
+                        squaredNorm += (double) decoded[index] * decoded[index];
+                    }
+                    assertThat(decoded).containsExactly(actualSourceVector.get());
+                    assertThat(squaredNorm).isBetween(0.99, 1.01);
+                    assertThat(rows.next()).isFalse();
+                }
+            }
+            var restarted = new RagKnowledgeSearch(ragProperties, countedActualEmbedding, meters, vectorStore);
+            assertThat(restarted.search(shop, List.of(document), "水杯怎么清洗")).isNotEmpty();
+            assertThat(sourceCalls).hasValue(1);
+            assertThat(queryCalls).hasValue(2);
+            assertThat(meters.get("supportflow.rag.persistent").tag("result", "hit").counter().count()).isEqualTo(1);
+            restarted.clearMemoryCache();
+            assertThat(restarted.search(shop, List.of(document), "水杯怎么清洗")).isNotEmpty();
+            assertThat(sourceCalls).hasValue(1);
+            assertThat(queryCalls).hasValue(3);
+            assertThat(meters.get("supportflow.rag.persistent").tag("result", "hit").counter().count()).isEqualTo(2);
+            assertThat(meters.get("supportflow.rag.embedding.cache").tag("result", "miss").counter().count()).isEqualTo(1);
+        } finally { meters.close(); }
+        verifyNoInteractions(model);
+    }
 
     @Test void publicSemanticEvidenceIsScopedAndGetDoesNotStoreAConversation() throws Exception {
         mvc.perform(get("/api/v1/shops/103/knowledge/search").param("q", "床单标签那个装水的盆下面画了一横，程序该怎么选？")

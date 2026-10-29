@@ -60,7 +60,8 @@ public class AfterSaleService {
         var existing = repository.findExistingByKey(key);
         if (existing.isPresent()) return existing.get().ticket();
         // Evaluate the current locked receipt data, not an earlier REPEATABLE READ snapshot.
-        SupportOrder current = repository.lockOwnedOrder(order).orElseThrow(AfterSaleService::conflict);
+        SupportOrder current = repository.lockVisibleOwnedOrder(order).orElseThrow(
+                dev.supportflow.order.application.exception.OrderNotFoundException::new);
         AfterSaleEligibility eligibility = policy.evaluate(current, repository.now());
         if (!eligibility.canSubmit()) {
             // A competing submission may have committed after our first RR snapshot.

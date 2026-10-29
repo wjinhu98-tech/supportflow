@@ -8,7 +8,8 @@ import java.util.Optional;
 /**
  * 客服订单读取能力。
  *
- * <p>每次查询必须限定认证结果中的平台买家ID。</p>
+ * <p>每次查询必须限定认证结果中的平台买家ID，并排除买家已删除的订单。
+ * 原订单与商家售后、审计记录由各自仓储保留。</p>
  */
 public interface SupportOrderRepository {
 

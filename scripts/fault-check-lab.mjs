@@ -4,6 +4,7 @@ import { readFile, mkdir, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
+import { createSessionClient } from './session-client.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const origin = 'http://127.0.0.1:18090'
@@ -12,8 +13,7 @@ const monitoring = 'http://127.0.0.1:19090'
 const compose = ['compose', '--project-name', 'supportflow-lab', '-f', path.join(root, 'deploy/compose.yml')]
 const touched = new Set()
 const observations = []
-let cookie = ''
-let auth = ''
+const session = createSessionClient(origin, { cookieName: 'SF_LAB_SESSION', marker: 'isolated-lab' })
 
 function ensure(value, code) { if (!value) throw new Error(code) }
 function docker(args) {
@@ -44,17 +44,15 @@ async function getHealth(group, code, state) {
 }
 
 async function api(endpoint, body, expected = 200) {
-  let headers = { Authorization: auth, ...(cookie ? { Cookie: cookie } : {}) }
+  let headers = {}
   if (body !== undefined) {
-    const csrf = await api('/api/v1/security/csrf')
-    headers = { ...headers, ...(cookie ? { Cookie: cookie } : {}), [csrf.headerName]: csrf.token, 'Content-Type': 'application/json' }
+    const csrf = await session.csrf()
+    headers = { [csrf.headerName]: csrf.token, 'Content-Type': 'application/json' }
   }
-  const response = await fetch(origin + endpoint, { method: body === undefined ? 'GET' : 'POST', headers,
+  const response = await session.fetch(endpoint, { method: body === undefined ? 'GET' : 'POST', headers,
     ...(body === undefined ? {} : { body: JSON.stringify(body) }), redirect: 'error', signal: AbortSignal.timeout(8000) })
   ensure(response.status === expected, 'LAB_API_UNEXPECTED_STATUS')
   ensure(response.headers.get('x-supportflow-environment') === 'isolated-lab', 'LAB_ENVIRONMENT_MISMATCH')
-  const cookies = response.headers.getSetCookie()
-  if (cookies.length) cookie = cookies.map(value => value.split(';', 1)[0]).join('; ')
   return response.json()
 }
 
@@ -82,7 +80,7 @@ async function verifyHistory(id, expectedIds) {
 async function run() {
   const password = (await readFile(path.join(root, '.local/deployment-lab/lab_buyer_password'), 'utf8')).trim()
   ensure(/^[A-Za-z0-9_-]{24,128}$/.test(password), 'INVALID_LAB_CREDENTIAL')
-  auth = `Basic ${Buffer.from(`lab-buyer:${password}`).toString('base64')}`
+  await session.login('lab-buyer', password)
   const me = await api('/api/v1/security/me')
   ensure(me.username === 'lab-buyer' && me.accountType === 'BUYER', 'LAB_IDENTITY_MISMATCH')
   for (const service of ['mysql', 'backend']) {
@@ -116,6 +114,8 @@ async function run() {
   await waitFor('backend-recovered-readiness', () => getHealth('readiness', 200, 'UP'), 90)
   await waitFor('prometheus-target-recovered', () => queryUp(1), 45)
   await waitFor('scrape-alert-resolved', () => alertFiring(false), 45)
+  // HttpSession is intentionally in memory; reauthenticate after a backend restart before reading persisted business history.
+  await session.login('lab-buyer', password)
   await verifyHistory(created.id, ids)
   const order = await api('/api/v1/shops/100/orders/LAB-000001')
   ensure(order.status === 'SHIPPED' && order.totalAmount === 199.9, 'LAB_BUSINESS_DATA_CHANGED')

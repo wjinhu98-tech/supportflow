@@ -85,6 +85,92 @@ const assistantMessage = {
 }
 const storedPair = { conversation, messages: [userMessage, assistantMessage] }
 
+describe('buyer order deletion', () => {
+  it('uses a fresh CSRF token for an explicit DELETE with no identity or business payload', async () => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    await expect(
+      new ApiClient('buyer', 'test', request).deleteOrder('100', order.orderNo),
+    ).resolves.toBeUndefined()
+    expect(request).toHaveBeenCalledTimes(2)
+    expect(request.mock.calls[1]?.[0]).toBe('/api/v1/shops/100/orders/SF10001')
+    expect(request.mock.calls[1]?.[1]).toMatchObject({
+      method: 'DELETE',
+      headers: { [csrf.headerName]: csrf.token },
+      redirect: 'error',
+    })
+    expect(request.mock.calls[1]?.[1]?.body).toBeUndefined()
+  })
+
+  it('rejects an unexpected deletion response rather than declaring it successful', async () => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(json({ order }))
+    await expect(
+      new ApiClient('buyer', 'test', request).deleteOrder('100', order.orderNo),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+    expect(request).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    ['0', 'SF10001'],
+    ['100', ''],
+    ['100', 'bad order'],
+  ])('does not send an invalid deletion target %s/%s', async (shop, number) => {
+    const request = fetchMock()
+    await expect(
+      new ApiClient('buyer', 'test', request).deleteOrder(shop!, number!),
+    ).rejects.toBeInstanceOf(ApiError)
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it('shows a bounded deletion conflict and never replays failed or uncertain deletion', async () => {
+    const request = fetchMock()
+      .mockResolvedValueOnce(json(csrf))
+      .mockResolvedValueOnce(
+        json(
+          {
+            code: 'ORDER_DELETION_CONFLICT',
+            message: '该订单仍有待处理售后，请处理完成后再删除。',
+          },
+          409,
+        ),
+      )
+      .mockResolvedValueOnce(json(csrf))
+      .mockRejectedValueOnce(new TypeError('network'))
+    const api = new ApiClient('buyer', 'test', request)
+    await expect(api.deleteOrder('100', order.orderNo)).rejects.toMatchObject({
+      status: 409,
+      message: '该订单仍有待处理售后，请处理完成后再删除。',
+    })
+    expect(request).toHaveBeenCalledTimes(2)
+    await expect(api.deleteOrder('100', order.orderNo)).rejects.toMatchObject({
+      code: 'NETWORK_ERROR',
+    })
+    expect(request).toHaveBeenCalledTimes(4)
+  })
+
+  it('does not send deletion after cancellation while waiting behind another operation', async () => {
+    let finish!: (response: Response) => void
+    const request = fetchMock().mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve
+      }),
+    )
+    const api = new ApiClient('buyer', 'test', request)
+    const read = api.afterSaleEligibility('100', order.orderNo)
+    const controller = new AbortController()
+    const deletion = api.deleteOrder('100', order.orderNo, controller.signal)
+    controller.abort()
+    await vi.waitFor(() => expect(request).toHaveBeenCalledOnce())
+    finish(json(eligibility))
+    await read
+    await expect(deletion).rejects.toMatchObject({ name: 'AbortError' })
+    expect(request).toHaveBeenCalledOnce()
+  })
+})
+
 describe('purchase item snapshots and candidate continuation', () => {
   const item = { productName: '无线耳机', specification: '白色', quantity: 1 }
 

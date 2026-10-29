@@ -17,12 +17,21 @@ import type {
   MerchantShop,
   KnowledgeArticle,
   KnowledgeInput,
+  KnowledgeImportPreview,
+  KnowledgeImportResult,
+  KnowledgeIndex,
   KnowledgePage,
   KnowledgeAuditPage,
   Order,
   ReceiptConfirmation,
 } from '../types'
-import { validKnowledgeArticle, validKnowledgeAudit, validKnowledgeInput } from './knowledge'
+import {
+  validKnowledgeArticle,
+  validKnowledgeAudit,
+  validKnowledgeInput,
+  validKnowledgeFile,
+  KNOWLEDGE_IMPORT_MAX_BYTES,
+} from './knowledge'
 import { isOrderProductImageUrl } from '../productImages'
 
 export class ApiError extends Error {
@@ -401,25 +410,120 @@ const statusMessages: Record<number, string> = {
   503: '服务暂时不可用，请稍后重试。',
 }
 
-/** One connected account. Credentials live only in memory; every POST obtains fresh CSRF. */
+export type ApiClientOptions = {
+  authentication: 'basic' | 'session'
+  onSessionInvalidated?: () => void
+}
+
+/** Browser UI uses sessions. The default Basic mode is retained for explicit legacy API fixtures. */
 export class ApiClient {
-  private readonly authorization: string
+  private readonly authorization: string | null
+  private credentials: { username: string; password: string } | null = null
+  private sessionLogin: Promise<void> | null = null
+  private sessionLogout: Promise<void> | null = null
+  private sessionActive = false
+  private closed = false
+  private channel: BroadcastChannel | null = null
+  private readonly sessionId = crypto.randomUUID()
+  private static sessionQueue: Promise<void> = Promise.resolve()
   private postQueue: Promise<void> = Promise.resolve()
 
   constructor(
     username: string,
     password: string,
     private readonly fetcher: typeof fetch = fetch,
+    private readonly options: ApiClientOptions = { authentication: 'basic' },
   ) {
     if (!username.trim() || /[:\p{Cc}]/u.test(username) || !password) {
       throw new ApiError('请输入有效的用户名和密码；用户名不能包含冒号或控制字符。')
     }
-    const bytes = new TextEncoder().encode(`${username}:${password}`)
-    this.authorization = `Basic ${btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(''))}`
+    if (options.authentication === 'session') {
+      this.authorization = null
+      this.credentials = { username, password }
+      if (typeof BroadcastChannel !== 'undefined') {
+        this.channel = new BroadcastChannel('supportflow-browser-session')
+        this.channel.onmessage = (event: MessageEvent<unknown>) => {
+          if (!isRecord(event.data) || event.data.source === this.sessionId) return
+          if (event.data.type !== 'changed') return
+          this.dispose()
+          this.options.onSessionInvalidated?.()
+        }
+      }
+    } else {
+      const bytes = new TextEncoder().encode(`${username}:${password}`)
+      this.authorization = `Basic ${btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(''))}`
+    }
+    this.expectedUsername = username
+  }
+
+  private readonly expectedUsername: string
+
+  private static sessionOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = ApiClient.sessionQueue.then(operation, operation)
+    ApiClient.sessionQueue = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
   }
 
   async authenticate(signal?: AbortSignal): Promise<void> {
-    await this.getCsrf(signal)
+    if (this.options.authentication === 'basic') {
+      await this.getCsrf(signal)
+      return
+    }
+    if (!this.sessionLogin) {
+      this.sessionLogin = ApiClient.sessionOperation(async () => {
+        const credentials = this.credentials
+        this.credentials = null
+        if (!credentials || this.closed || signal?.aborted)
+          throw new ApiError('请重新输入账号和密码登录。', 401, 'UNAUTHENTICATED')
+        // Complete this authentication exchange even if the login dialog closes. A queued
+        // logout then invalidates its cookie before another account can log in.
+        const csrf = await this.getCsrf()
+        if (this.closed) throw new DOMException('Login cancelled', 'AbortError')
+        // A failed login also replaces the prior session on the server.
+        this.channel?.postMessage({ source: this.sessionId, type: 'changed' })
+        await this.request('/api/v1/security/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', [csrf.headerName]: csrf.token },
+          body: JSON.stringify(credentials),
+        })
+        this.sessionActive = true
+        await this.getCsrf()
+      })
+    }
+    await this.sessionLogin
+    if (this.closed || signal?.aborted) throw new DOMException('Login cancelled', 'AbortError')
+  }
+
+  /** Stop accepting responses without invalidating a newer identity in another browser tab. */
+  dispose(): void {
+    this.closed = true
+    this.credentials = null
+    this.channel?.close()
+    this.channel = null
+  }
+
+  /** A new login is serialized behind logout; a late logout cannot delete the new session. */
+  logout(): Promise<void> {
+    if (this.options.authentication === 'basic') return Promise.resolve()
+    if (this.sessionLogout) return this.sessionLogout
+    this.channel?.postMessage({ source: this.sessionId, type: 'changed' })
+    this.dispose()
+    this.sessionLogout = ApiClient.sessionOperation(async () => {
+      if (!this.sessionActive) return
+      try {
+        const csrf = await this.getCsrf()
+        await this.request('/api/v1/security/logout', {
+          method: 'POST',
+          headers: { [csrf.headerName]: csrf.token },
+        })
+      } finally {
+        this.sessionActive = false
+      }
+    })
+    return this.sessionLogout
   }
 
   async currentAccount(signal?: AbortSignal): Promise<CurrentAccount> {
@@ -485,6 +589,54 @@ export class ApiClient {
     if (!validShopId(shopId) || (id !== undefined && !reviewIdPattern.test(id)))
       throw new ApiError('请选择当前授权店铺的有效知识文档。')
     return `/api/v1/merchant/shops/${shopId}/knowledge${id === undefined ? '' : '/' + id}`
+  }
+
+  async knowledgeIndex(shopId: string, signal?: AbortSignal): Promise<KnowledgeIndex> {
+    const path = this.knowledgePath(shopId) + '/index'
+    const data = await this.queued(() => this.request(path, { method: 'GET' }, signal))
+    return this.parseKnowledgeIndex(data)
+  }
+
+  async warmKnowledgeIndex(shopId: string, signal?: AbortSignal): Promise<KnowledgeIndex> {
+    const path = this.knowledgePath(shopId) + '/index/warmup'
+    return this.queued(async () => {
+      if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
+      const csrf = await this.getCsrf(signal)
+      const data = await this.request(
+        path,
+        {
+          method: 'POST',
+          headers: { [csrf.headerName]: csrf.token },
+        },
+        signal,
+      )
+      return this.parseKnowledgeIndex(data)
+    })
+  }
+
+  private parseKnowledgeIndex(value: unknown): KnowledgeIndex {
+    if (
+      !isRecord(value) ||
+      !['DISABLED', 'EMPTY', 'PARTIAL', 'READY', 'UNAVAILABLE', 'BUSY'].includes(
+        String(value.status),
+      ) ||
+      typeof value.expectedChunks !== 'number' ||
+      !Number.isSafeInteger(value.expectedChunks) ||
+      value.expectedChunks < 0 ||
+      typeof value.indexedChunks !== 'number' ||
+      !Number.isSafeInteger(value.indexedChunks) ||
+      value.indexedChunks < 0 ||
+      value.indexedChunks > value.expectedChunks ||
+      !(
+        value.modelFingerprint === null ||
+        (typeof value.modelFingerprint === 'string' &&
+          value.modelFingerprint.length > 0 &&
+          value.modelFingerprint.length <= 256 &&
+          !/[\p{Cc}]/u.test(value.modelFingerprint))
+      )
+    )
+      throw new ApiError('检索准备状态格式不正确，请稍后刷新。', 0, 'INVALID_RESPONSE')
+    return value as unknown as KnowledgeIndex
   }
 
   async knowledgeArticles(
@@ -580,6 +732,87 @@ export class ApiClient {
       { id, expectedVersion },
       signal,
     )
+  }
+
+  async previewKnowledgeImport(
+    shopId: string,
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<KnowledgeImportPreview> {
+    const path = this.knowledgePath(shopId) + '/imports/preview'
+    if (!validKnowledgeFile(file))
+      throw new ApiError('请选择非空的 TXT 或 Markdown 文件，大小不超过64 KiB。')
+    return this.queued(async () => {
+      if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
+      const csrf = await this.getCsrf(signal)
+      const form = new FormData()
+      form.append('file', file)
+      const data = await this.request(
+        path,
+        { method: 'POST', headers: { [csrf.headerName]: csrf.token }, body: form },
+        signal,
+      )
+      if (
+        !isRecord(data) ||
+        typeof data.title !== 'string' ||
+        !data.title.trim() ||
+        data.title.length > 120 ||
+        typeof data.content !== 'string' ||
+        !data.content.trim() ||
+        data.content.length > 4000 ||
+        data.characterCount !== data.content.length ||
+        !Number.isSafeInteger(data.byteCount) ||
+        Number(data.byteCount) < 1 ||
+        Number(data.byteCount) > KNOWLEDGE_IMPORT_MAX_BYTES ||
+        data.byteCount !== file.size
+      )
+        throw new ApiError(
+          '文件预览格式不正确，请重新选择文件；不会保存不完整内容。',
+          0,
+          'INVALID_RESPONSE',
+        )
+      return data as unknown as KnowledgeImportPreview
+    })
+  }
+
+  async importKnowledgeFile(
+    shopId: string,
+    file: File,
+    title: string,
+    keywords: string[],
+    signal?: AbortSignal,
+  ): Promise<KnowledgeImportResult> {
+    const path = this.knowledgePath(shopId) + '/imports'
+    if (
+      !validKnowledgeFile(file) ||
+      !validKnowledgeInput({ title, keywords, content: '文件正文由服务端重新解析' })
+    )
+      throw new ApiError('请核对文件、标题（1–120字）和1–12个关键词（每个1–40字）。')
+    return this.queued(async () => {
+      if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
+      const csrf = await this.getCsrf(signal)
+      const form = new FormData()
+      form.append('file', file)
+      form.append('title', title.trim())
+      form.append('keywords', JSON.stringify(keywords.map((keyword) => keyword.trim())))
+      const data = await this.request(
+        path,
+        { method: 'POST', headers: { [csrf.headerName]: csrf.token }, body: form },
+        signal,
+      )
+      if (
+        !isRecord(data) ||
+        typeof data.articleId !== 'string' ||
+        !reviewIdPattern.test(data.articleId) ||
+        typeof data.reused !== 'boolean'
+      )
+        throw new ApiError(
+          '导入结果暂时无法确认，请先刷新文档列表核实，不要重复提交。',
+          0,
+          'INVALID_RESPONSE',
+        )
+      return { articleId: data.articleId, reused: data.reused }
+    })
   }
 
   async publishKnowledgeArticle(
@@ -874,6 +1107,21 @@ export class ApiClient {
     return id
   }
 
+  async deleteOrder(shopId: string, orderNo: string, signal?: AbortSignal): Promise<void> {
+    this.validateOrderTarget(shopId, orderNo)
+    return this.queued(async () => {
+      if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
+      const csrf = await this.getCsrf(signal)
+      const result = await this.request(
+        `/api/v1/shops/${shopId}/orders/${encodeURIComponent(orderNo)}`,
+        { method: 'DELETE', headers: { [csrf.headerName]: csrf.token } },
+        signal,
+      )
+      if (result !== undefined)
+        throw new ApiError('删除结果无法确认，请先刷新订单核实。', 0, 'INVALID_RESPONSE')
+    })
+  }
+
   async confirmReceipt(
     shopId: string,
     orderNo: string,
@@ -1124,6 +1372,17 @@ export class ApiClient {
     signal?: AbortSignal,
     timeoutMillis = 25_000,
   ): Promise<unknown> {
+    const sessionExchange = [
+      '/api/v1/security/csrf',
+      '/api/v1/security/login',
+      '/api/v1/security/logout',
+    ].includes(path)
+    if (
+      this.options.authentication === 'session' &&
+      (!this.sessionActive || this.closed) &&
+      !sessionExchange
+    )
+      throw new ApiError('登录状态已失效，请重新登录。', 401, 'UNAUTHENTICATED')
     const deadline = AbortSignal.timeout(timeoutMillis)
     const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline
     try {
@@ -1135,7 +1394,12 @@ export class ApiClient {
         cache: 'no-store',
         redirect: 'error',
         signal: requestSignal,
-        headers: { ...init.headers, Authorization: this.authorization, Accept: 'application/json' },
+        headers: {
+          ...init.headers,
+          ...(this.authorization ? { Authorization: this.authorization } : {}),
+          ...(this.sessionActive ? { 'X-Session-Account': this.expectedUsername } : {}),
+          Accept: 'application/json',
+        },
       })
       const contentType = response.headers.get('content-type') ?? ''
       if (response.status === 204 && response.ok) return undefined
@@ -1152,20 +1416,29 @@ export class ApiClient {
           isRecord(data) && typeof data.message === 'string' ? data.message : null
         const code = isRecord(data) && typeof data.code === 'string' ? data.code : 'HTTP_ERROR'
         throw new ApiError(
-          (response.status === 409 &&
-          ['BUSINESS_RULE_VIOLATION', 'ORDER_RECEIPT_CONFLICT'].includes(code) &&
+          ([400, 413].includes(response.status) &&
+          code === 'KNOWLEDGE_IMPORT_INVALID' &&
           serverMessage &&
           serverMessage.length <= 500
             ? serverMessage
-            : response.status === 404 && code === 'REVIEW_NOT_FOUND'
-              ? '未找到该售后申请，请刷新审核列表后重试。'
-              : response.status === 404 && code === 'CONVERSATION_NOT_FOUND'
-                ? '未找到该店铺对话，可能已被删除，请刷新后继续。'
-                : response.status === 409 && code === 'CONVERSATION_CONFLICT'
-                  ? '对话状态已变化，或仍有消息正在处理。请刷新后再试。'
-                  : response.status === 503 && code === 'MODEL_UNAVAILABLE'
-                    ? '智能服务暂时不可用，请稍后重试，或在订单页直接查看订单。'
-                    : statusMessages[response.status]) ??
+            : response.status === 409 &&
+                [
+                  'BUSINESS_RULE_VIOLATION',
+                  'ORDER_RECEIPT_CONFLICT',
+                  'ORDER_DELETION_CONFLICT',
+                ].includes(code) &&
+                serverMessage &&
+                serverMessage.length <= 500
+              ? serverMessage
+              : response.status === 404 && code === 'REVIEW_NOT_FOUND'
+                ? '未找到该售后申请，请刷新审核列表后重试。'
+                : response.status === 404 && code === 'CONVERSATION_NOT_FOUND'
+                  ? '未找到该店铺对话，可能已被删除，请刷新后继续。'
+                  : response.status === 409 && code === 'CONVERSATION_CONFLICT'
+                    ? '对话状态已变化，或仍有消息正在处理。请刷新后再试。'
+                    : response.status === 503 && code === 'MODEL_UNAVAILABLE'
+                      ? '智能服务暂时不可用，请稍后重试，或在订单页直接查看订单。'
+                      : statusMessages[response.status]) ??
             (response.status === 400 && serverMessage
               ? serverMessage
               : '请求未能完成，请稍后重试。'),

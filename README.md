@@ -1,11 +1,14 @@
 # SupportFlow
 
+- 本轮求职工程补全：[`docs/job-readiness.md`](docs/job-readiness.md)，包括数据库账号与服务端会话、按认证身份限流、请求追踪、持久化知识向量和默认关闭的真实模型评测工具。
+
 Java / Spring Boot + Vue 店铺订单客服学习项目，包含店铺本人订单、版本化知识检索、受限 DeepSeek 工具调用、学习版物流、售后人工审批与持久化模拟退款处理。
 
 - 后端：当前目录 Maven 工程，沿用 `local` profile 与忽略提交的本地配置。
 - 前端：[`frontend/`](frontend/README.md)，Vue 3 + TypeScript + Vite，按店铺上下文接入真实后端。
 - 聊天接口：[`docs/shop-chat.md`](docs/shop-chat.md) 与 [`chat.http`](chat.http)。
 - 按商品名称查单：[`docs/product-order-lookup.md`](docs/product-order-lookup.md)，可以问“我买的耳机发货了吗”；单笔直接查询，多笔显示商品候选，沿用当前店铺和买家隔离。V16新增购买快照，V17支持商品缩略图；历史未知信息保留为空。[演示图片来源与提示词](docs/product-images.md)。
+- 买家删除订单：[`docs/order-deletion.md`](docs/order-deletion.md)，V18记录买家删除操作；仅本人已完成/已取消且无待处理售后的订单可删除，买家查单隐藏，原订单和商家审计保留。新表只需`SELECT, INSERT`权限。
 - 架构与首次启用：[`docs/assistant-architecture.md`](docs/assistant-architecture.md)。**新售后功能需要 V4、表级写权限与独立审核账号，不能直接沿用只有 SELECT 的旧账号完成写入。**
 - 本地演示数据与订单号：[`docs/local-demo-data.md`](docs/local-demo-data.md)。
 - 售后执行与重启恢复：[`docs/after-sale-execution.md`](docs/after-sale-execution.md)。**本轮新增 V5；运行账号需追加任务与模拟回执表权限后重启后端。**
@@ -18,6 +21,7 @@ Java / Spring Boot + Vue 店铺订单客服学习项目，包含店铺本人订�
 - Agent 场景评测：[`docs/agent-evaluation.md`](docs/agent-evaluation.md)，47 个离线场景执行真实认证、路由、工具与临时 MySQL，输出逐条 JSON / Markdown、能力选择和安全回归指标，支持报告比较及 CI；不把规则结果作为真实模型准确率。
 - 用户/商家双入口与店铺授权：[`docs/merchant-workspace.md`](docs/merchant-workspace.md)，**V9后用户端仍为根页面，商家管理端为 `/merchant`，审核必须有显式店铺授权。**
 - 商家店铺知识库：[`docs/shop-knowledge-management.md`](docs/shop-knowledge-management.md)，**V10支持独立知识维护权限、草稿/发布/下线、版本审计和当前店铺已发布资料检索。**
+- 商家文件导入：[`docs/knowledge-file-import.md`](docs/knowledge-file-import.md)，TXT/Markdown本地预览、明确确认存草稿、持久化去重与原稿保护；V19新增导入记录表，发布仍需商家明确确认。
 - 知识问答质量与面试依据：[`docs/knowledge-quality-and-interview.md`](docs/knowledge-quality-and-interview.md)，有界同义检索、结构化引用、历史证据快照与可复现评测；不将词法检索包装成向量RAG。
 - 本地语义检索：[`docs/semantic-rag.md`](docs/semantic-rag.md)，真实中文BGE向量、关键词混合排序、18篇带来源和适用范围的公开参考摘要，以及独立保留集评测。首次启用先运行 `scripts/setup-rag-model.ps1`；经批准，聊天中最多两篇规范公开摘要和本次知识问题可交给DeepSeek筛选来源，商家资料保持本地。GET和历史恢复不调用模型。
 

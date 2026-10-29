@@ -56,30 +56,34 @@ API_PROXY_TARGET=http://127.0.0.1:8080
 - 独立客服/管理员在「人工审核」中批准或拒绝，强制备注、权限校验、禁止自审和重复审批。
 - 买家在「订单」页点击顶部「售后进度」，读取本人当前店铺的申请、审批意见、模拟处理金额、进度及凭证；点击「刷新进度」读取最新结果。
 - 管理员在「人工审核 → 处理进度」中查看最近 50 条审批记录及执行结果；仅对后端标记可重试的失败任务提供「重试模拟退款」，点击后显式提交一次。
-- 连接/断开开发账号，密码只保留在内存；刷新后需重新连接。
+- 登录/退出账号，密码仅用于一次登录；后续请求使用服务端会话，刷新后需重新登录。
 - 错误提示、加载状态、重复发送防护、切换店铺/断开后的迟到响应隔离。
 - 桌面与移动端布局、键盘操作、中文输入法 Enter 防误发。
 
-固定指令「我的订单」「查订单 SF10001」「咨询此订单」不依赖模型。自然语言查单需后端启用 DeepSeek；新增物流/售后在关闭模型时可使用受限规则规划器。知识检索是本地文档检索与引用式抽取，不是任意知识问答。物流未接真实快递接口；审批通过不等于已退款。当前不支持流式聊天；Basic 凭证只保留在页面内存中，对话历史、售后与审计持久化到 MySQL。
+固定指令「我的订单」「查订单 SF10001」「咨询此订单」不依赖模型。自然语言查单需后端启用 DeepSeek；新增物流/售后在关闭模型时可使用受限规则规划器。知识检索是本地文档检索与引用式抽取，不是任意知识问答。物流未接真实快递接口；审批通过不等于已退款。当前不支持流式聊天；浏览器登录后使用 HttpOnly 会话 Cookie，对话历史、售后与审计持久化到 MySQL。
 
 ## 接口与安全边界
 
-1. 用户点击连接，`ApiClient` 使用 UTF-8 HTTP Basic 请求 `GET /api/v1/security/csrf`。
-2. 浏览器保存后端的 HttpOnly 会话 Cookie；API 层只在内存中保存 Basic 凭证。当前后端认证可能轮换 CSRF token，因此每次 POST 前重新获取，不长期缓存。
+1. 用户点击连接，`ApiClient` 的显式 `session` 模式先匿名请求 `GET /api/v1/security/csrf`，再用此校验信息 POST `/api/v1/security/login`，JSON 只提交本次输入的用户名和密码。登录返回 204 后重新读取 CSRF，再 GET `/api/v1/security/me` 核对账号类型与能力；买家、商家入口不互相接纳账号。
+2. 浏览器保存后端的 HttpOnly 会话 Cookie；后续业务请求不携带 Basic 凭证，密码、令牌均不写入浏览器存储。每次写操作重新获取 CSRF，不长期缓存。登录后携带 `X-Session-Account` 作为账号一致性检查；它不能建立身份或授予权限，服务端仍以会话认证为准。
 3. 加载订单通过 `POST /api/v1/shops/{shopId}/chat/messages` 发送 `{"message":"我的订单"}`，继续翻页发送 `我的订单 <原样游标>`。
-4. 页面聊天使用 POST `/api/v1/shops/{shopId}/chat/conversations/{id}/messages`，发送 `clientMessageId`、`message`、可选 `orderNo` 和可选 `resetContext`（缺省为 `false`），同时发送认证头、CSRF 请求头及同源 Cookie。无状态聊天接口继续承担加载订单等兼容请求，不保存会话话题。
+4. 页面聊天使用 POST `/api/v1/shops/{shopId}/chat/conversations/{id}/messages`，发送 `clientMessageId`、`message`、可选 `orderNo` 和可选 `resetContext`（缺省为 `false`），同时发送 CSRF 请求头及同源 Cookie。无状态聊天接口继续承担加载订单等兼容请求，不保存会话话题。
 5. 页面按响应的 `TEXT / ORDER_DETAILS / ORDER_SELECTION / AFTER_SALE_FORM` 展示文本、订单卡片或退款原因表单。表单指令最多携带一笔已验证归属的订单；空列表时必须先选订单。买家身份和订单归属始终由后端验证，前端不传 `buyerId/customerId`。
-6. 商家页 GET `/api/v1/merchant/shops/{shopId}/after-sales` 读取当前授权店铺最多50条待审，POST 同前缀 `/{uuid}/decision` 提交人工决定；保留 Basic、Cookie 与新 CSRF，不自动重试决定。
+6. 商家页 GET `/api/v1/merchant/shops/{shopId}/after-sales` 读取当前授权店铺最多50条待审，POST 同前缀 `/{uuid}/decision` 提交人工决定；保留会话 Cookie 与新 CSRF，不自动重试决定。
 7. 买家进度读取 GET `/api/v1/shops/{shopId}/after-sales`；商家进度读取 GET `/api/v1/merchant/shops/{shopId}/after-sales/history`。金额来自后端公开 DTO，前端不能修改退款金额。
 8. 商家手动重试使用 POST `/api/v1/merchant/shops/{shopId}/after-sales/{uuid}/execution/retry`，不提交金额，保留店铺授权与 CSRF 校验。浏览器不会自动重放该请求，原全平台 `/api/v1/reviews/**` 已关闭。
 9. 退款表单通过 GET `/api/v1/shops/{shopId}/orders/{orderNo}/after-sale-eligibility` 读取期限核验，确认时 POST 同一订单的 `/after-sales`，请求体仅包含 `reason`。同样使用新 CSRF；确认前不会创建申请，失败也不会自动重放。切店、关闭或断开后，旧检查结果不会覆盖新表单。
 10. 确认收货使用 POST `/api/v1/shops/{shopId}/orders/{orderNo}/receipt-confirmation`，不发送请求体、时间、金额或买家身份。每次显式确认获取新 CSRF，并与其他请求共用队列；服务端要求订单读取及确认收货权限。返回 `order / alreadyConfirmed / eligibility`，页面只展示服务端时间与截止日期，不用浏览器时钟起算；重复请求保留原收货时间，网络失败不自动重放，提示先刷新核实。
 
-所有请求使用同源 `/api`，开发代理保留 Cookie、认证与 CSRF，不关闭安全过滤器，不添加通配 CORS。API 层串行执行「获取新 Token → POST」请求对，避免订单列表和聊天并发造成会话轮换竞态。403 可能是权限不足，也可能是 CSRF 失效；前端不会盲目自动重放 POST。401 会清空账号、订单、选中项和聊天显示。
+所有请求使用同源 `/api`，开发代理保留 Cookie 与 CSRF，不关闭安全过滤器，不添加通配 CORS。API 层串行执行「获取新 Token → POST」请求对，避免订单列表和聊天并发造成会话轮换竞态。403 可能是权限不足，也可能是 CSRF 失效；前端不会盲目自动重放 POST。401 会清空账号、订单、选中项、聊天与商家店铺授权。
 
-这是**本地开发联调的认证界面**，不是生产登录系统。尚无注册、登录令牌、找回密码或权限管理页面。生产部署应使用 HTTPS 和正式认证方案，并让反向代理将 `/api` 转发给后端；`dist` 是静态资源，Vite 开发代理不会自动随它部署。不要把携带 Basic 凭证的开发页面暴露到公网。
+退出会先清空页面并取消旧请求，再获取新 CSRF、POST `/api/v1/security/logout` 使服务端会话失效；网络失败会提示退出结果未确认。下次登录等待前次退出完成，避免迟到的退出清除新账号。关闭登录框时也清理已经完成的登录交换。其他标签页切换账号或退出时，通过 `BroadcastChannel` 清空旧页面；服务端账号一致性检查继续防止旧标签页误用新账号的 Cookie。刷新页面不会自动沿用浏览器中的身份，必须显式重新登录。
+
+`ApiClient` 默认的 Basic 构造模式只供现有直接 API 测试兼容；用户端和商家端均明确选择会话模式，登录失败不会退回 Basic。尚无自助注册、找回密码或权限管理页面。生产部署仍需 HTTPS、适当的会话期限与正式账号运维，并让反向代理将 `/api` 转发给后端；`dist` 是静态资源，Vite 开发代理不会自动随它部署。
 
 当前 JSON 数值 ID/游标只接受 JavaScript 可精确表示的安全整数。若未来数据库 ID 可能超过 `Number.MAX_SAFE_INTEGER`，应统一把后端这些 DTO 字段改为十进制字符串，再同步前端协议，不能悄悄四舍五入。
+
+商家知识库页会读取当前店铺的检索准备状态，展示已准备的资料段数；GET 状态接口不计算向量。只有具有知识管理权限的员工点击「准备检索索引」，才会携带新 CSRF 提交一次本地准备请求；重复点击由后端继续处理缺失项，页面不自动重试或调用外部模型。发布或下线后重新读取状态，切店、退出、身份失效后丢弃旧结果。尚未启用或暂不可用时仍保留基础检索；买家页不显示这些管理信息。
 
 ## 代码沿什么顺序看
 
@@ -88,7 +92,7 @@ API_PROXY_TARGET=http://127.0.0.1:8080
   → components/OrderCard.vue 发出 select 事件
   → App.vue 切回会话并调用 selectOrder(order)
   → composables/useSupportDesk.ts 构造消息、显式订单与待发送 resetContext
-  → api/client.ts 附加 Basic + CSRF + Cookie，发起 HTTP
+  → api/client.ts 附加会话 Cookie + CSRF，发起 HTTP
   → Java ConversationController → ConversationService
       → JdbcConversationStore.reserve 校验会话归属，预留轮次并读取上次成功话题
       → ConversationContextEngine 解析本轮目标，必要时澄清或重新核验引用
@@ -121,7 +125,7 @@ npm.cmd run test:e2e -- --output=test-results/new-mock-run   # 使用尚不存�
 
 浏览器测试默认使用本机 Microsoft Edge，不读取你的浏览器资料或登录态。其他环境可设置 `$env:PLAYWRIGHT_CHANNEL='chromium'` 并先安装 Playwright Chromium。测试默认独占 5173 和 mock 18080；已有日常 Vite 时，可设置 `$env:E2E_FRONTEND_PORT='5174'` 使用独立测试前端，无需停止日常服务。mock 只由测试命令启动，不是正常开发模式的后备数据。每次传入新的、尚不存在的 `--output` 目录；不要复用旧测试结果目录，避免测试运行器自动清理既有文件。
 
-真实Java后端浏览器验证使用 `src/test/java/dev/supportflow/frontend/FrontendTestServer.java`：它只加载测试配置，在一次性Testcontainers MySQL中执行V1–V15并创建公开假买家/商家账号；强制关闭DeepSeek。普通应用运行不会加载这个类。测试覆盖会话、订单、退款与确认收货、独立商家审批、跨店隔离，以及知识草稿/发布/下线、旧发布快照、审计、知识/审核专职账号、409冲突保留输入和丢失发布响应不重放。`SF10002`为期限内订单，`PAGE-001`为过期订单，`SF10001`缺少收货时间；这些测试日期只写入临时容器。
+真实Java后端浏览器验证使用 `src/test/java/dev/supportflow/frontend/FrontendTestServer.java`：它只加载测试配置，在一次性Testcontainers MySQL中执行所有当前迁移（V1–V21）并创建公开假买家/商家账号；强制关闭DeepSeek。普通应用运行不会加载这个类。测试覆盖会话、订单、退款与确认收货、独立商家审批、跨店隔离，以及知识草稿/发布/下线、旧发布快照、审计、知识/审核专职账号、409冲突保留输入和丢失发布响应不重放。`SF10002`为期限内订单，`PAGE-001`为过期订单，`SF10001`缺少收货时间；这些测试日期只写入临时容器。
 
 确认收货浏览器用例使用独立的已发货订单 `SFRECEIPT01`，不会改变其他测试依赖的 `SF10001`。店铺 100 的买家共有 24 笔订单，第一页 20 笔，加载更多后可见新订单。用例验证打开或取消不提交、明确确认后状态和时间同步、后台截止时间恰为收货后 15 天、重复请求不刷新日期，以及刷新页面后仍可读取期限；`PAGE-021` 为已完成但缺少收货时间的历史订单，不提供确认按钮。运行后生成 `test-results/receipt-confirmation.png` 供界面检查。这个用例要求新启动的隔离测试容器，不在日常业务库回退订单状态。
 

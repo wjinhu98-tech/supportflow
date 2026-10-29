@@ -55,6 +55,8 @@ public final class DeepSeekAgentDecisionPlanner implements AgentDecisionPlanner 
             if (request.getBytes(StandardCharsets.UTF_8).length + 2048 > input.inputAllowance())
                 throw new ModelUnavailableException();
             return executor.execute(DeepSeekCallOperation.AGENT_DECISION, request, body -> parse(body, input), input.callTimeout());
+        } catch (dev.supportflow.common.traffic.TrafficLimitExceededException limited) {
+            throw limited;
         } catch (ModelUnavailableException unavailable) {
             throw unavailable;
         } catch (RuntimeException ignored) {

@@ -2,6 +2,13 @@ package dev.supportflow.deployment;
 
 import org.flywaydb.core.Flyway;
 import org.springframework.security.crypto.factory.PasswordEncoderFactories;
+import dev.supportflow.common.security.database.DatabaseAccountAdministration;
+import dev.supportflow.common.security.local.LocalCustomerAccount;
+import dev.supportflow.common.security.model.AccountType;
+import dev.supportflow.common.security.model.CustomerIdentity;
+import dev.supportflow.common.security.model.SecurityPermission;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -19,6 +26,8 @@ import java.sql.Statement;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.List;
+import java.util.Set;
 
 /** Explicit isolated-lab commands. No user-supplied JDBC URL, daily credentials or destructive reset. */
 public final class LabDeploymentTool {
@@ -36,6 +45,7 @@ public final class LabDeploymentTool {
                 case "prepare" -> prepare(Path.of(".local", "deployment-lab").toAbsolutePath().normalize());
                 case "migrate" -> migrate();
                 case "seed" -> seed();
+                case "seed-accounts" -> seedAccounts();
                 case "seed-shops" -> seedShops();
                 case "seed-products" -> seedProducts();
                 case "seed-product-images" -> seedProductImages();
@@ -101,6 +111,45 @@ public final class LabDeploymentTool {
                 .locations("classpath:db/migration").validateOnMigrate(true)
                 .baselineOnMigrate(false).cleanDisabled(true).createSchemas(false).load().migrate();
         System.out.println("LAB_MIGRATIONS_COMPLETE database=supportflow_lab");
+    }
+
+    private static String accountHash(String name) throws IOException {
+        if (!Set.of("lab_buyer_hash", "lab_merchant_hash").contains(name)) {
+            throw new IOException("Unsupported business account secret");
+        }
+        String hash = Files.readString(Path.of("/run/secrets", name), StandardCharsets.UTF_8).strip();
+        if (!hash.matches("\\{bcrypt}\\$2[aby]\\$\\d{2}\\$[./A-Za-z0-9]{53}")) {
+            throw new IOException("Invalid lab account hash");
+        }
+        return hash;
+    }
+
+    /** Explicit post-migration job; no ops account, account reset, or merchant-shop authorization write. */
+    private static void seedAccounts() throws IOException, SQLException {
+        var accounts = List.of(new LocalCustomerAccount("lab-buyer", accountHash("lab_buyer_hash"),
+                        new CustomerIdentity(200),
+                        Set.of(SecurityPermission.ORDER_READ, SecurityPermission.ORDER_CONFIRM_RECEIPT), AccountType.BUYER),
+                new LocalCustomerAccount("lab-merchant", accountHash("lab_merchant_hash"), new CustomerIdentity(999),
+                        Set.of(SecurityPermission.ORDER_READ, SecurityPermission.AFTER_SALE_REVIEW,
+                                SecurityPermission.KNOWLEDGE_MANAGE), AccountType.MERCHANT_STAFF));
+        try (Connection connection = DriverManager.getConnection(JDBC_URL, "lab_migrator", migrationPassword())) {
+            connection.setAutoCommit(false);
+            try {
+                try (Statement check = connection.createStatement(); ResultSet rows = check.executeQuery("SELECT DATABASE()")) {
+                    if (!rows.next() || !"supportflow_lab".equals(rows.getString(1))) {
+                        throw new SQLException("Lab database identity did not match");
+                    }
+                }
+                var administration = new DatabaseAccountAdministration(new JdbcTemplate(new SingleConnectionDataSource(connection, true)));
+                int inserted = administration.importMissingConfiguredAccounts(accounts);
+                connection.commit();
+                System.out.println("LAB_ACCOUNTS_READY accountsInserted=" + inserted
+                        + " existingAccountsPreserved=true staffGrantsChanged=0 opsBusinessAccounts=0");
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            }
+        }
     }
 
     private static void seed() throws IOException, SQLException {
@@ -224,6 +273,9 @@ public final class LabDeploymentTool {
         if (!password.matches("[A-Za-z0-9_-]{24,128}")) throw new IOException("Invalid lab application credential");
         try (Connection connection = DriverManager.getConnection(JDBC_URL, "lab_app", password);
              Statement query = connection.createStatement()) {
+            boolean buyerDeletionInsert = false;
+            boolean knowledgeImportInsert = false;
+            boolean knowledgeVectorInsert = false;
             try (ResultSet grants = query.executeQuery("SHOW GRANTS")) {
                 while (grants.next()) {
                     String grant = grants.getString(1).replace("\\_", "_");
@@ -232,13 +284,38 @@ public final class LabDeploymentTool {
                             || grant.contains("GRANT OPTION") || grant.contains("ALL PRIVILEGES")) {
                         throw new SQLException("Lab runtime privileges exceed the configured boundary");
                     }
+                    if (grant.contains(" ON `supportflow_lab`.`support_order_buyer_deletion` ")
+                            && grant.substring(0, grant.indexOf(" ON ")).matches(".*\\bINSERT\\b.*")) {
+                        buyerDeletionInsert = true;
+                    }
+                    if (grant.contains(" ON `supportflow_lab`.`support_knowledge_import` ")
+                            && grant.substring(0, grant.indexOf(" ON ")).matches(".*\\bINSERT\\b.*")) {
+                        knowledgeImportInsert = true;
+                    }
+                    if (grant.contains(" ON `supportflow_lab`.`support_knowledge_vector` ")
+                            && grant.substring(0, grant.indexOf(" ON ")).matches(".*\\bINSERT\\b.*")) {
+                        knowledgeVectorInsert = true;
+                    }
                 }
             }
+            if (!buyerDeletionInsert) throw new SQLException("Buyer deletion insert privilege is missing");
+            if (!knowledgeImportInsert) throw new SQLException("Knowledge import insert privilege is missing");
+            if (!knowledgeVectorInsert) throw new SQLException("Knowledge vector insert privilege is missing");
             // All denied statements have a false predicate: even a misconfigured grant cannot change rows.
             for (String denied : new String[]{
                     "UPDATE support_order SET total_amount=total_amount WHERE 1=0",
                     "UPDATE support_order SET buyer_id=buyer_id WHERE 1=0",
                     "UPDATE support_merchant_staff SET username=username WHERE 1=0",
+                    "UPDATE support_order_buyer_deletion SET order_id=order_id WHERE 1=0",
+                    "DELETE FROM support_order_buyer_deletion WHERE 1=0",
+                    "UPDATE support_knowledge_import SET tenant_id=tenant_id WHERE 1=0",
+                    "DELETE FROM support_knowledge_import WHERE 1=0",
+                    "UPDATE support_knowledge_vector SET dimensions=dimensions WHERE 1=0",
+                    "DELETE FROM support_knowledge_vector WHERE 1=0",
+                    "UPDATE support_security_account SET enabled=enabled WHERE 1=0",
+                    "DELETE FROM support_security_account WHERE 1=0",
+                    "INSERT INTO support_security_account (username,password_hash,principal_id,account_type) "
+                            + "SELECT username,password_hash,principal_id,account_type FROM support_security_account WHERE 1=0",
                     "DELETE FROM support_order WHERE 1=0"}) {
                 boolean rejected = false;
                 try {
@@ -249,10 +326,27 @@ public final class LabDeploymentTool {
                 }
                 if (!rejected) throw new SQLException("A forbidden runtime operation was authorized");
             }
+            try (ResultSet ignored = query.executeQuery("SELECT order_id FROM support_order_buyer_deletion WHERE 1=0")) {
+                if (ignored.next()) throw new SQLException("Empty privilege probe returned a row");
+            }
+            try (ResultSet ignored = query.executeQuery("SELECT tenant_id FROM support_knowledge_import WHERE 1=0")) {
+                if (ignored.next()) throw new SQLException("Empty privilege probe returned a row");
+            }
+            try (ResultSet ignored = query.executeQuery("SELECT username,enabled,security_version FROM support_security_account WHERE 1=0")) {
+                if (ignored.next()) throw new SQLException("Empty privilege probe returned a row");
+            }
+            int vectorRows = query.executeUpdate("""
+                    INSERT INTO support_knowledge_vector
+                    (tenant_id,source_id,source_version,content_hash,model_fingerprint,chunk_no,dimensions,vector_bytes)
+                    SELECT tenant_id,source_id,source_version,content_hash,model_fingerprint,chunk_no,dimensions,vector_bytes
+                    FROM support_knowledge_vector WHERE 1=0
+                    """);
+            if (vectorRows != 0) throw new SQLException("Empty vector insert privilege probe changed a row");
             try (ResultSet count = query.executeQuery("SELECT COUNT(*) FROM support_order WHERE tenant_id=100 AND buyer_id=200")) {
                 if (!count.next() || count.getLong(1) != ORDER_COUNT) throw new SQLException("Lab fixture count differs");
             }
-            System.out.println("LAB_RUNTIME_PRIVILEGES=PASS shop100Buyer200Orders=5000");
+            System.out.println("LAB_RUNTIME_PRIVILEGES=PASS shop100Buyer200Orders=5000 buyerDeletionImmutable=true"
+                    + " knowledgeImportsImmutable=true securityAccountsReadOnly=true knowledgeVectorsAppendOnly=true");
         }
     }
 }

@@ -1,17 +1,13 @@
-import { expect, request, test, type APIRequestContext, type Page } from '@playwright/test'
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
 import type { ChatResponse, KnowledgeArticle } from '../src/types'
 import { connect, send, switchShop, clearShopConversation } from './helpers'
+import { sessionAccount } from './session'
 
 const password = 'Frontend-Test-Only!'
 const knowledgeBase = '/api/v1/merchant/shops/100/knowledge'
 
 async function editor(): Promise<APIRequestContext> {
-  return request.newContext({
-    baseURL: test.info().project.use.baseURL,
-    extraHTTPHeaders: {
-      Authorization: `Basic ${Buffer.from(`frontend-editor:${password}`).toString('base64')}`,
-    },
-  })
+  return sessionAccount('frontend-editor', password)
 }
 
 async function api<T>(

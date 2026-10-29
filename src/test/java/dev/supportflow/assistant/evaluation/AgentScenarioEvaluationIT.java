@@ -20,6 +20,7 @@ import dev.supportflow.chat.conversation.ConversationStore;
 import dev.supportflow.merchant.knowledge.KnowledgeRepository;
 import dev.supportflow.order.domain.repository.SupportOrderRepository;
 import dev.supportflow.testsupport.KnowledgeFixtures;
+import dev.supportflow.testsupport.OrderVisibilityFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
@@ -138,6 +139,7 @@ class AgentScenarioEvaluationIT {
             create.setString(1, DATABASE_PASSWORD);
             create.execute();
             KnowledgeFixtures.grantRead(connection, DATABASE, RUNTIME);
+            OrderVisibilityFixtures.grantRead(connection, DATABASE, RUNTIME);
             for (String table : List.of("support_order", "support_shipment_event", "support_merchant", "support_merchant_shop")) {
                 grants.execute("GRANT SELECT ON " + DATABASE + "." + table + " TO '" + RUNTIME + "'@'%'");
             }

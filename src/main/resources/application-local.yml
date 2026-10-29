@@ -23,14 +23,21 @@ spring:
       - "optional:file:./.local/deepseek-secrets.yml"
 
 supportflow:
+  traffic:
+    enabled: true
   rag:
     enabled: "${SUPPORTFLOW_RAG_ENABLED:true}"
     public-evidence-selection-enabled: "${SUPPORTFLOW_RAG_PUBLIC_SELECTION_ENABLED:true}"
     model-directory: "${SUPPORTFLOW_RAG_MODEL_DIRECTORY:.local/models/bge-small-zh-v1.5}"
+    persistent-index-enabled: "${SUPPORTFLOW_RAG_PERSISTENT_INDEX_ENABLED:true}"
   after-sale:
     execution:
       enabled: true
   security:
+    authentication:
+      mode: database
+      basic-enabled: false
+      session-timeout: 30m
     local:
       accounts:
         - username: customer-200

@@ -212,7 +212,7 @@ class DeepSeekCallMetricsTest {
 
     @Test
     void springConfigurationUsesTheExistingApplicationRegistryWithoutAnExternalCall() {
-        new ApplicationContextRunner().withUserConfiguration(DeepSeekConfiguration.class)
+        new ApplicationContextRunner().withUserConfiguration(DeepSeekConfiguration.class, dev.supportflow.common.traffic.TrafficConfiguration.class)
                 .withBean(ObjectMapper.class, () -> JsonMapper.builder().build())
                 .withBean(io.micrometer.core.instrument.MeterRegistry.class, () -> registry)
                 .withPropertyValues("supportflow.ai.deepseek.enabled=true",

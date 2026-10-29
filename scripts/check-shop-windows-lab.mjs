@@ -1,8 +1,10 @@
 import { readFile } from "node:fs/promises";
+import { createSessionClient } from "./session-client.mjs";
 
 // Fixed isolated deployment; GET never creates a window or deletes existing chat records.
 const origin = "http://127.0.0.1:18090";
 let checks = 0;
+const sessions = [];
 function ensure(value, label) {
   if (!value) throw new Error(label);
   checks++;
@@ -17,16 +19,19 @@ async function credential(role) {
   ).trim();
   if (!/^[A-Za-z0-9_-]{24,128}$/.test(password))
     throw new Error("SWL_CREDENTIAL");
-  return `Basic ${Buffer.from(`lab-${role}:${password}`).toString("base64")}`;
+  const session = createSessionClient(origin);
+  sessions.push(session);
+  await session.login(`lab-${role}`, password);
+  return session;
 }
-async function get(path, authorization, expected = 200) {
+async function get(path, session, expected = 200) {
   if (!path.startsWith("/api/v1/") || path.includes(".."))
     throw new Error("SWL_TARGET");
-  const response = await fetch(new URL(path, origin), {
+  const response = await session.fetch(path, {
     method: "GET",
     redirect: "error",
     signal: AbortSignal.timeout(10000),
-    headers: { Authorization: authorization, Accept: "application/json" },
+    headers: { Accept: "application/json" },
   });
   if (response.status !== expected) throw new Error("SWL_HTTP_STATUS");
   return response.json();
@@ -87,4 +92,6 @@ try {
       : "SWL_CHECK_FAILED";
   console.error(`SHOP_WINDOW_LAB=FAIL reason=${label}`);
   process.exitCode = 1;
+} finally {
+  await Promise.allSettled(sessions.map((session) => session.logout()));
 }

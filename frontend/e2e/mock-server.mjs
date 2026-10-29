@@ -103,46 +103,83 @@ const server = http.createServer(async (request, response) => {
   }
   if (url.pathname === '/__e2e/requests') return respond(response, 200, requests)
 
-  const authenticated = [expectedAuthorization, slowAuthorization].includes(
-    request.headers.authorization,
-  )
-  const session = sessions.get(cookies(request).JSESSIONID)
+  const sessionId = cookies(request).JSESSIONID
+  let session = sessions.get(sessionId)
+  const basicUser =
+    request.headers.authorization === expectedAuthorization
+      ? MOCK_USERNAME
+      : request.headers.authorization === slowAuthorization
+        ? 'slow-buyer'
+        : null
+  const owner = basicUser ?? session?.username
+  const authenticated = !!owner
   const hasCsrf = !!session && request.headers['x-csrf-token'] === session.token
   const record = {
     method: request.method,
     path: url.pathname + url.search,
     authenticated,
+    hasAuthorization: !!request.headers.authorization,
     hasSessionCookie: !!session,
     hasCsrf,
     accepted: false,
   }
   requests.push(record)
-  if (!authenticated)
-    return failure(response, 401, 'UNAUTHENTICATED', '账号或密码不正确，请重新连接。')
+  if (url.pathname === '/api/v1/security/csrf' && request.method === 'GET') {
+    if (
+      session?.username &&
+      request.headers['x-session-account'] &&
+      request.headers['x-session-account'] !== session.username
+    )
+      return failure(response, 401, 'UNAUTHENTICATED', '登录状态已变化，请重新登录。')
+    if (!session) {
+      const id = randomUUID()
+      session = { token: randomUUID(), username: null }
+      sessions.set(id, session)
+      response.setHeader('Set-Cookie', `JSESSIONID=${id}; Path=/; HttpOnly; SameSite=Lax`)
+    }
+    record.accepted = true
+    return respond(response, 200, {
+      headerName: 'X-CSRF-TOKEN',
+      parameterName: '_csrf',
+      token: session.token,
+    })
+  }
 
+  if (url.pathname === '/api/v1/security/login' && request.method === 'POST') {
+    if (!hasCsrf) return failure(response, 403, 'ACCESS_DENIED', '请求安全校验未通过。')
+    sessions.delete(sessionId)
+    const body = await bodyOf(request)
+    if (![MOCK_USERNAME, 'slow-buyer'].includes(body.username) || body.password !== MOCK_PASSWORD)
+      return failure(response, 401, 'UNAUTHENTICATED', '账号或密码不正确，请重新连接。')
+    if (body.username === 'slow-buyer') await new Promise((resolve) => setTimeout(resolve, 1500))
+    const id = randomUUID()
+    sessions.set(id, { token: randomUUID(), username: body.username })
+    response.setHeader('Set-Cookie', `JSESSIONID=${id}; Path=/; HttpOnly; SameSite=Lax`)
+    record.accepted = true
+    return respond(response, 204)
+  }
+  if (
+    !authenticated ||
+    (session?.username &&
+      request.headers['x-session-account'] &&
+      request.headers['x-session-account'] !== owner)
+  )
+    return failure(response, 401, 'UNAUTHENTICATED', '登录状态已失效，请重新登录。')
+  if (url.pathname === '/api/v1/security/logout' && request.method === 'POST') {
+    if (!hasCsrf) return failure(response, 403, 'ACCESS_DENIED', '请求安全校验未通过。')
+    sessions.delete(sessionId)
+    response.setHeader('Set-Cookie', 'JSESSIONID=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0')
+    record.accepted = true
+    return respond(response, 204)
+  }
   if (url.pathname === '/api/v1/security/me' && request.method === 'GET') {
     record.accepted = true
     return respond(response, 200, {
-      username: request.headers.authorization === slowAuthorization ? 'slow-buyer' : MOCK_USERNAME,
+      username: owner,
       accountType: 'BUYER',
       capabilities: { reviewAfterSales: false, manageKnowledge: false },
     })
   }
-
-  if (url.pathname === '/api/v1/security/csrf' && request.method === 'GET') {
-    if (request.headers.authorization === slowAuthorization) {
-      await new Promise((resolve) => setTimeout(resolve, 1500))
-      if (response.destroyed) return
-    }
-    const id = randomUUID()
-    const token = randomUUID()
-    sessions.set(id, { token })
-    response.setHeader('Set-Cookie', `JSESSIONID=${id}; Path=/; HttpOnly; SameSite=Lax`)
-    record.accepted = true
-    return respond(response, 200, { headerName: 'X-CSRF-TOKEN', parameterName: '_csrf', token })
-  }
-
-  const owner = request.headers.authorization === slowAuthorization ? 'slow-buyer' : MOCK_USERNAME
   if (url.pathname === '/api/v1/shops' && request.method === 'GET') {
     record.accepted = true
     return respond(response, 200, [

@@ -1,10 +1,19 @@
 package dev.supportflow.frontend;
 
 import dev.supportflow.SupportFlowApplication;
+import dev.supportflow.testsupport.OrderVisibilityFixtures;
+import dev.supportflow.common.security.database.DatabaseAccountAdministration;
+import dev.supportflow.common.security.local.LocalCustomerAccountsProperties;
 import org.flywaydb.core.Flyway;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.security.crypto.factory.PasswordEncoderFactories;
+import org.springframework.boot.context.properties.bind.Bindable;
+import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.context.properties.source.ConfigurationPropertySources;
+import org.springframework.core.env.SimpleCommandLinePropertySource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.testcontainers.mysql.MySQLContainer;
 
 import java.sql.Connection;
@@ -83,6 +92,9 @@ public final class FrontendTestServer {
                     "--spring.main.banner-mode=off",
                     "--spring.sql.init.mode=never",
                     "--spring.flyway.enabled=false",
+                    "--supportflow.security.authentication.mode=database",
+                    "--supportflow.security.authentication.basic-enabled=false",
+                    "--supportflow.security.authentication.session-timeout=30m",
                     "--server.address=127.0.0.1",
                     "--server.port=18081",
                     "--spring.datasource.url=" + mysql.getJdbcUrl(),
@@ -113,6 +125,9 @@ public final class FrontendTestServer {
             settings.add("--supportflow.security.local.accounts[6].account-type=MERCHANT_STAFF");
             addAccount(settings, 7, "frontend-editor-other", 994L, passwordHash, "KNOWLEDGE_MANAGE");
             settings.add("--supportflow.security.local.accounts[7].account-type=MERCHANT_STAFF");
+            addAccount(settings, 8, "frontend-delete-buyer", 202L, passwordHash);
+
+            seedAccounts(mysql, settings);
 
             application.set(new SpringApplicationBuilder(SupportFlowApplication.class)
                     .registerShutdownHook(false)
@@ -122,6 +137,16 @@ public final class FrontendTestServer {
         } finally {
             close.run();
         }
+    }
+
+    private static void seedAccounts(MySQLContainer mysql, List<String> settings) {
+        // Bind exactly the fixture's declared identities/permissions; do not duplicate them in a second seed list.
+        var source = new SimpleCommandLinePropertySource(settings.toArray(String[]::new));
+        var accounts = new Binder(ConfigurationPropertySources.from(source))
+                .bind("supportflow.security.local", Bindable.of(LocalCustomerAccountsProperties.class)).get();
+        var operator = new JdbcTemplate(new DriverManagerDataSource(mysql.getJdbcUrl(), mysql.getUsername(), mysql.getPassword()));
+        int imported = new DatabaseAccountAdministration(operator).importMissingConfiguredAccounts(accounts.accounts());
+        if (imported != 9) throw new IllegalStateException("The isolated frontend account fixture did not match");
     }
 
     private static void addAccount(
@@ -157,8 +182,13 @@ public final class FrontendTestServer {
              Statement statement = connection.createStatement()) {
             createReader.setString(1, readerPassword);
             createReader.execute();
+            OrderVisibilityFixtures.grantRead(connection, DATABASE_NAME, "frontend_reader");
+            statement.execute("GRANT INSERT ON " + DATABASE_NAME
+                    + ".support_order_buyer_deletion TO 'frontend_reader'@'%'");
             statement.execute("GRANT SELECT ON " + DATABASE_NAME
                     + ".support_order TO 'frontend_reader'@'%'");
+            statement.execute("GRANT SELECT ON " + DATABASE_NAME
+                    + ".support_security_account TO 'frontend_reader'@'%'");
             statement.execute("GRANT UPDATE (status, received_at) ON " + DATABASE_NAME
                     + ".support_order TO 'frontend_reader'@'%'");
             statement.execute("GRANT SELECT, INSERT ON " + DATABASE_NAME
@@ -193,6 +223,8 @@ public final class FrontendTestServer {
                 statement.execute("GRANT SELECT, INSERT ON " + DATABASE_NAME + "." + table
                         + " TO 'frontend_reader'@'%'");
             }
+            statement.execute("GRANT SELECT, INSERT ON " + DATABASE_NAME
+                    + ".support_knowledge_import TO 'frontend_reader'@'%'");
             statement.executeUpdate("""
                     INSERT INTO support_merchant (id, name, status)
                     VALUES (1, '测试商家甲', 'ACTIVE'), (2, '测试商家乙', 'ACTIVE')
@@ -270,6 +302,13 @@ public final class FrontendTestServer {
             statement.executeUpdate("""
                     UPDATE support_order SET status='COMPLETED'
                     WHERE id=1121 AND tenant_id=100 AND buyer_id=200 AND order_no='PAGE-021'
+                    """);
+            // A separate buyer keeps destructive UI checks independent from the existing 24-order baseline.
+            statement.executeUpdate("""
+                    INSERT INTO support_order
+                      (id,tenant_id,customer_id,buyer_id,order_no,status,total_amount,currency,received_at,product_items_json)
+                    VALUES (4001,100,202,202,'SFDELETELIVE01','COMPLETED',19.90,'CNY',UTC_TIMESTAMP(3),
+                      JSON_ARRAY(JSON_OBJECT('productName','删除验收杯','specification','白色','quantity',1)))
                     """);
         }
     }

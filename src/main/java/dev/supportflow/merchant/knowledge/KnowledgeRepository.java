@@ -34,6 +34,16 @@ public class KnowledgeRepository {
                 .param("keywords", json.writeValueAsString(draft.keywords())).param("content", draft.content()).update();
     }
 
+    /** Stable-ID import admission; an existing draft keeps every field and its first timestamps unchanged. */
+    void claimImportDraft(long shopId, String id, KnowledgeDraft draft) {
+        jdbc.sql("""
+                INSERT INTO support_knowledge_article (id, tenant_id, title, keywords_json, content)
+                VALUES (:id, :shop, :title, :keywords, :content)
+                ON DUPLICATE KEY UPDATE id=id
+                """).param("id", id).param("shop", shopId).param("title", draft.title())
+                .param("keywords", json.writeValueAsString(draft.keywords())).param("content", draft.content()).update();
+    }
+
     Optional<StoredKnowledge> find(long shopId, String id, boolean lock) {
         // Only the mutable article is locked: revision/audit tables remain SELECT+INSERT-only at runtime.
         return jdbc.sql("SELECT * FROM support_knowledge_article WHERE tenant_id=:shop AND id=:id"

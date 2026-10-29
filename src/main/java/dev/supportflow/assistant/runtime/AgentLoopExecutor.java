@@ -18,6 +18,9 @@ import dev.supportflow.assistant.tool.LogisticsTool;
 import dev.supportflow.assistant.tool.OrderTool;
 import dev.supportflow.chat.application.ModelUnavailableException;
 import dev.supportflow.chat.conversation.ConversationException;
+import dev.supportflow.common.observability.TraceContext;
+import dev.supportflow.common.observability.StageTrace;
+import dev.supportflow.common.traffic.TrafficLimitExceededException;
 import dev.supportflow.common.security.model.AccountType;
 import dev.supportflow.common.security.model.CustomerPrincipal;
 import dev.supportflow.common.security.model.SecurityPermission;
@@ -81,6 +84,13 @@ public class AgentLoopExecutor {
     }
 
     public AgentRun advance(CustomerPrincipal principal, AgentRun initial) {
+        requireOwner(principal, initial);
+        try (var trace = TraceContext.agentRun(initial.id())) {
+            return advanceTraced(principal, initial);
+        }
+    }
+
+    private AgentRun advanceTraced(CustomerPrincipal principal, AgentRun initial) {
         AgentRun run = initial;
         requireOwner(principal, run);
         try {
@@ -98,16 +108,17 @@ public class AgentLoopExecutor {
                 long started = System.nanoTime();
                 AgentPhase phase = run.phase();
                 boolean success = false;
-                try {
+                try (var stageTrace = StageTrace.start(traceStage(phase))) {
                     run = switch (phase) {
                         case PLAN -> decide(run);
                         case ORDER_LOOKUP, LOGISTICS_LOOKUP -> executeTool(principal, run);
                         case COMPLETE -> throw rejected();
                     };
                     success = true;
+                    stageTrace.succeeded();
                 } catch (RuntimeException failure) {
                     // A checkpoint conflict or storage failure is never a reason to replay a remote request.
-                    if (failure instanceof ConversationException) throw failure;
+                    if (failure instanceof ConversationException || failure instanceof TrafficLimitExceededException) throw failure;
                     AgentStepFailure kind = classify(failure);
                     boolean scheduled = store.retryStep(run.key(), run.generation(), phase, kind);
                     metrics.failure(phase, kind, scheduled);
@@ -128,16 +139,24 @@ public class AgentLoopExecutor {
                         : failure instanceof ModelUnavailableException unavailable
                         && unavailable.kind() == dev.supportflow.chat.application.ModelFailureKind.INTERRUPTED
                         ? AgentFailureCode.EXECUTION_INTERRUPTED
-                        : failure instanceof ModelUnavailableException ? AgentFailureCode.MODEL_UNAVAILABLE
+                        : failure instanceof ModelUnavailableException || failure instanceof TrafficLimitExceededException ? AgentFailureCode.MODEL_UNAVAILABLE
                         : AgentFailureCode.TOOL_UNAVAILABLE;
                 try { store.pause(run.key(), run.generation(), code); }
                 catch (RuntimeException ignored) { LOG.warn("Agent loop failure marker unavailable; lease remains bounded"); }
                 LOG.warn("Agent loop stopped: phase={}, outcome={}", run.phase(), code);
             }
-            if (failure instanceof ConversationException || failure instanceof ModelUnavailableException
+            if (failure instanceof ConversationException || failure instanceof ModelUnavailableException || failure instanceof TrafficLimitExceededException
                     || failure instanceof AccessDeniedException || failure instanceof OrderNotFoundException) throw failure;
             throw new ModelUnavailableException();
         }
+    }
+
+    private static StageTrace.Stage traceStage(AgentPhase phase) {
+        return switch (phase) {
+            case PLAN, COMPLETE -> StageTrace.Stage.AGENT_PLAN;
+            case ORDER_LOOKUP -> StageTrace.Stage.ORDER_TOOL;
+            case LOGISTICS_LOOKUP -> StageTrace.Stage.LOGISTICS_TOOL;
+        };
     }
 
     private AgentRun decide(AgentRun run) {

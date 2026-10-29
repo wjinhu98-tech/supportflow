@@ -96,7 +96,9 @@ class DeepSeekCallExecutorTest {
                 }
                 Map<String, String> fields = fields(event);
                 assertThat(fields.keySet()).containsExactlyInAnyOrder(
-                        "operation", "outcome", "durationMs", "inFlight", "limit", "httpStatus");
+                        "operation", "outcome", "durationMs", "inFlight", "limit", "httpStatus", "traceId", "agentRunId");
+                assertThat(fields.get("traceId")).matches("none|[0-9a-f]{32}");
+                assertThat(fields.get("agentRunId")).matches("none|[0-9a-f-]{36}");
                 assertThat(fields.get("operation")).isIn("ORDER_INTENT", "TOOL_PLAN");
                 assertThat(OUTCOMES.contains(fields.get("outcome"))).isTrue();
                 assertThat(fields.get("durationMs")).matches("\\d+");

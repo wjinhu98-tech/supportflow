@@ -30,6 +30,7 @@ const emit = defineEmits<{
   more: []
   open: [id: string]
   create: []
+  import: []
   cancel: []
   reload: []
   save: []
@@ -63,6 +64,14 @@ function actionLabel(action: KnowledgeAudit['action']) {
         </div>
       </div>
       <div class="knowledge-actions">
+        <button
+          type="button"
+          data-testid="knowledge-import"
+          :disabled="submitting || dirty"
+          @click="emit('import')"
+        >
+          导入文件
+        </button>
         <button
           type="button"
           data-testid="knowledge-refresh"

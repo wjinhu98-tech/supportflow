@@ -1,18 +1,18 @@
 # 本机独立部署实验环境
 
-这套 Compose 使用独立项目 `supportflow-lab`、独立 MySQL 容器与命名卷，数据库固定为 `supportflow_lab`。它不连接宿主机的 `supportflow_rebuild`，不导入日常订单或现有账号。应用使用 `lab` profile，关闭启动时 Flyway，由一次性迁移服务先完成建表；该 profile 显式关闭 DeepSeek 并将 API Key 设为空，服务不挂载真实模型 Key。网络配置不代表完全阻断出站流量。
+这套 Compose 使用独立项目 `supportflow-lab`、独立 MySQL 容器与命名卷，数据库固定为 `supportflow_lab`。它不连接宿主机的 `supportflow_rebuild`，不导入日常订单或日常账号。应用使用 `lab` profile，关闭启动时 Flyway，由一次性迁移服务先完成建表；该 profile 显式关闭 DeepSeek 并将 API Key 设为空，服务不挂载真实模型 Key。网络配置不代表完全阻断出站流量。
 
 这是学习和容量测量的单机基线，不是生产部署、微服务拆分或高可用方案。实际构建、启动、业务验收和容量结果需要单独验证，不能从配置上推断吞吐或延迟。
 
 ## 服务与访问边界
 
-| 服务 | 宿主机入口 | 用途与上限 |
-| --- | --- | --- |
-| `frontend` | `http://127.0.0.1:18090` | 非 root Nginx，容器 8080；0.5 CPU / 128 MiB |
-| `backend` | 仅管理端 `http://127.0.0.1:18091` | Java 21，主 API 8080 仅容器网络可见；1 CPU / 768 MiB |
-| `mysql` | 不映射宿主端口 | MySQL 8.0.45，独立命名卷；1 CPU / 768 MiB |
-| `prometheus` | `http://127.0.0.1:19090` | 拉取后端指标，保留最多 24 小时/128 MB 的实验时序数据；0.5 CPU / 256 MiB |
-| `migrate` / `grant` / `seed` | 无入口，一次性执行 | 顺序完成迁移、精确授权、实验数据；不随业务请求运行 |
+| 服务                         | 宿主机入口                        | 用途与上限                                                              |
+| ---------------------------- | --------------------------------- | ----------------------------------------------------------------------- |
+| `frontend`                   | `http://127.0.0.1:18090`          | 非 root Nginx，容器 8080；0.5 CPU / 128 MiB                             |
+| `backend`                    | 仅管理端 `http://127.0.0.1:18091` | Java 21，主 API 8080 仅容器网络可见；1 CPU / 768 MiB                    |
+| `mysql`                      | 不映射宿主端口                    | MySQL 8.0.45，独立命名卷；1 CPU / 768 MiB                               |
+| `prometheus`                 | `http://127.0.0.1:19090`          | 拉取后端指标，保留最多 24 小时/128 MB 的实验时序数据；0.5 CPU / 256 MiB |
+| `migrate` / `grant` / `seed` / `seed-accounts` | 无入口，一次性执行 | 顺序完成迁移、精确授权、实验数据和账号导入；不随业务请求运行 |
 
 买家入口为 `http://127.0.0.1:18090/?shopId=100`，商家入口为 `http://127.0.0.1:18090/merchant`，由同一 SPA 提供。Nginx 只代理 `/api/`，保留认证头、Cookie、CSRF 与当前 Host，拒绝 `/actuator` 和其子路径，不自动重试上游写请求。所有 Nginx 响应包含 `X-SupportFlow-Environment: isolated-lab`，压测工具应先核实这个标记再运行。
 
@@ -57,16 +57,29 @@ mysql 首次启动
   → migrate：LabDeploymentTool migrate，迁移账号运行 Flyway
   → grant：root 仅授应用所需表/列写权限，此时业务表已经存在
   → seed：LabDeploymentTool seed，迁移账号写入实验数据与商家关系
+  → seed-accounts：迁移账号只导入缺失的 lab-buyer / lab-merchant 账号，保留现有账号状态及密码
   → backend：lab_app 启动，Flyway=false，readiness 检查通过
       ├─ frontend：同源网页与 /api 反向代理
       └─ prometheus：用独立运维账号抓取管理端
 ```
 
-`migrate` 和 `seed` 固定访问容器地址 `mysql:3306/supportflow_lab`，只挂载迁移密码文件，不读取本机日常配置。`seed` 写入店铺 100、买家 200 的 5000 笔实验订单及所需商家映射；`LAB-000001` 为已发货、199.90 CNY 的实验订单。它不用于回退或重置日常业务数据。
+`migrate`、`seed` 和 `seed-accounts` 固定访问容器地址 `mysql:3306/supportflow_lab`，不读取本机日常配置。前两者只挂载迁移密码文件；`seed-accounts` 额外挂载既有买家与商家 bcrypt 哈希，复制原身份与操作权限，只插入缺失账号，不更新已有密码、禁用状态或店铺授权。它不会创建 `lab-ops` 业务账号。`seed` 写入店铺 100、买家 200 的 5000 笔实验订单及所需商家映射；`LAB-000001` 为已发货、199.90 CNY 的实验订单。它不用于回退或重置日常业务数据。
 
-MySQL 首次 init 只运行在新数据卷。应用最初只有新库 `SELECT`，迁移账号有该库的 `SELECT, INSERT, UPDATE, CREATE, INDEX, ALTER`。`grant` 在迁移成功后才授表/列写权限，避免向不存在的表授权；应用只有订单 `status/received_at` 列更新、收货审计插入、售后/执行/会话/知识表相应写权限，不获 DELETE、DDL、GRANT OPTION 或商家授权关系写权限。初始库级权限转义数据库名中的下划线，避免 MySQL 的库权限通配语义扩大匹配范围。
+MySQL 首次 init 只运行在新数据卷。应用最初只有新库 `SELECT`，迁移账号有该库的 `SELECT, INSERT, UPDATE, CREATE, INDEX, ALTER`。`grant` 在迁移成功后才授表/列写权限，避免向不存在的表授权；应用只有订单 `status/received_at` 列更新、收货审计插入、售后/执行/会话/知识表相应写权限，以及 V18 买家订单删除记录、V19 知识导入记录和 V21 持久化向量的插入权限。V20 账号表只能查询，应用不能创建、修改或删除账号；不获 DELETE、DDL、GRANT OPTION 或商家授权关系写权限。删除、导入和向量记录不可修改，原订单保留；升级时先运行 `migrate`、`grant` 和 `seed-accounts`，再更新后端。初始库级权限转义数据库名中的下划线，避免 MySQL 的库权限通配语义扩大匹配范围。
 
-根数据库密码只挂载给 MySQL 和一次性 `grant`；应用只挂载应用数据库密码及买家、商家、运维哈希。Prometheus 只拿到运维抓取用的原始密码，不能据此登录数据库。Compose 本机 secret 是文件挂载边界，不等于外部密钥管理系统；宿主机私有文件仍需访问权限保护。
+已有实验卷升级时，在新镜像构建完成、MySQL 正常运行后依次执行：
+
+```powershell
+docker compose -f deploy/compose.yml run --rm --no-deps migrate
+docker compose -f deploy/compose.yml run --rm --no-deps grant
+docker compose -f deploy/compose.yml run --rm --no-deps seed-accounts
+docker compose -f deploy/compose.yml up -d backend frontend prometheus
+docker compose -f deploy/compose.yml exec backend java '-Dloader.main=dev.supportflow.deployment.LabDeploymentTool' -cp /app/app.jar org.springframework.boot.loader.launch.PropertiesLauncher verify
+```
+
+应用固定使用数据库账号认证，网页通过带 CSRF 的登录换取 HttpOnly、SameSite=Lax 的服务器会话；业务 Basic 已关闭，运维抓取仍使用独立 Basic。会话闲置 30 分钟过期，后端重启后需重新登录。账号禁用、密码修改或安全版本提升会在后续请求中撤销旧会话。按用户请求限流及本地知识向量持久化在 Compose 中启用；向量只保存本地模型计算的结果，不包含文档正文，也不触发外部模型调用。
+
+根数据库密码只挂载给 MySQL 和一次性 `grant`；运行中的应用只挂载应用数据库密码及运维哈希，买家、商家哈希只在 `seed-accounts` 导入时挂载。Prometheus 只拿到运维抓取用的原始密码，不能据此登录数据库。Compose 本机 secret 是文件挂载边界，不等于外部密钥管理系统；宿主机私有文件仍需访问权限保护。
 
 脚本以子 shell 执行，兼容官方 MySQL 入口对 `.sh` 的执行或 source 行为。数据库凭证不出现在命令行，临时客户端配置固定为 `/tmp/supportflow-lab-root-client.cnf`、权限 600，完成时只删除这一明确文件。脚本须保持 LF 行尾。
 
@@ -75,12 +88,12 @@ MySQL 首次 init 只运行在新数据卷。应用最初只有新库 `SELECT`�
 查看启动顺序与失败原因：
 
 ```powershell
-docker compose -f deploy/compose.yml logs --tail=100 mysql migrate grant seed backend
+docker compose -f deploy/compose.yml logs --tail=100 mysql migrate grant seed seed-accounts backend
 (Invoke-WebRequest http://127.0.0.1:18090/healthz).Headers['X-SupportFlow-Environment']
 Invoke-RestMethod http://127.0.0.1:18091/actuator/health/readiness
 ```
 
-`migrate`、`grant`、`seed` 成功退出是正常状态；失败时先检查对应日志，不要跳过授权、禁用归属校验或改用 root 运行后端。不要把私有文件内容粘贴进诊断输出。后端健康检查直接在容器内读取 readiness HTTP，不依赖外部 curl，也不需要挂载运维原始密码。
+`migrate`、`grant`、`seed`、`seed-accounts` 成功退出是正常状态；失败时先检查对应日志，不要跳过授权、禁用归属校验或改用 root 运行后端。不要把私有文件内容粘贴进诊断输出。后端健康检查直接在容器内读取 readiness HTTP，不依赖外部 curl，也不需要挂载运维原始密码。
 
 打开 Prometheus 的 Targets 页面确认 `supportflow-backend` 为 UP，查询 `up{job="supportflow-backend"}`。可以查看实际存在的 JVM、HTTP 请求与数据库连接池指标，再结合负载工具的错误率和延迟报告判断瓶颈。`SupportFlowLabScrapeUnavailable` 仅在抓取失败持续一分钟后出现在实验 Alerts 页面，没有外部通知，也不是生产 SLO。
 

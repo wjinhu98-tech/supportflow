@@ -211,6 +211,25 @@ export interface KnowledgePage {
   nextBeforeId: string | null
 }
 
+export interface KnowledgeIndex {
+  status: 'DISABLED' | 'EMPTY' | 'PARTIAL' | 'READY' | 'UNAVAILABLE' | 'BUSY'
+  expectedChunks: number
+  indexedChunks: number
+  modelFingerprint: string | null
+}
+
+export interface KnowledgeImportPreview {
+  title: string
+  content: string
+  characterCount: number
+  byteCount: number
+}
+
+export interface KnowledgeImportResult {
+  articleId: string
+  reused: boolean
+}
+
 export interface KnowledgeAudit extends KnowledgeInput {
   id: string
   action: 'CREATED' | 'SAVED' | 'PUBLISHED' | 'OFFLINE'

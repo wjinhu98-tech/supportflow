@@ -680,6 +680,14 @@ a {
   padding: 6px 7px;
   font-size: 9px;
 }
+.order-delete {
+  margin-top: 10px;
+  color: #a52d45;
+}
+.order-deletion-notice {
+  color: #386a46;
+  background: #f1f8f2;
+}
 .order-consult:hover:not(:disabled) {
   background: #e9e0f5;
 }

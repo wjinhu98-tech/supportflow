@@ -7,6 +7,17 @@ export const KNOWLEDGE_LIMITS = {
   content: 4000,
 } as const
 
+export const KNOWLEDGE_IMPORT_MAX_BYTES = 64 * 1024
+
+export function validKnowledgeFile(file: File): boolean {
+  return (
+    file instanceof File &&
+    /\.(?:txt|md|markdown)$/i.test(file.name) &&
+    file.size > 0 &&
+    file.size <= KNOWLEDGE_IMPORT_MAX_BYTES
+  )
+}
+
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

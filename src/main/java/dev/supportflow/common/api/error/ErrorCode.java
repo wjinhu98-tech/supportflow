@@ -7,6 +7,8 @@ import com.fasterxml.jackson.annotation.JsonValue;
  */
 public enum ErrorCode {
 
+    ORDER_DELETION_CONFLICT("ORDER_DELETION_CONFLICT", "当前订单暂不能删除，请刷新后重试。"),
+
     ORDER_RECEIPT_CONFLICT("ORDER_RECEIPT_CONFLICT", "当前订单状态不支持确认收货，请刷新后重试；历史订单缺少收货时间时，请联系客服核实。"),
 
     INVALID_ARGUMENT("INVALID_ARGUMENT", "请求参数不合法"),
@@ -18,6 +20,7 @@ public enum ErrorCode {
     REVIEW_NOT_FOUND("REVIEW_NOT_FOUND", "售后申请不存在"),
     REVIEW_CONFLICT("REVIEW_CONFLICT", "售后申请已处理或状态已变化"),
     KNOWLEDGE_NOT_FOUND("KNOWLEDGE_NOT_FOUND", "知识资料不存在"),
+    KNOWLEDGE_IMPORT_INVALID("KNOWLEDGE_IMPORT_INVALID", "知识文件无法导入，请检查文件与填写内容。"),
     KNOWLEDGE_CONFLICT("KNOWLEDGE_CONFLICT", "知识资料已更新或状态已变化，请刷新后重试"),
     KNOWLEDGE_LIMIT_REACHED("KNOWLEDGE_LIMIT_REACHED", "店铺已达到同时发布资料的数量上限"),
     BUSINESS_RULE_VIOLATION("BUSINESS_RULE_VIOLATION", "不符合当前业务处理条件"),

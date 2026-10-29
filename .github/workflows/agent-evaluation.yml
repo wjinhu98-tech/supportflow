@@ -28,7 +28,7 @@ concurrency:
 jobs:
   offline:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
@@ -61,6 +61,24 @@ jobs:
           mvn -B -ntp
           -Dtest=ProductOrderQuestionTest,ProductOrderKeywordTest,ConversationContextEngineTest,OrderItemSnapshotTest,OrderResponseTest,OrderProductQueryServiceTest,OrderItemSnapshotJsonTest
           -Dit.test=ProductOrderChatIT,JdbcOrderProductSearchIT,DemoProductDataIT,DemoProductImageDataIT,LegacyDemoProductDataIT
+          test-compile surefire:test failsafe:integration-test failsafe:verify
+      - name: Regress buyer order deletion and retained business records
+        run: >-
+          mvn -B -ntp
+          -Dtest=OrderDeletionServiceTest
+          -Dit.test=OrderDeletionIT,OrderReceiptIT,MySqlMigrationIT
+          test-compile surefire:test failsafe:integration-test failsafe:verify
+      - name: Regress merchant knowledge file imports
+        run: >-
+          mvn -B -ntp
+          -Dtest=KnowledgeImportFileParserTest
+          -Dit.test=KnowledgeManagementIT
+          test-compile surefire:test failsafe:integration-test failsafe:verify
+      - name: Regress database sessions, quotas, safe tracing and persistent vectors
+        run: >-
+          mvn -B -ntp
+          -Dtest=BrowserAuthenticationFilterTest,BrowserAuthenticationPropertiesTest,BoundedWindowLimiterTest,TrafficQuotaServiceTest,AuthenticatedTrafficSecurityTest,RequestTraceFilterTest,DeepSeekModelQuotaTest,RealModelEvaluationToolTest
+          -Dit.test=BrowserSessionIT,PersistentKnowledgeVectorIT
           test-compile surefire:test failsafe:integration-test failsafe:verify
       - name: Publish readable job summary
         if: always()

@@ -59,8 +59,8 @@ public class DeepSeekConfiguration {
     @ConditionalOnProperty(prefix = "supportflow.ai.deepseek", name = "enabled", havingValue = "true")
     DeepSeekCallExecutor deepSeekCallExecutor(
             @Qualifier("deepSeekHttpClient") HttpClient client, DeepSeekProperties properties,
-            ObjectProvider<MeterRegistry> registries) {
-        return new DeepSeekCallExecutor(client, properties, registries.getIfAvailable(SimpleMeterRegistry::new));
+            ObjectProvider<MeterRegistry> registries, dev.supportflow.common.traffic.TrafficQuotaService quotas) {
+        return new DeepSeekCallExecutor(client, properties, registries.getIfAvailable(SimpleMeterRegistry::new), quotas);
     }
 
     @Bean

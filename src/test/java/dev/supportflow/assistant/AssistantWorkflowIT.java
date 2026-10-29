@@ -4,6 +4,7 @@ import dev.supportflow.SupportFlowApplication;
 import dev.supportflow.order.domain.model.OrderStatus;
 import dev.supportflow.testsupport.MerchantFixtures;
 import dev.supportflow.testsupport.KnowledgeFixtures;
+import dev.supportflow.testsupport.OrderVisibilityFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -139,6 +140,7 @@ class AssistantWorkflowIT {
             grant.execute("GRANT SELECT, INSERT ON supportflow_assistant_test.support_simulated_refund TO 'assistant_runtime'@'%'");
             MerchantFixtures.grantRuntimeRead(connection, "supportflow_assistant_test", "assistant_runtime");
             KnowledgeFixtures.grantRead(connection, "supportflow_assistant_test", "assistant_runtime");
+            OrderVisibilityFixtures.grantRead(connection, "supportflow_assistant_test", "assistant_runtime");
             MerchantFixtures.standardReviewers(connection);
         }
         prepared = true;

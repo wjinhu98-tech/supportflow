@@ -2,6 +2,7 @@ package dev.supportflow.assistant;
 
 import dev.supportflow.SupportFlowApplication;
 import dev.supportflow.testsupport.MerchantFixtures;
+import dev.supportflow.testsupport.OrderVisibilityFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -121,6 +122,7 @@ class MerchantAuthorizationIT {
                 sql.execute("GRANT SELECT,INSERT ON " + DATABASE + "." + table + " TO '" + RUNTIME + "'@'%'");
             }
             MerchantFixtures.grantRuntimeRead(connection, DATABASE, RUNTIME);
+            OrderVisibilityFixtures.grantRead(connection, DATABASE, RUNTIME);
             MerchantFixtures.merchant(connection, 1, "Merchant one", "ACTIVE");
             MerchantFixtures.merchant(connection, 2, "Merchant two", "ACTIVE");
             MerchantFixtures.shop(connection, 100, 1, "Authorized shop", "ACTIVE");

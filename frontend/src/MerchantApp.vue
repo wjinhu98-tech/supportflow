@@ -3,6 +3,8 @@ import { ref } from 'vue'
 import { Store, ShieldCheck, LogOut, LoaderCircle, ArrowLeft } from '@lucide/vue'
 import ReviewPanel from './components/ReviewPanel.vue'
 import KnowledgePanel from './components/KnowledgePanel.vue'
+import KnowledgeIndexPanel from './components/KnowledgeIndexPanel.vue'
+import KnowledgeImportDialog from './components/KnowledgeImportDialog.vue'
 import { useMerchantDesk } from './composables/useMerchantDesk'
 
 const {
@@ -57,13 +59,32 @@ const {
   saveKnowledge,
   publishKnowledge,
   offlineKnowledge,
+  knowledgeImportOpen,
+  knowledgeImportPreview,
+  knowledgeImportTitle,
+  knowledgeImportKeywords,
+  knowledgeImportLoading,
+  knowledgeImportError,
+  knowledgeImportNeedsVerification,
+  openKnowledgeImport,
+  closeKnowledgeImport,
+  previewKnowledgeFile,
+  confirmKnowledgeImport,
+  knowledgeIndex,
+  knowledgeIndexLoading,
+  knowledgeIndexPreparing,
+  knowledgeIndexError,
+  loadKnowledgeIndex,
+  warmKnowledgeIndex,
 } = useMerchantDesk()
 const account = ref('')
 const password = ref('')
 
 async function login() {
   try {
-    await connect(account.value.trim(), password.value)
+    const connection = connect(account.value.trim(), password.value)
+    password.value = ''
+    await connection
   } finally {
     password.value = ''
   }
@@ -183,7 +204,7 @@ function switchShop(event: Event) {
           />
           {{ connecting ? '正在验证身份…' : '登录管理端' }}
         </button>
-        <small>密码仅在当前页面内存中用于连接，不写入浏览器本地存储。</small>
+        <small>密码仅用于本次登录；登录后通过安全会话访问，不写入浏览器本地存储。</small>
       </form>
     </main>
     <main
@@ -282,6 +303,16 @@ function switchShop(event: Event) {
         @decide="submitReview"
         @retry="retryExecution"
       />
+      <KnowledgeIndexPanel
+        v-if="selectedShop && canManageKnowledge && activeModule === 'knowledge'"
+        :index="knowledgeIndex"
+        :loading="knowledgeIndexLoading"
+        :preparing="knowledgeIndexPreparing"
+        :error="knowledgeIndexError"
+        :blocked="navigationBlocked"
+        @refresh="loadKnowledgeIndex"
+        @prepare="warmKnowledgeIndex"
+      />
       <KnowledgePanel
         v-if="selectedShop && canManageKnowledge && activeModule === 'knowledge'"
         :key="'knowledge-' + shopId"
@@ -308,6 +339,7 @@ function switchShop(event: Event) {
         @more="loadKnowledge(true)"
         @open="openKnowledge"
         @create="newKnowledge"
+        @import="openKnowledgeImport"
         @cancel="cancelKnowledge"
         @reload="reloadKnowledge"
         @save="saveKnowledge"
@@ -316,6 +348,19 @@ function switchShop(event: Event) {
         @audit-more="loadKnowledgeAudit(true)"
       />
     </main>
+    <KnowledgeImportDialog
+      v-if="connected && knowledgeImportOpen"
+      v-model:title="knowledgeImportTitle"
+      v-model:keywords="knowledgeImportKeywords"
+      :preview="knowledgeImportPreview"
+      :loading="knowledgeImportLoading"
+      :submitting="submitting"
+      :error="knowledgeImportError"
+      :needs-verification="knowledgeImportNeedsVerification"
+      @file="previewKnowledgeFile"
+      @close="closeKnowledgeImport"
+      @confirm="confirmKnowledgeImport"
+    />
   </div>
 </template>
 

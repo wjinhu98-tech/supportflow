@@ -6,6 +6,20 @@ import dev.supportflow.common.security.model.SecurityPermission;
 import dev.supportflow.common.security.model.AccountType;
 import dev.supportflow.common.security.model.CustomerPrincipal;
 import dev.supportflow.merchant.MerchantCapabilities;
+import dev.supportflow.common.security.api.SecurityErrorResponseWriter;
+import dev.supportflow.common.security.database.DatabaseCustomerUserDetailsService;
+import dev.supportflow.common.security.session.BrowserAuthenticationFilter;
+import dev.supportflow.common.security.session.SessionAccountValidationFilter;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.web.servlet.ServletContextInitializer;
+import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
+import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
+import tools.jackson.databind.ObjectMapper;
+import dev.supportflow.common.observability.RequestTraceFilter;
+import dev.supportflow.common.traffic.AuthenticatedRequestLimitFilter;
+import org.springframework.security.web.context.SecurityContextHolderFilter;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import jakarta.servlet.DispatcherType;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -27,11 +41,12 @@ import java.util.Arrays;
 /**
  * 本地 API 的认证与授权规则；未声明的入口默认拒绝。
  *
- * <p>认证上下文不保存在 session，CSRF token 仍可使用 session 保存。</p>
+ * <p>浏览器使用服务器会话；兼容 Basic 仅由显式配置保留。</p>
  */
 @Configuration(proxyBeanMethods = false)
 @Profile({"local", "lab"})
 @EnableMethodSecurity
+@EnableConfigurationProperties(BrowserAuthenticationProperties.class)
 public class ApiSecurityConfiguration {
 
     @Bean
@@ -39,14 +54,25 @@ public class ApiSecurityConfiguration {
             HttpSecurity http,
             AuthenticationManager authenticationManager,
             JsonAuthenticationEntryPoint authenticationEntryPoint,
-            JsonAccessDeniedHandler accessDeniedHandler
+            JsonAccessDeniedHandler accessDeniedHandler,
+            SecurityErrorResponseWriter errorWriter,
+            BrowserAuthenticationProperties authenticationProperties,
+            ObjectProvider<DatabaseCustomerUserDetailsService> databaseUsers,
+            RequestTraceFilter requestTraceFilter,
+            AuthenticatedRequestLimitFilter requestLimitFilter,
+            ObjectMapper objectMapper
     ) throws Exception {
+        var contexts = new HttpSessionSecurityContextRepository();
+        var accountValidation = new SessionAccountValidationFilter(databaseUsers.getIfAvailable(), authenticationEntryPoint);
+        var browserAuthentication = new BrowserAuthenticationFilter(authenticationManager, contexts,
+                authenticationProperties, authenticationEntryPoint, errorWriter, objectMapper);
         http.authenticationManager(authenticationManager)
                 .authorizeHttpRequests(authorize -> authorize
                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                         .requestMatchers(
-                                HttpMethod.GET, "/api/v1/chat/welcome"
+                                HttpMethod.GET, "/api/v1/chat/welcome", "/api/v1/security/csrf"
                         ).permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/v1/security/login", "/api/v1/security/logout").permitAll()
                         .requestMatchers(
                                 HttpMethod.GET,
                                 "/api/v1/orders",
@@ -54,6 +80,8 @@ public class ApiSecurityConfiguration {
                                 "/api/v1/shops/*/orders/*/after-sale-eligibility",
                                 "/api/v1/shops/*/knowledge/search"
                         ).access(accountAccess(AccountType.BUYER, SecurityPermission.ORDER_READ))
+                        .requestMatchers(HttpMethod.DELETE, "/api/v1/shops/*/orders/*")
+                        .access(accountAccess(AccountType.BUYER, SecurityPermission.ORDER_READ))
                         .requestMatchers(HttpMethod.POST, "/api/v1/shops/*/orders/*/after-sales")
                         .access(accountAccess(AccountType.BUYER, SecurityPermission.ORDER_READ))
                         .requestMatchers(HttpMethod.POST, "/api/v1/shops/*/orders/*/receipt-confirmation")
@@ -82,7 +110,7 @@ public class ApiSecurityConfiguration {
                         .access(accountAccess(AccountType.MERCHANT_STAFF, SecurityPermission.ORDER_READ,
                                 SecurityPermission.AFTER_SALE_REVIEW))
                         .requestMatchers(
-                                HttpMethod.GET, "/api/v1/security/csrf", "/api/v1/security/me"
+                                HttpMethod.GET, "/api/v1/security/me"
                         ).authenticated()
                         .requestMatchers(HttpMethod.GET,
                                 "/api/v1/shops")
@@ -114,9 +142,6 @@ public class ApiSecurityConfiguration {
                         ).access(accountAccess(AccountType.BUYER))
                         .anyRequest().denyAll()
                 )
-                .httpBasic(basic -> basic
-                        .authenticationEntryPoint(authenticationEntryPoint)
-                )
                 .exceptionHandling(exceptions -> exceptions
                         .authenticationEntryPoint(authenticationEntryPoint)
                         .accessDeniedHandler(accessDeniedHandler)
@@ -127,11 +152,32 @@ public class ApiSecurityConfiguration {
                         cache.requestCache(new NullRequestCache())
                 )
                 .sessionManagement(session -> session
-                        .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+                        .sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED)
+                        .sessionFixation(fixation -> fixation.changeSessionId())
+                )
+                .securityContext(security -> security.securityContextRepository(contexts).requireExplicitSave(true)
                 );
+
+        if (authenticationProperties.basicEnabled()) {
+            http.httpBasic(basic -> basic.authenticationEntryPoint(authenticationEntryPoint));
+        } else {
+            http.httpBasic(AbstractHttpConfigurer::disable);
+        }
+        http.addFilterAfter(accountValidation, BasicAuthenticationFilter.class);
+        http.addFilterAfter(browserAuthentication, SessionAccountValidationFilter.class);
+        http.addFilterBefore(requestTraceFilter, SecurityContextHolderFilter.class);
+        http.addFilterAfter(requestLimitFilter, AuthorizationFilter.class);
 
         // 保留 Spring Security 默认 CSRF 保护。
         return http.build();
+    }
+
+    @Bean
+    ServletContextInitializer browserSessionCookies() {
+        return context -> {
+            context.getSessionCookieConfig().setHttpOnly(true);
+            context.getSessionCookieConfig().setAttribute("SameSite", "Lax");
+        };
     }
 
     private static AuthorizationManager<RequestAuthorizationContext> accountAccess(

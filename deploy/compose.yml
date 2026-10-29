@@ -93,6 +93,14 @@ services:
       grant:
         condition: service_completed_successfully
 
+  seed-accounts:
+    <<: *java-tool
+    command: [seed-accounts]
+    secrets: [lab_migrator_password, lab_buyer_hash, lab_merchant_hash]
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+
   backend:
     <<: *backend-image
     environment:
@@ -104,18 +112,21 @@ services:
       TZ: UTC
       SUPPORTFLOW_RAG_ENABLED: "true"
       SUPPORTFLOW_RAG_MODEL_DIRECTORY: /app/models/bge-small-zh-v1.5
+      SUPPORTFLOW_RAG_PERSISTENT_INDEX_ENABLED: "true"
+      SUPPORTFLOW_SECURITY_AUTHENTICATION_MODE: database
+      SUPPORTFLOW_SECURITY_AUTHENTICATION_BASIC_ENABLED: "false"
+      SUPPORTFLOW_SECURITY_AUTHENTICATION_SESSION_TIMEOUT: 30m
+      SUPPORTFLOW_TRAFFIC_ENABLED: "true"
     volumes:
       - ../.local/models/bge-small-zh-v1.5:/app/models/bge-small-zh-v1.5:ro
     secrets:
       - lab_app_password
-      - lab_buyer_hash
-      - lab_merchant_hash
       - lab_ops_hash
     ports:
       - 127.0.0.1:18091:9091
     networks: [database, web, monitoring]
     depends_on:
-      seed:
+      seed-accounts:
         condition: service_completed_successfully
     healthcheck:
       test:

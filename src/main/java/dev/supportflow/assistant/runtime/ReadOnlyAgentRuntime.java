@@ -15,6 +15,9 @@ import dev.supportflow.assistant.tool.LogisticsTool;
 import dev.supportflow.assistant.tool.OrderTool;
 import dev.supportflow.chat.application.ModelUnavailableException;
 import dev.supportflow.chat.conversation.ConversationException;
+import dev.supportflow.common.observability.TraceContext;
+import dev.supportflow.common.observability.StageTrace;
+import dev.supportflow.common.traffic.TrafficLimitExceededException;
 import dev.supportflow.common.security.model.AccountType;
 import dev.supportflow.common.security.model.CustomerPrincipal;
 import dev.supportflow.common.security.model.SecurityPermission;
@@ -152,6 +155,13 @@ public class ReadOnlyAgentRuntime {
     }
 
     private AgentRun advance(CustomerPrincipal principal, AgentRun initial) {
+        requireOwner(principal, initial.key());
+        try (var trace = TraceContext.agentRun(initial.id())) {
+            return advanceTraced(principal, initial);
+        }
+    }
+
+    private AgentRun advanceTraced(CustomerPrincipal principal, AgentRun initial) {
         if (initial.workflowVersion() == 2) {
             if (loop == null) throw new IllegalStateException("Observation-driven runtime unavailable");
             recheckKnownOrder(principal, initial);
@@ -172,12 +182,15 @@ public class ReadOnlyAgentRuntime {
                 }
                 // The store atomically checks the original deadline, consumes an attempt, and persists intent.
                 run = store.beginStep(run.key(), run.generation(), run.phase());
-                run = switch (run.phase()) {
-                    case PLAN -> plan(run);
-                    case ORDER_LOOKUP -> lookupOrder(principal, run);
-                    case LOGISTICS_LOOKUP -> lookupLogistics(principal, run);
-                    case COMPLETE -> throw ConversationException.unavailable();
-                };
+                try (var stageTrace = StageTrace.start(traceStage(run.phase()))) {
+                    run = switch (run.phase()) {
+                        case PLAN -> plan(run);
+                        case ORDER_LOOKUP -> lookupOrder(principal, run);
+                        case LOGISTICS_LOOKUP -> lookupLogistics(principal, run);
+                        case COMPLETE -> throw ConversationException.unavailable();
+                    };
+                    stageTrace.succeeded();
+                }
             }
             if (run.status() == AgentRunStatus.SUCCEEDED) return completed(run);
             throw ConversationException.unavailable();
@@ -188,11 +201,20 @@ public class ReadOnlyAgentRuntime {
                 pauseSafely(run, failure);
             }
             if (failure instanceof AccessDeniedException || failure instanceof OrderNotFoundException
-                    || failure instanceof ModelUnavailableException || failure instanceof ConversationException) {
+                    || failure instanceof ModelUnavailableException || failure instanceof ConversationException
+                    || failure instanceof TrafficLimitExceededException) {
                 throw failure;
             }
             throw ConversationException.unavailable();
         }
+    }
+
+    private static StageTrace.Stage traceStage(AgentPhase phase) {
+        return switch (phase) {
+            case PLAN, COMPLETE -> StageTrace.Stage.AGENT_PLAN;
+            case ORDER_LOOKUP -> StageTrace.Stage.ORDER_TOOL;
+            case LOGISTICS_LOOKUP -> StageTrace.Stage.LOGISTICS_TOOL;
+        };
     }
 
     private AgentRun plan(AgentRun run) {
@@ -281,7 +303,7 @@ public class ReadOnlyAgentRuntime {
 
     private void pauseSafely(AgentRun run, RuntimeException failure) {
         AgentFailureCode code = Thread.currentThread().isInterrupted() ? AgentFailureCode.EXECUTION_INTERRUPTED
-                : failure instanceof ModelUnavailableException ? AgentFailureCode.MODEL_UNAVAILABLE
+                : failure instanceof ModelUnavailableException || failure instanceof TrafficLimitExceededException ? AgentFailureCode.MODEL_UNAVAILABLE
                 : failure instanceof AccessDeniedException || failure instanceof OrderNotFoundException
                 ? AgentFailureCode.VALIDATION_REJECTED : AgentFailureCode.TOOL_UNAVAILABLE;
         try {

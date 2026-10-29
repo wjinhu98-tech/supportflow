@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { connect, send, showChat, showOrders, switchShop, clearShopConversation } from './helpers'
+import { sessionAccount } from './session'
 import type {
   AfterSaleEligibility,
   AfterSaleTicket,
@@ -13,7 +14,7 @@ import type {
 const password = 'Frontend-Test-Only!'
 const reviewPath = '/api/v1/merchant/shops/100/after-sales'
 const buyerHeaders = {
-  Authorization: `Basic ${Buffer.from(`frontend-buyer:${password}`).toString('base64')}`,
+  'X-Session-Account': 'frontend-buyer',
 }
 
 async function ownedTickets(page: Page): Promise<AfterSaleTicket[]> {
@@ -56,7 +57,7 @@ async function selectOrder(page: Page, orderNo: string) {
   const card = page
     .getByTestId('orders-panel')
     .getByTestId('order-card')
-    .filter({ hasText: new RegExp(`\\b${orderNo}\\b`) })
+    .filter({ has: page.getByRole('button', { name: `咨询此订单 ${orderNo}`, exact: true }) })
   await expect(card).toHaveCount(1)
   await card.getByRole('button', { name: /^咨询此订单/ }).click()
   await expect(page.getByRole('button', { name: '会话', exact: true })).toHaveAttribute(
@@ -122,7 +123,7 @@ test('customer and merchant entry points enforce role and database shop grants',
   await expect(shops).toHaveValue('100')
   await expect(shops.locator('option[value="101"]')).toHaveCount(0)
   const headers = {
-    Authorization: `Basic ${Buffer.from(`frontend-reviewer:${password}`).toString('base64')}`,
+    'X-Session-Account': 'frontend-reviewer',
   }
   for (const path of [
     '/api/v1/reviews/after-sales',
@@ -245,7 +246,7 @@ test('conversation history survives reconnect without reopening refund forms or 
     `/api/v1/shops/100/chat/conversations/${conversationId}/messages`,
     {
       headers: {
-        Authorization: `Basic ${Buffer.from(`frontend-other:${password}`).toString('base64')}`,
+        'X-Session-Account': 'frontend-other',
       },
     },
   )
@@ -343,13 +344,14 @@ test('each shop keeps its own window and explicit deletion leaves the other shop
   await expect(
     page.getByTestId('chat-message').filter({ hasText: marker100 }).first(),
   ).toBeVisible()
-  const merchantShops = await page.request.get('/api/v1/merchant/shops', {
-    headers: {
-      Authorization: `Basic ${Buffer.from(`frontend-reviewer:${password}`).toString('base64')}`,
-    },
-  })
-  expect(merchantShops.status()).toBe(200)
-  expect((await merchantShops.json()).map((shop: MerchantShop) => shop.id)).toEqual([100])
+  const merchant = await sessionAccount('frontend-reviewer', password)
+  try {
+    const merchantShops = await merchant.get('/api/v1/merchant/shops')
+    expect(merchantShops.status()).toBe(200)
+    expect((await merchantShops.json()).map((shop: MerchantShop) => shop.id)).toEqual([100])
+  } finally {
+    await merchant.dispose()
+  }
 })
 
 test('real history uses bounded pages for both conversations and older messages', async ({
@@ -424,6 +426,103 @@ test('real Spring Security CSRF and real MySQL owned-order selection', async ({ 
   await showOrders(page)
   await page.getByTestId('load-more-orders').click()
   await expect(panel.getByTestId('order-card')).toHaveCount(24)
+})
+
+test('real buyer deletion hides an ended order across reads and reconnect while retaining its chat snapshot', async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(60_000)
+  const orderNo = 'SFDELETELIVE01'
+  const headers = {
+    'X-Session-Account': 'frontend-delete-buyer',
+  }
+  const orderPath = `/api/v1/shops/100/orders/${orderNo}`
+  const productQuestion = '我买的删除验收杯发货了吗？'
+  async function productLookup(): Promise<ChatResponse> {
+    const csrfResponse = await page.request.get('/api/v1/security/csrf', { headers })
+    expect(csrfResponse.status()).toBe(200)
+    const csrf = (await csrfResponse.json()) as { headerName: string; token: string }
+    const response = await page.request.post('/api/v1/shops/100/chat/messages', {
+      headers: { ...headers, [csrf.headerName]: csrf.token },
+      data: { message: productQuestion },
+    })
+    expect(response.status()).toBe(200)
+    return response.json()
+  }
+  // This account and product belong only to this case; buyer200's shared 24-order baseline is untouched.
+  await connect(page, 'frontend-delete-buyer', password)
+  const before = await page.request.get(orderPath, { headers })
+  expect(before.status()).toBe(200)
+  expect(await before.json()).toMatchObject({ orderNo, status: 'COMPLETED' })
+  expect((await productLookup()).orders.map((order) => order.orderNo)).toEqual([orderNo])
+  const selected = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      /\/chat\/conversations\/[^/]+\/messages$/.test(new URL(response.url()).pathname) &&
+      response.request().postDataJSON()?.orderNo === orderNo,
+  )
+  await selectOrder(page, orderNo)
+  const turn = (await (await selected).json()) as { conversation: { id: string } }
+  const historyPath = `/api/v1/shops/100/chat/conversations/${turn.conversation.id}/messages`
+  const historyBefore = await page.request.get(historyPath, { headers })
+  expect(historyBefore.status()).toBe(200)
+  const original = (await historyBefore.json()) as ConversationMessagePage
+  expect(
+    original.messages.some((message) =>
+      message.response?.orders.some((order) => order.orderNo === orderNo),
+    ),
+  ).toBe(true)
+  await showOrders(page)
+  const panel = page.getByTestId('orders-panel')
+  const card = panel.getByTestId('order-card').filter({ hasText: orderNo })
+  await card.getByRole('button', { name: `删除订单 ${orderNo}`, exact: true }).click()
+  const deleted = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'DELETE' && new URL(response.url()).pathname === orderPath,
+  )
+  await page.getByTestId('confirm-order-deletion').click()
+  expect((await deleted).status()).toBe(204)
+  await expect(page.getByTestId('order-deletion-dialog')).not.toBeVisible()
+  await expect(card).toHaveCount(0)
+  expect((await page.request.get(orderPath, { headers })).status()).toBe(404)
+  const list = await page.request.get('/api/v1/orders?size=100', { headers })
+  expect(list.status()).toBe(200)
+  expect((await list.json()).items).toEqual([])
+  const productAfter = await productLookup()
+  expect(productAfter.orders).toEqual([])
+  expect(productAfter.type).not.toBe('ORDER_DETAILS')
+  const refresh = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/v1/shops/100/chat/messages' &&
+      response.request().postDataJSON()?.message === '我的订单',
+  )
+  await page.getByRole('button', { name: '刷新订单', exact: true }).click()
+  expect((await refresh).status()).toBe(200)
+  await expect(panel.getByTestId('order-card')).toHaveCount(0)
+  const historyAfter = await page.request.get(historyPath, { headers })
+  expect(historyAfter.status()).toBe(200)
+  expect(((await historyAfter.json()) as ConversationMessagePage).messages).toEqual(
+    original.messages,
+  )
+  await page.reload()
+  await connect(page, 'frontend-delete-buyer', password)
+  await showOrders(page)
+  await expect(panel.getByTestId('order-card')).toHaveCount(0)
+  await showChat(page)
+  const snapshot = page
+    .getByTestId('chat-message')
+    .getByTestId('order-card')
+    .filter({ hasText: orderNo })
+  await expect(snapshot).toHaveCount(1)
+  await expect(
+    snapshot.getByRole('button', { name: `删除订单 ${orderNo}`, exact: true }),
+  ).toHaveCount(0)
+  await expect(page.getByText('历史快照 · 订单信息以重新查询为准')).toBeVisible()
+  await page.screenshot({
+    path: testInfo.outputPath('deleted-order-retained-history.png'),
+    fullPage: true,
+  })
 })
 
 test('receipt confirmation needs explicit consent and persists the server receipt and refund deadline', async ({

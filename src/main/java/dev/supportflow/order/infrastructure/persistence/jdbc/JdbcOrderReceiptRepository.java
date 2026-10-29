@@ -28,7 +28,7 @@ public class JdbcOrderReceiptRepository implements OrderReceiptRepository {
 
     @Override
     public Optional<SupportOrder> lockOwnedOrder(long shopId, long buyerId, String orderNo) {
-        return jdbc.sql("""
+        Optional<SupportOrder> order = jdbc.sql("""
                 SELECT id, tenant_id, customer_id, buyer_id, order_no, status,
                        total_amount, currency, created_at, updated_at, received_at, product_items_json
                 FROM support_order
@@ -36,6 +36,13 @@ public class JdbcOrderReceiptRepository implements OrderReceiptRepository {
                 FOR UPDATE
                 """).param("shop", shopId).param("buyer", buyerId).param("number", orderNo)
                 .query(JdbcOrderReceiptRepository::map).optional();
+        if (order.isEmpty()) return Optional.empty();
+        // Current read after the order lock prevents a deleted order from being returned by
+        // the idempotent receipt branch or an older transaction snapshot.
+        boolean deleted = jdbc.sql("""
+                SELECT order_id FROM support_order_buyer_deletion WHERE order_id=:id FOR SHARE
+                """).param("id", order.get().id()).query(Long.class).optional().isPresent();
+        return deleted ? Optional.empty() : order;
     }
 
     @Override

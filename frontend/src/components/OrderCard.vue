@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowUpRight, Check, Package } from '@lucide/vue'
+import { ArrowUpRight, Check, Package, Trash2 } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
 import { isOrderProductImageUrl } from '../productImages'
 import type { Order } from '../types'
@@ -11,8 +11,14 @@ const props = defineProps<{
   busy?: boolean
   compact?: boolean
   historical?: boolean
+  deleted?: boolean
+  deletionBlocked?: boolean
 }>()
-defineEmits<{ select: [order: Order]; confirmReceipt: [order: Order] }>()
+defineEmits<{
+  select: [order: Order]
+  confirmReceipt: [order: Order]
+  deleteOrder: [order: Order]
+}>()
 
 const failedImageUrls = ref(new Set<string>())
 const demoImageUrls = new Set([
@@ -128,7 +134,7 @@ watch(
       <button
         type="button"
         class="order-consult"
-        :disabled="busy"
+        :disabled="busy || deleted"
         :aria-label="`咨询此订单 ${order.orderNo}`"
         @click="$emit('select', order)"
       >
@@ -137,7 +143,15 @@ watch(
           :size="13"
           aria-hidden="true"
         />
-        {{ historical ? '查询最新订单' : selected ? '继续咨询' : '咨询此订单' }}
+        {{
+          deleted
+            ? '此订单已删除'
+            : historical
+              ? '查询最新订单'
+              : selected
+                ? '继续咨询'
+                : '咨询此订单'
+        }}
         <ArrowUpRight
           v-if="!selected"
           :size="13"
@@ -146,7 +160,7 @@ watch(
       </button>
     </div>
     <button
-      v-if="!historical && order.status === 'SHIPPED' && !order.receivedAt"
+      v-if="!historical && !deleted && order.status === 'SHIPPED' && !order.receivedAt"
       type="button"
       class="order-consult"
       :disabled="busy"
@@ -154,6 +168,21 @@ watch(
       @click="$emit('confirmReceipt', order)"
     >
       确认收货
+    </button>
+    <button
+      v-if="!historical && !deleted && ['COMPLETED', 'CANCELLED'].includes(order.status)"
+      type="button"
+      class="order-consult order-delete"
+      :disabled="busy || deletionBlocked"
+      :aria-label="`删除订单 ${order.orderNo}`"
+      :title="deletionBlocked ? '有售后正在处理，暂不能删除' : undefined"
+      @click="$emit('deleteOrder', order)"
+    >
+      <Trash2
+        :size="13"
+        aria-hidden="true"
+      />
+      {{ deletionBlocked ? '售后处理中' : '删除订单' }}
     </button>
   </article>
 </template>

@@ -67,6 +67,7 @@ supportflow:
     enabled: "${SUPPORTFLOW_RAG_ENABLED:false}"
     public-evidence-selection-enabled: "${SUPPORTFLOW_RAG_PUBLIC_SELECTION_ENABLED:false}"
     model-directory: "${SUPPORTFLOW_RAG_MODEL_DIRECTORY:/app/models/bge-small-zh-v1.5}"
+    persistent-index-enabled: "${SUPPORTFLOW_RAG_PERSISTENT_INDEX_ENABLED:false}"
   ai:
     deepseek:
       enabled: false
@@ -79,16 +80,7 @@ supportflow:
     execution:
       enabled: true
   security:
-    local:
-      accounts:
-        - username: lab-buyer
-          password-hash: "${lab_buyer_hash}"
-          identity:
-            buyer-id: 200
-          permissions: [ORDER_READ, ORDER_CONFIRM_RECEIPT]
-        - username: lab-merchant
-          password-hash: "${lab_merchant_hash}"
-          account-type: MERCHANT_STAFF
-          identity:
-            buyer-id: 999
-          permissions: [ORDER_READ, AFTER_SALE_REVIEW, KNOWLEDGE_MANAGE]
+    authentication:
+      mode: database
+      basic-enabled: false
+      session-timeout: 30m

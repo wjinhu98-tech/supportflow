@@ -58,6 +58,8 @@ public final class DeepSeekOrderIntentRecognizer implements OrderIntentRecognize
         try {
             return executor.execute(DeepSeekCallOperation.ORDER_INTENT, requestBody(message),
                     body -> parseIntent(body, message));
+        } catch (dev.supportflow.common.traffic.TrafficLimitExceededException limited) {
+            throw limited;
         } catch (ModelUnavailableException unavailable) {
             throw unavailable;
         } catch (RuntimeException ignored) {

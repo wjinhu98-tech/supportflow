@@ -2,6 +2,7 @@ package dev.supportflow.order.api;
 
 import dev.supportflow.SupportFlowApplication;
 import dev.supportflow.order.domain.model.OrderStatus;
+import dev.supportflow.testsupport.OrderVisibilityFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -121,6 +122,7 @@ class OrderReceiptIT {
              Statement grant = connection.createStatement()) {
             create.setString(1, DATABASE_PASSWORD);
             create.execute();
+            OrderVisibilityFixtures.grantRead(connection, "supportflow_receipt_test", "receipt_runtime");
             grant.execute("GRANT SELECT, UPDATE (status, received_at) ON supportflow_receipt_test.support_order TO 'receipt_runtime'@'%'");
             grant.execute("GRANT INSERT ON supportflow_receipt_test.support_order_receipt_audit TO 'receipt_runtime'@'%'");
             grant.execute("GRANT SELECT, INSERT, UPDATE ON supportflow_receipt_test.support_after_sale TO 'receipt_runtime'@'%'");

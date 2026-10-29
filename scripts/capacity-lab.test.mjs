@@ -4,7 +4,6 @@ import http from 'node:http';
 import { once } from 'node:events';
 import { LAB_ORIGIN, ORDER_URL, ACCOUNT_URL, assertLabTarget, parseArgs, requestGet, runStage, summarize, validOrder } from './capacity-lab.mjs';
 
-const AUTHORIZATION = 'Basic dGVzdDpub3QtYS1yZWFsLXNlY3JldA==';
 const FIXTURE = Object.freeze({ shopId: 100, orderNo: 'LAB-000001', status: 'SHIPPED', statusDescription: 'Shipped',
   totalAmount: 199.90, currency: 'CNY', createdAt: '2026-10-25T00:00:00Z', updatedAt: '2026-10-25T00:00:00Z', receivedAt: null });
 const jsonResponse = (value = FIXTURE, status = 200, marked = true) => new Response(JSON.stringify(value), {
@@ -56,36 +55,37 @@ test('public response validation requires fixture identity and never accepts int
 
 test('each attempt uses only GET, disables redirects and validates environment plus body', async () => {
   let calls = 0;
-  const result = await requestGet({ authorization: AUTHORIZATION, fetchImpl: async (url, options) => {
+  const result = await requestGet({ fetchImpl: async (url, options) => {
     calls++;
     assert.equal(url, ORDER_URL);
     assert.equal(options.method, 'GET');
     assert.equal(options.redirect, 'manual');
+    assert.equal(Object.hasOwn(options.headers, 'authorization'), false);
     return jsonResponse();
   } });
   assert.equal(result.kind, 'ok');
   assert.equal(calls, 1);
-  assert.equal((await requestGet({ authorization: AUTHORIZATION, fetchImpl: async () => jsonResponse(FIXTURE, 200, false) })).kind, 'safetyError');
-  assert.equal((await requestGet({ authorization: AUTHORIZATION, fetchImpl: async () => jsonResponse({ ...FIXTURE, orderNo: 'OTHER' }) })).kind, 'invalidResponse');
-  assert.equal((await requestGet({ authorization: AUTHORIZATION, fetchImpl: async () => jsonResponse(FIXTURE, 503) })).kind, 'httpError');
-  await assert.rejects(requestGet({ url: `${LAB_ORIGIN}/api/v1/chat/messages`, authorization: AUTHORIZATION }), { message: 'UNSAFE_ROUTE' });
+  assert.equal((await requestGet({ fetchImpl: async () => jsonResponse(FIXTURE, 200, false) })).kind, 'safetyError');
+  assert.equal((await requestGet({ fetchImpl: async () => jsonResponse({ ...FIXTURE, orderNo: 'OTHER' }) })).kind, 'invalidResponse');
+  assert.equal((await requestGet({ fetchImpl: async () => jsonResponse(FIXTURE, 503) })).kind, 'httpError');
+  await assert.rejects(requestGet({ url: `${LAB_ORIGIN}/api/v1/chat/messages` }), { message: 'UNSAFE_ROUTE' });
 });
 
 test('preflight identity cannot accept daily or merchant accounts', async () => {
   for (const account of [{ username: 'customer-200', accountType: 'BUYER' },
     { username: 'lab-buyer', accountType: 'MERCHANT_STAFF' },
     { username: 'lab-buyer', accountType: 'BUYER', capabilities: { manageKnowledge: true } }]) {
-    assert.equal((await requestGet({ url: ACCOUNT_URL, authorization: AUTHORIZATION,
+    assert.equal((await requestGet({ url: ACCOUNT_URL,
       fetchImpl: async () => jsonResponse(account) })).kind, 'invalidResponse');
   }
-  assert.equal((await requestGet({ url: ACCOUNT_URL, authorization: AUTHORIZATION,
+  assert.equal((await requestGet({ url: ACCOUNT_URL,
     fetchImpl: async () => jsonResponse({ username: 'lab-buyer', accountType: 'BUYER' }) })).kind, 'ok');
 });
 
 test('provider or transport error details are discarded and requests are not retried', async () => {
   const secretMarker = 'test-sensitive-data-not-to-be-reported';
   let calls = 0;
-  const result = await requestGet({ authorization: AUTHORIZATION, fetchImpl: async () => {
+  const result = await requestGet({ fetchImpl: async () => {
     calls++;
     throw new Error(secretMarker);
   } });
@@ -94,10 +94,16 @@ test('provider or transport error details are discarded and requests are not ret
   assert.equal(JSON.stringify(result).includes(secretMarker), false);
 });
 
+test('session transport environment refusal is an immediate safety failure', async () => {
+  const result = await requestGet({ fetchImpl: async () => { throw new Error('SESSION_ENVIRONMENT_INVALID'); } });
+  assert.equal(result.kind, 'safetyError');
+  assert.equal(result.status, 0);
+});
+
 test('malformed or oversized JSON fails correctness without returning its contents', async () => {
   const marker = 'private-response-marker';
   for (const body of [`{${marker}`, JSON.stringify({ content: marker.repeat(4000) })]) {
-    const result = await requestGet({ authorization: AUTHORIZATION, fetchImpl: async () => new Response(body, {
+    const result = await requestGet({ fetchImpl: async () => new Response(body, {
       status: 200, headers: { 'content-type': 'application/json', 'x-supportflow-environment': 'isolated-lab' },
     }) });
     assert.equal(result.kind, 'invalidResponse');
@@ -108,7 +114,7 @@ test('malformed or oversized JSON fails correctness without returning its conten
 test('an already-stopped attempt never calls transport', async () => {
   const stop = new AbortController();
   stop.abort();
-  const result = await requestGet({ authorization: AUTHORIZATION, signal: stop.signal,
+  const result = await requestGet({ signal: stop.signal,
     fetchImpl: async () => assert.fail('Stopped requests must never call transport') });
   assert.equal(result.kind, 'aborted');
 });
@@ -118,7 +124,7 @@ test('request deadline aborts a real local body stalled after HTTP 200 headers',
     response.writeHead(200, { 'content-type': 'application/json', 'x-supportflow-environment': 'isolated-lab' });
     response.write('{');
   }, async origin => {
-    const result = await requestGet({ authorization: AUTHORIZATION, timeoutMs: 80,
+    const result = await requestGet({ timeoutMs: 80,
       fetchImpl: (_fixedUrl, options) => fetch(origin, options) });
     assert.equal(result.kind, 'timeout');
     assert.equal(result.status, 200);
@@ -132,7 +138,7 @@ test('real local JSON response validates without ever changing the production CL
     response.writeHead(200, { 'content-type': 'application/json', 'x-supportflow-environment': 'isolated-lab' });
     response.end(JSON.stringify(FIXTURE));
   }, async origin => {
-    assert.equal((await requestGet({ authorization: AUTHORIZATION,
+    assert.equal((await requestGet({
       fetchImpl: (_fixedUrl, options) => fetch(origin, options) })).kind, 'ok');
     assert.equal(LAB_ORIGIN, 'http://127.0.0.1:18090');
   });

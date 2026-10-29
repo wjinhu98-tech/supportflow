@@ -4,6 +4,8 @@ import MerchantApp from './MerchantApp.vue'
 
 const mocks = vi.hoisted(() => ({
   authenticate: vi.fn(),
+  logout: vi.fn(),
+  dispose: vi.fn(),
   currentAccount: vi.fn(),
   merchantShops: vi.fn(),
   pendingReviews: vi.fn(),
@@ -11,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   decideReview: vi.fn(),
   retryExecution: vi.fn(),
   knowledgeArticles: vi.fn(),
+  knowledgeIndex: vi.fn(),
+  warmKnowledgeIndex: vi.fn(),
   knowledgeArticle: vi.fn(),
   knowledgeAudit: vi.fn(),
   createKnowledgeArticle: vi.fn(),
@@ -24,6 +28,8 @@ vi.mock('./api/client', async (importOriginal) => {
     ...actual,
     ApiClient: class {
       authenticate = mocks.authenticate
+      logout = mocks.logout
+      dispose = mocks.dispose
       currentAccount = mocks.currentAccount
       merchantShops = mocks.merchantShops
       pendingReviews = mocks.pendingReviews
@@ -31,6 +37,8 @@ vi.mock('./api/client', async (importOriginal) => {
       decideReview = mocks.decideReview
       retryExecution = mocks.retryExecution
       knowledgeArticles = mocks.knowledgeArticles
+      knowledgeIndex = mocks.knowledgeIndex
+      warmKnowledgeIndex = mocks.warmKnowledgeIndex
       knowledgeArticle = mocks.knowledgeArticle
       knowledgeAudit = mocks.knowledgeAudit
       createKnowledgeArticle = mocks.createKnowledgeArticle
@@ -42,7 +50,20 @@ vi.mock('./api/client', async (importOriginal) => {
 })
 beforeEach(() => {
   for (const mock of Object.values(mocks)) mock.mockReset()
+  mocks.logout.mockResolvedValue(undefined)
   mocks.knowledgeArticles.mockResolvedValue({ items: [], nextBeforeId: null })
+  mocks.knowledgeIndex.mockResolvedValue({
+    status: 'DISABLED',
+    expectedChunks: 0,
+    indexedChunks: 0,
+    modelFingerprint: null,
+  })
+  mocks.warmKnowledgeIndex.mockResolvedValue({
+    status: 'READY',
+    expectedChunks: 2,
+    indexedChunks: 2,
+    modelFingerprint: 'test-model',
+  })
   mocks.knowledgeAudit.mockResolvedValue({ items: [], nextBeforeId: null })
   mocks.authenticate.mockResolvedValue(undefined)
   mocks.currentAccount.mockResolvedValue({
@@ -63,6 +84,28 @@ async function login(view: ReturnType<typeof mount>) {
   await flushPromises()
 }
 describe('MerchantApp', () => {
+  it('shows index readiness only to knowledge staff and prepares it only after an explicit click', async () => {
+    mocks.currentAccount.mockResolvedValueOnce({
+      username: 'editor',
+      accountType: 'MERCHANT_STAFF',
+      capabilities: { reviewAfterSales: false, manageKnowledge: true },
+    })
+    mocks.knowledgeIndex.mockResolvedValueOnce({
+      status: 'PARTIAL',
+      expectedChunks: 2,
+      indexedChunks: 0,
+      modelFingerprint: 'local-test',
+    })
+    const view = mount(MerchantApp)
+    await login(view)
+    expect(view.get('[data-testid="knowledge-index-panel"]').text()).toContain('0 / 2')
+    expect(mocks.warmKnowledgeIndex).not.toHaveBeenCalled()
+    await view.get('[data-testid="knowledge-index-prepare"]').trigger('click')
+    await flushPromises()
+    expect(mocks.warmKnowledgeIndex).toHaveBeenCalledOnce()
+    expect(view.get('[data-testid="knowledge-index-panel"]').text()).toContain('已准备完成')
+    view.unmount()
+  })
   it('shows only the knowledge partition for knowledge-only staff', async () => {
     mocks.currentAccount.mockResolvedValueOnce({
       username: 'editor',
@@ -84,6 +127,8 @@ describe('MerchantApp', () => {
     await login(view)
     expect(view.find('[data-testid="merchant-tab-knowledge"]').exists()).toBe(false)
     expect(view.find('[data-testid="knowledge-panel"]').exists()).toBe(false)
+    expect(view.find('[data-testid="knowledge-index-panel"]').exists()).toBe(false)
+    expect(mocks.knowledgeIndex).not.toHaveBeenCalled()
     expect(view.find('[data-testid="review-panel"]').exists()).toBe(true)
     view.unmount()
   })

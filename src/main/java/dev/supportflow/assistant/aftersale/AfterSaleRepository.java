@@ -67,6 +67,18 @@ public class AfterSaleRepository {
                 .optional();
     }
 
+    /** Submission rechecks visibility after its shared order lock; an earlier RR snapshot is insufficient. */
+    Optional<SupportOrder> lockVisibleOwnedOrder(SupportOrder order) {
+        var current = lockOwnedOrder(order);
+        if (current.isEmpty()) return current;
+        boolean deleted = jdbc.sql("""
+                SELECT order_id FROM support_order_buyer_deletion
+                WHERE order_id=:id AND tenant_id=:shop AND buyer_id=:buyer FOR SHARE
+                """).param("id", order.id()).param("shop", order.tenantId()).param("buyer", order.buyerId())
+                .query(Long.class).optional().isPresent();
+        return deleted ? Optional.empty() : current;
+    }
+
     /** Use the database UTC clock so a browser timestamp or a different JVM timezone cannot extend eligibility. */
     Instant now() {
         return jdbc.sql("SELECT UTC_TIMESTAMP(3)").query(LocalDateTime.class).single().toInstant(ZoneOffset.UTC);

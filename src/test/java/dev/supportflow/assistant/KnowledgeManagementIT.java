@@ -2,6 +2,7 @@ package dev.supportflow.assistant;
 
 import dev.supportflow.SupportFlowApplication;
 import dev.supportflow.testsupport.KnowledgeFixtures;
+import dev.supportflow.testsupport.OrderVisibilityFixtures;
 import dev.supportflow.testsupport.MerchantFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
@@ -13,6 +14,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockMultipartFile;
+import java.nio.charset.StandardCharsets;
 import org.springframework.security.crypto.factory.PasswordEncoderFactories;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -54,6 +57,7 @@ import static org.springframework.security.test.web.servlet.setup.SecurityMockMv
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -129,6 +133,8 @@ class KnowledgeManagementIT {
             }
             MerchantFixtures.grantRuntimeRead(connection, DATABASE, RUNTIME);
             KnowledgeFixtures.grantManagement(connection, DATABASE, RUNTIME);
+            sql.execute("GRANT SELECT,INSERT ON " + DATABASE + ".support_knowledge_import TO '" + RUNTIME + "'@'%'");
+            OrderVisibilityFixtures.grantRead(connection, DATABASE, RUNTIME);
             MerchantFixtures.merchant(connection, 1, "Knowledge merchant", "ACTIVE");
             MerchantFixtures.merchant(connection, 2, "Other merchant", "ACTIVE");
             MerchantFixtures.shop(connection, 100, 1, "Editor shop", "ACTIVE");
@@ -148,6 +154,20 @@ class KnowledgeManagementIT {
 
     @BeforeEach
     void setUp() { mvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build(); }
+
+    @Test
+    void indexStatusAndWarmupRequireCurrentKnowledgeShopAuthorizationAndCsrf() throws Exception {
+        String path="/api/v1/merchant/shops/100/knowledge/index";
+        mvc.perform(get(path).with(httpBasic("editor",PASSWORD))).andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("DISABLED")).andExpect(jsonPath("$.indexedChunks").value(0));
+        mvc.perform(post(path+"/warmup").with(httpBasic("editor",PASSWORD))).andExpect(status().isForbidden());
+        mvc.perform(post(path+"/warmup").with(httpBasic("editor",PASSWORD)).with(csrf())).andExpect(status().isOk());
+        mvc.perform(get(path).with(httpBasic("buyer",PASSWORD))).andExpect(status().isForbidden());
+        mvc.perform(get("/api/v1/merchant/shops/200/knowledge/index").with(httpBasic("editor",PASSWORD)))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/v1/merchant/shops/200/knowledge/index/warmup").with(httpBasic("editor",PASSWORD)).with(csrf()))
+                .andExpect(status().isForbidden());
+    }
 
     @Test
     void shouldAllowKnowledgeOnlyStaffWithoutGrantingBuyerOrReviewCapabilities() throws Exception {
@@ -686,6 +706,88 @@ class KnowledgeManagementIT {
             assertThatThrownBy(() -> sql.executeUpdate("UPDATE support_merchant_staff_shop_grant SET enabled=TRUE WHERE 1=0"))
                     .isInstanceOf(SQLException.class).hasMessageContaining("denied");
         }
+    }
+
+    @Test void importsStayDraftUntilExplicitPublishAndDisappearAfterOffline() throws Exception {
+        long shop = isolatedShop(); String keyword=unique(), content=keyword+"：请使用随附软布整理。";
+        long before=count("support_knowledge_article");
+        var preview=body(mvc.perform(multipart(base(shop)+"/imports/preview").file(upload("\uFEFF"+content+"\r\n"))
+                .with(httpBasic("editor",PASSWORD)).with(csrf())).andExpect(status().isOk()).andReturn());
+        assertThat(preview.path("content").asString()).isEqualTo(content);
+        assertThat(count("support_knowledge_article")).isEqualTo(before);
+        var imported=body(importFile("editor",shop,content,keyword,true).andExpect(status().isOk()).andReturn());
+        assertThat(imported.path("reused").asBoolean()).isFalse();
+        var article=getArticle(shop,imported.path("articleId").asString());
+        assertThat(article.path("status").asString()).isEqualTo("DRAFT");
+        assertThat(knowledgeResponse(shop,keyword).path("knowledge").path("sources").isEmpty()).isTrue();
+        article=mutate("editor",shop,article,"publish");
+        assertSource(knowledgeResponse(shop,keyword),article,"v1",content);
+        assertThat(knowledgeResponse(101,keyword).path("knowledge").path("sources").isEmpty()).isTrue();
+        mutate("editor",shop,article,"offline");
+        assertThat(knowledgeResponse(shop,keyword).path("knowledge").path("sources").isEmpty()).isTrue();
+    }
+
+    @Test void repeatedImportsReuseTheFirstIdentityWithoutOverwritingLaterEditsOrPublication() throws Exception {
+        long shop=isolatedShop(); String keyword=unique(), content=keyword+" original";
+        var first=body(importFile("editor",shop,content,keyword,true).andExpect(status().isOk()).andReturn());
+        var article=getArticle(shop,first.path("articleId").asString());
+        article=save("editor",shop,article,valid(keyword,"Edited original document"));
+        article=mutate("editor",shop,article,"publish");
+        long audits=auditCount(article);
+        var repeated=body(importFile("editor",shop,"\uFEFF"+content+"\r\n",unique(),true).andExpect(status().isOk()).andReturn());
+        assertThat(repeated.path("articleId")).isEqualTo(first.path("articleId"));
+        assertThat(repeated.path("reused").asBoolean()).isTrue();
+        assertThat(getArticle(shop,first.path("articleId").asString())).isEqualTo(article);
+        assertThat(auditCount(article)).isEqualTo(audits);
+        var other=body(importFile("editor",isolatedShop(),content,keyword,true).andExpect(status().isOk()).andReturn());
+        assertThat(other.path("articleId")).isNotEqualTo(first.path("articleId"));
+    }
+
+    @Test void concurrentImportsCreateOneDraftOneImportIdentityAndOneAudit() throws Exception {
+        long shop=isolatedShop(); String keyword=unique(), content=keyword+" concurrent";
+        var ready=new CountDownLatch(4);var start=new CountDownLatch(1);
+        List<CompletableFuture<MvcResult>> tasks=new ArrayList<>();
+        for(int i=0;i<4;i++)tasks.add(CompletableFuture.supplyAsync(()->{
+            ready.countDown();try { if(!start.await(10,TimeUnit.SECONDS))throw new IllegalStateException();
+                return importFile("editor",shop,content,keyword,true).andReturn();
+            }catch(Exception failure){throw new IllegalStateException(failure);} }));
+        assertThat(ready.await(10,TimeUnit.SECONDS)).isTrue();start.countDown();
+        Set<String> ids=new HashSet<>();int created=0;
+        for(var task:tasks){var response=task.get(20,TimeUnit.SECONDS);assertThat(response.getResponse().getStatus()).isEqualTo(200);
+            var result=body(response);ids.add(result.path("articleId").asString());if(!result.path("reused").asBoolean())created++;}
+        assertThat(ids).hasSize(1);assertThat(created).isEqualTo(1);
+        assertThat(scalar("SELECT COUNT(*) FROM support_knowledge_import WHERE tenant_id=?",shop)).isEqualTo(1);
+        assertThat(scalar("SELECT COUNT(*) FROM support_knowledge_article WHERE tenant_id=?",shop)).isEqualTo(1);
+        assertThat(auditCount(getArticle(shop,ids.iterator().next()))).isEqualTo(1);
+    }
+
+    @Test void importRequiresCurrentShopPermissionAndCsrfAndRejectsExtraInputs() throws Exception {
+        long shop=isolatedShop();
+        importFile("buyer",shop,"secret",unique(),true).andExpect(status().isForbidden());
+        importFile("reviewer",shop,"secret",unique(),true).andExpect(status().isForbidden());
+        importFile("editor",101,"secret",unique(),true).andExpect(status().isForbidden());
+        importFile("editor",shop,"secret",unique(),false).andExpect(status().isForbidden());
+        mvc.perform(multipart(base(shop)+"/imports").file(upload("secret")).param("title","test")
+                .param("keywords","[\"test\"]").param("contentHash","forged").with(httpBasic("editor",PASSWORD)).with(csrf()))
+                .andExpect(status().isBadRequest());
+        mvc.perform(multipart(base(shop)+"/imports/preview").file(upload("x".repeat(65537)))
+                .with(httpBasic("editor",PASSWORD)).with(csrf())).andExpect(status().isPayloadTooLarge());
+        assertThat(scalar("SELECT COUNT(*) FROM support_knowledge_import WHERE tenant_id=?",shop)).isZero();
+    }
+
+    @Test void missingAuditPermissionRollsBackBothDraftAndImportIdentity() throws Exception {
+        long shop=isolatedShop();permission("support_knowledge_audit",false);
+        try {importFile("editor",shop,"atomic import",unique(),true).andExpect(status().isInternalServerError());}
+        finally {permission("support_knowledge_audit",true);}
+        assertThat(scalar("SELECT COUNT(*) FROM support_knowledge_import WHERE tenant_id=?",shop)).isZero();
+        assertThat(scalar("SELECT COUNT(*) FROM support_knowledge_article WHERE tenant_id=?",shop)).isZero();
+    }
+
+    private static MockMultipartFile upload(String content){return new MockMultipartFile("file","说明.md","text/markdown",content.getBytes(StandardCharsets.UTF_8));}
+    private ResultActions importFile(String user,long shop,String content,String title,boolean token) throws Exception {
+        var request=multipart(base(shop)+"/imports").file(upload(content)).param("title",title)
+                .param("keywords",json.writeValueAsString(List.of(title))).with(httpBasic(user,PASSWORD));
+        return mvc.perform(token?request.with(csrf()):request);
     }
 
     private JsonNode create(long shop, String keyword, String content) throws Exception {

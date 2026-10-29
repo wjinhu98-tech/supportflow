@@ -1,7 +1,13 @@
 import { computed, ref, type Ref } from 'vue'
 import { ApiClient, ApiError } from '../api/client'
-import { validKnowledgeInput } from '../api/knowledge'
-import type { KnowledgeArticle, KnowledgeAudit, KnowledgeInput } from '../types'
+import { validKnowledgeInput, validKnowledgeFile } from '../api/knowledge'
+import type {
+  KnowledgeArticle,
+  KnowledgeAudit,
+  KnowledgeInput,
+  KnowledgeImportPreview,
+  KnowledgeIndex,
+} from '../types'
 
 interface KnowledgeContext {
   client: () => ApiClient | null
@@ -29,6 +35,21 @@ export function useMerchantKnowledge(context: KnowledgeContext) {
   const knowledgeError = ref<string | null>(null)
   const knowledgeNotice = ref<string | null>(null)
   const knowledgeNeedsVerification = ref(false)
+  const knowledgeImportOpen = ref(false)
+  const knowledgeImportFile = ref<File | null>(null)
+  const knowledgeImportPreview = ref<KnowledgeImportPreview | null>(null)
+  const knowledgeImportTitle = ref('')
+  const knowledgeImportKeywords = ref('')
+  const knowledgeImportLoading = ref(false)
+  const knowledgeImportError = ref<string | null>(null)
+  const knowledgeImportNeedsVerification = ref(false)
+  const knowledgeIndex = ref<KnowledgeIndex | null>(null)
+  const knowledgeIndexLoading = ref(false)
+  const knowledgeIndexPreparing = ref(false)
+  const knowledgeIndexError = ref<string | null>(null)
+  let indexRequest = new AbortController()
+  let importRequest = new AbortController()
+  let importVersion = 0
   let listRequest = new AbortController()
   let detailRequest = new AbortController()
   let auditRequest = new AbortController()
@@ -89,12 +110,162 @@ export function useMerchantKnowledge(context: KnowledgeContext) {
   }
 
   function resetKnowledge() {
+    indexRequest.abort()
+    indexRequest = new AbortController()
+    knowledgeIndex.value = null
+    knowledgeIndexLoading.value = false
+    knowledgeIndexPreparing.value = false
+    knowledgeIndexError.value = null
     listRequest.abort()
     listRequest = new AbortController()
     resetEditor()
     knowledgeArticles.value = []
     knowledgeNextBeforeId.value = null
     knowledgeLoading.value = false
+    resetKnowledgeImport()
+  }
+
+  function resetKnowledgeImport() {
+    importRequest.abort()
+    importRequest = new AbortController()
+    importVersion++
+    knowledgeImportOpen.value = false
+    knowledgeImportFile.value = null
+    knowledgeImportPreview.value = null
+    knowledgeImportTitle.value = ''
+    knowledgeImportKeywords.value = ''
+    knowledgeImportLoading.value = false
+    knowledgeImportError.value = null
+    knowledgeImportNeedsVerification.value = false
+  }
+
+  function openKnowledgeImport() {
+    if (
+      !runtime() ||
+      context.submitting.value ||
+      knowledgeDirty.value ||
+      knowledgeNeedsVerification.value
+    )
+      return
+    resetKnowledgeImport()
+    knowledgeImportOpen.value = true
+  }
+
+  function closeKnowledgeImport() {
+    if (!context.submitting.value) resetKnowledgeImport()
+  }
+
+  async function previewKnowledgeFile(file: File | null) {
+    const current = runtime()
+    if (!current || !knowledgeImportOpen.value || context.submitting.value) return
+    importRequest.abort()
+    importRequest = new AbortController()
+    const version = ++importVersion
+    const signal = AbortSignal.any([current.baseSignal, importRequest.signal])
+    knowledgeImportFile.value = null
+    knowledgeImportPreview.value = null
+    knowledgeImportError.value = null
+    knowledgeImportNeedsVerification.value = false
+    knowledgeImportLoading.value = false
+    knowledgeImportTitle.value = ''
+    knowledgeImportKeywords.value = ''
+    if (!file || !validKnowledgeFile(file)) {
+      knowledgeImportError.value = '请选择非空的 TXT 或 Markdown 文件，大小不超过64 KiB。'
+      return
+    }
+    knowledgeImportLoading.value = true
+    try {
+      const preview = await current.client.previewKnowledgeImport(current.shop, file, signal)
+      if (signal.aborted || version !== importVersion) return
+      knowledgeImportFile.value = file
+      knowledgeImportPreview.value = preview
+      knowledgeImportTitle.value = preview.title
+    } catch (failure) {
+      if (!signal.aborted && version === importVersion) {
+        knowledgeImportError.value =
+          failure instanceof ApiError
+            ? failure.message
+            : '文件预览失败，请重新选择文件；尚未保存草稿。'
+        if (failure instanceof ApiError && [401, 403].includes(failure.status))
+          report(failure, signal, '权限已变化，请重新连接。')
+      }
+    } finally {
+      if (!signal.aborted && version === importVersion) knowledgeImportLoading.value = false
+    }
+  }
+
+  async function confirmKnowledgeImport() {
+    const current = runtime()
+    const file = knowledgeImportFile.value
+    const preview = knowledgeImportPreview.value
+    if (
+      !current ||
+      !file ||
+      !preview ||
+      !knowledgeImportOpen.value ||
+      knowledgeImportLoading.value ||
+      knowledgeImportNeedsVerification.value ||
+      context.submitting.value
+    )
+      return
+    const value = {
+      title: knowledgeImportTitle.value.trim(),
+      content: preview.content,
+      keywords: knowledgeImportKeywords.value
+        .split(/[,，\n]/u)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    }
+    if (!validKnowledgeInput(value)) {
+      knowledgeImportError.value =
+        '请核对标题（1–120字）、1–12个关键词（每个1–40字）和正文（1–4000字）。'
+      return
+    }
+    const signal = AbortSignal.any([current.baseSignal, importRequest.signal])
+    const version = importVersion
+    context.submitting.value = true
+    knowledgeImportError.value = null
+    let confirmed = false
+    try {
+      const result = await current.client.importKnowledgeFile(
+        current.shop,
+        file,
+        value.title,
+        value.keywords,
+        signal,
+      )
+      if (signal.aborted || version !== importVersion) return
+      confirmed = true
+      const article = await current.client.knowledgeArticle(current.shop, result.articleId, signal)
+      if (signal.aborted || version !== importVersion) return
+      resetEditor()
+      knowledgeSelected.value = article
+      knowledgeEditing.value = true
+      fill(article)
+      knowledgeArticles.value = knowledgeArticles.value.some((item) => item.id === article.id)
+        ? knowledgeArticles.value.map((item) => (item.id === article.id ? article : item))
+        : [article, ...knowledgeArticles.value]
+      knowledgeNotice.value = result.reused
+        ? '本店已导入过相同正文，已打开原文档；现有草稿和发布版本均未覆盖。'
+        : '文件已导入为草稿，尚未发布。请核对后再明确发布到店铺。'
+      context.submitting.value = false
+      resetKnowledgeImport()
+      await loadKnowledgeAudit()
+    } catch (failure) {
+      if (!signal.aborted && version === importVersion) {
+        knowledgeImportNeedsVerification.value =
+          confirmed || !(failure instanceof ApiError && [400, 403, 413].includes(failure.status))
+        knowledgeImportError.value = confirmed
+          ? '导入已保存，但读取文档失败。请取消导入并刷新文档列表核实，不要重复创建。'
+          : failure instanceof ApiError && [400, 403, 409, 413].includes(failure.status)
+            ? failure.message
+            : '导入结果暂时无法确认，请取消导入并刷新文档列表核实，不会自动重复提交。'
+        if (failure instanceof ApiError && [401, 403].includes(failure.status))
+          report(failure, signal, '权限已变化，请重新连接。')
+      }
+    } finally {
+      if (!signal.aborted && version === importVersion) context.submitting.value = false
+    }
   }
 
   function runtime() {
@@ -103,6 +274,60 @@ export function useMerchantKnowledge(context: KnowledgeContext) {
     return client && shop && context.allowed()
       ? { client, shop, baseSignal: context.signal() }
       : null
+  }
+
+  async function loadKnowledgeIndex() {
+    const current = runtime()
+    if (!current || context.submitting.value || knowledgeIndexPreparing.value) return
+    indexRequest.abort()
+    indexRequest = new AbortController()
+    const signal = AbortSignal.any([current.baseSignal, indexRequest.signal])
+    knowledgeIndexLoading.value = true
+    knowledgeIndexError.value = null
+    try {
+      const result = await current.client.knowledgeIndex(current.shop, signal)
+      if (!signal.aborted) knowledgeIndex.value = result
+    } catch (failure) {
+      if (!signal.aborted) {
+        knowledgeIndexError.value = '读取检索准备状态失败，请稍后刷新。'
+        if (failure instanceof ApiError && [401, 403].includes(failure.status))
+          report(failure, signal, '权限已变化，请重新登录。')
+      }
+    } finally {
+      if (!signal.aborted) knowledgeIndexLoading.value = false
+    }
+  }
+
+  async function warmKnowledgeIndex() {
+    const current = runtime()
+    if (
+      !current ||
+      context.submitting.value ||
+      knowledgeIndexPreparing.value ||
+      knowledgeDirty.value ||
+      knowledgeImportOpen.value
+    )
+      return
+    indexRequest.abort()
+    indexRequest = new AbortController()
+    const signal = AbortSignal.any([current.baseSignal, indexRequest.signal])
+    context.submitting.value = true
+    knowledgeIndexLoading.value = false
+    knowledgeIndexPreparing.value = true
+    knowledgeIndexError.value = null
+    try {
+      const result = await current.client.warmKnowledgeIndex(current.shop, signal)
+      if (!signal.aborted) knowledgeIndex.value = result
+    } catch (failure) {
+      if (!signal.aborted) {
+        knowledgeIndexError.value = '准备结果暂时无法确认，请先刷新状态核实。'
+        if (failure instanceof ApiError && [401, 403].includes(failure.status))
+          report(failure, signal, '权限已变化，请重新登录。')
+      }
+    } finally {
+      context.submitting.value = false
+      if (!signal.aborted) knowledgeIndexPreparing.value = false
+    }
   }
 
   function report(failure: unknown, signal: AbortSignal, fallback: string) {
@@ -175,7 +400,7 @@ export function useMerchantKnowledge(context: KnowledgeContext) {
 
   async function openKnowledge(id: string, preserveInput = false) {
     const current = runtime()
-    if (!current || context.submitting.value) return
+    if (!current || context.submitting.value || knowledgeImportOpen.value) return
     if (
       knowledgeDirty.value &&
       !preserveInput &&
@@ -226,7 +451,7 @@ export function useMerchantKnowledge(context: KnowledgeContext) {
   }
 
   function newKnowledge() {
-    if (!runtime() || context.submitting.value) return
+    if (!runtime() || context.submitting.value || knowledgeImportOpen.value) return
     if (knowledgeDirty.value) {
       knowledgeError.value = '请先保存或取消当前本地编辑。'
       return
@@ -250,6 +475,7 @@ export function useMerchantKnowledge(context: KnowledgeContext) {
       context.submitting.value ||
       knowledgeDetailLoading.value ||
       knowledgeNeedsVerification.value ||
+      knowledgeImportOpen.value ||
       !knowledgeEditing.value
     )
       return
@@ -324,10 +550,31 @@ export function useMerchantKnowledge(context: KnowledgeContext) {
     } finally {
       context.submitting.value = false
     }
-    if (succeeded && !signal.aborted) await loadKnowledgeAudit()
+    if (succeeded && !signal.aborted) {
+      await loadKnowledgeAudit()
+      if (action !== 'save' && !signal.aborted) await loadKnowledgeIndex()
+    }
   }
 
   return {
+    knowledgeIndex,
+    knowledgeIndexLoading,
+    knowledgeIndexPreparing,
+    knowledgeIndexError,
+    loadKnowledgeIndex,
+    warmKnowledgeIndex,
+    knowledgeImportOpen,
+    knowledgeImportFile,
+    knowledgeImportPreview,
+    knowledgeImportTitle,
+    knowledgeImportKeywords,
+    knowledgeImportLoading,
+    knowledgeImportError,
+    knowledgeImportNeedsVerification,
+    openKnowledgeImport,
+    closeKnowledgeImport,
+    previewKnowledgeFile,
+    confirmKnowledgeImport,
     knowledgeArticles,
     knowledgeSelected,
     knowledgeEditing,

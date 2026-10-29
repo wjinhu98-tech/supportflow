@@ -1,0 +1,75 @@
+# 求职项目的工程补全
+
+这轮补全围绕身份、调用边界、测量和检索复用。仍采用模块化单体，不增加无业务依据的微服务。
+
+## 账号与会话
+
+V20 的 `support_security_account` 保存 BCrypt 哈希、身份、权限、启用状态与安全版本。应用账号只读，既有商家店铺授权单独保留。`LocalSecurityAccounts.java import-missing` 使用迁移账号导入缺失配置账号，不覆盖数据库已有账号，不改变店铺授权。
+
+浏览器先 GET `/api/v1/security/csrf`，再携带令牌 POST `/api/v1/security/login` 的 `{username,password}`，成功后重新获取 CSRF。登录成功不在前端保留可复用密码或 Basic 凭据；后续使用 HttpOnly、SameSite=Lax 的服务端会话 Cookie。POST `/api/v1/security/logout` 使会话失效。正式 HTTPS 部署还应启用 Secure Cookie。
+
+`supportflow.security.authentication.mode=database`、`basic-enabled=false`、`session-timeout=30m` 启用正式本地/实验环境模式。旧隔离测试默认 `configured` 模式以兼容原有固定测试账号。单实例会话保存在 Servlet 内存中，重启需重新登录；没有宣称 Redis 集群会话。
+
+每个认证请求重新核对账号启用状态和安全版本。操作员禁用、重置密码或撤销会话后，旧会话下一次请求返回 401。`X-Session-Account` 与跨标签页通知防止旧页面继续使用另一个账号的 Cookie。没有公开自助注册或全局管理员接口。
+
+操作员命令在项目根目录使用编译输出与运行依赖 classpath；需要 Java 21，并已准备本机私有配置：
+
+```powershell
+mvn '-DskipTests' package
+mvn '-DincludeScope=runtime' '-Dmdep.outputFile=target/runtime-classpath.txt' dependency:build-classpath
+$accountClasspath = 'target\classes;' + (Get-Content target/runtime-classpath.txt -Raw).Trim()
+java -cp $accountClasspath tools/LocalSecurityAccounts.java import-missing
+# 以下按需执行，会撤销旧会话或禁用账号：
+java -cp $accountClasspath tools/LocalSecurityAccounts.java revoke customer-200
+java -cp $accountClasspath tools/LocalSecurityAccounts.java disable customer-200
+```
+
+`enable` 恢复账号但不会恢复旧会话。`reset-password <username>` 从进程环境变量 `SUPPORTFLOW_NEW_PASSWORD` 读取新密码，不接受命令行明文密码。不要把真实密码写入命令历史、报告或 Git。
+
+## 限流与调用额度
+
+`supportflow.traffic.enabled=true` 开启单实例固定窗口。默认每身份每 60 秒 30 次业务写入/聊天请求，每小时 60 次模型尝试，最多 10000 个活跃身份。买家键来自认证后的 buyerId，商家键来自服务端账号，不能由请求中的买家编号伪造。独立账号共享同一买家身份时共享额度。
+
+请求额度在 Controller 前检查，返回 429 和 Retry-After；不会先创建业务写入再拦截。模型额度覆盖四类 DeepSeek 调用，在发送前检查，失败尝试仍计数；配额拒绝不会触发自动重试。已有 Agent 单次运行预算、并发舱壁与熔断仍保留，符合既有只读重试策略的再次尝试仍消耗同一身份的额度。公开知识选择额度耗尽时可返回本地证据；不会继续发送远程请求。
+
+这是进程内保护，重启重置、多实例间不共享，不能当作严格计费账本。生产多实例可根据测量结果改用 Redis 原子窗口与持久化额度；当前不把它描述为已实现。
+
+## 评测与追踪
+
+服务端生成不透明 `X-Trace-Id`，忽略用户提供的同名值；日志记录固定阶段、耗时和已持久化 Agent 运行编号。不要把问句、订单、账号、密钥写入指标标签。当前提供请求和 Agent 阶段关联，未部署完整分布式追踪平台。
+
+[真实模型评测](real-model-evaluation.md) 与原有离线场景集分开：默认关闭，显式授权才发送合成用例，有调用数、令牌预留、费用估计和时限。模拟 HTTP 测试只验证解析与预算边界，不能代表真实模型准确率。没有运行真实评测时应报告“尚未测量”。
+
+## 持久化知识向量
+
+V21 的 `support_knowledge_vector` 只保存本地 BGE 模型产生的 512 维归一化向量。命名空间包含模型及词表校验值、切分规则、店铺、来源、发布版本与正文哈希。原始问句、资料正文不写入这张表，不发送给外部模型。
+
+`supportflow.rag.persistent-index-enabled=true` 开启后，重启可复用向量。检索始终先读取当前店铺已发布快照，再匹配缓存；下架和跨店铺资料不会因为留有向量而继续被检索。旧版本缓存保留，不提供批量清理任务。存储不可用时保留本地重算/词法降级，不能把失败写入显示为索引就绪。
+
+商家知识页可读取准备状态，手动“准备检索索引”。GET `/api/v1/merchant/shops/{shopId}/knowledge/index` 不计算向量，POST `/index/warmup` 只在本地计算缺失向量，受单次时限与并发保护，重复点击可继续部分准备。两者均检查知识管理权限与现有店铺授权；POST 需要 CSRF。
+
+这是 MySQL 持久化向量缓存，仍在有限语料内扫描和排序；没有实现 ANN 向量数据库，也没有据此宣称检索吞吐提升。
+
+## 本轮验证记录（2026-10-29）
+
+以下为已经完成的验证批次，各批次有重叠，不能相加作为去重后的测试总数。仍在修正或重跑的回归批次不记作通过。
+
+| 验证范围 | 已完成的结果 | 能证明什么 |
+| --- | --- | --- |
+| 全部单元测试 | 623 项通过 | 代码契约、配置绑定和隔离的安全/预算逻辑；不是所有真实外部依赖的验证 |
+| 6 个聚焦集成测试类 | 96 项通过 | 临时 MySQL 下的身份、迁移、知识与运行恢复等相关链路 |
+| 7 组接口回归测试 | 191 项通过；旧无会话断言更新后 `OrderApiIT` 77 项复跑通过 | 聊天、订单、会话、删除及真实 ONNX 检索；包含下列 5 项测试 |
+| `LocalRagKnowledgeIT` | 5 项通过 | 实际本地 ONNX 与 MySQL 持久化向量路径，以及发布版本、下线和店铺隔离 |
+| 真实后端浏览器回归 | 29 项通过 | 这批浏览器用例实际访问后端后的结果，不等同于全站功能已经穷尽验证 |
+| 当前语料索引状态 | 本地 33 个、隔离实验环境 29 个分块，均为 `READY` | 对应当前语料的持久化准备完成，不是向量检索吞吐或准确率数据 |
+| 最小权限与店铺检查 | 51 项权限检查、12 项店铺检查通过 | 已执行检查范围内的数据库权限和店铺边界 |
+| 持久化 Agent 部署检查 | 15 项通过 | 有效查物流指令触发实际 5 步循环、重放及跨店铺拒绝；模型调用为零 |
+| `RealModelEvaluationToolTest` | 6 项通过，使用假 HTTP | 显式开关、严格解析、保守记账、总期限和报告隐私；不代表真实 DeepSeek 成绩 |
+
+实际 ONNX 持久化用例检查了 512 个有限浮点数、2048 字节编码、归一化范数和模型命名空间，并逐项比对持久化值与本次实际来源推理结果。创建新的检索实例、再清空内存缓存后，来源推理仍为 1 次，查询推理依次为 1、2、3 次，数据库命中次数增加。这证明该用例复用了持久化来源向量，不是把查询向量也跳过了。
+
+[CI 工作流](../.github/workflows/agent-evaluation.yml) 中的 37 个测试选择项均匹配当前测试类。新增步骤运行的是 `RealModelEvaluationToolTest`，没有调用评测 CLI，也没有 `--allow-remote` 或 DeepSeek 密钥引用。实际本地 ONNX 测试继续保留远程执行器替身；下载经过校验的本地模型文件，不等于调用付费推理接口。
+
+本轮没有发起付费 DeepSeek 评测。因此真实模型的规划正确率、供应商响应延迟、实际 token 消耗和账单金额均为**尚未测量**。工具给出的预算上限和估算单价配置不能充当这些实测数据。
+
+当前仍是单实例实现。服务重启会使内存登录会话失效并重置限流窗口，用户需要重新登录；退出登录使当前会话失效，不承诺同时退出其他设备的所有会话。操作员撤销安全版本后，相关旧会话会在后续请求被拒绝。请求关联只覆盖已实现的同步调用链，没有跨实例会话、分布式限流、完整分布式追踪或跨重启的严格计费账本。

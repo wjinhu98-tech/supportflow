@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
+import { createSessionClient } from './session-client.mjs';
 
 export const LAB_ORIGIN = 'http://127.0.0.1:18090';
 export const ORDER_URL = `${LAB_ORIGIN}/api/v1/shops/100/orders/LAB-000001`;
@@ -92,10 +93,9 @@ async function readJson(response) {
 }
 
 /** One GET attempt, including body and correctness checks. No response body or exception text escapes. */
-export async function requestGet({ url = ORDER_URL, authorization, signal, timeoutMs = 5000, fetchImpl = fetch }) {
+export async function requestGet({ url = ORDER_URL, signal, timeoutMs = 5000, fetchImpl = fetch }) {
   assertReadUrl(url);
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5000) throw new LabError('INVALID_TIMEOUT');
-  if (typeof authorization !== 'string' || !/^Basic [A-Za-z0-9+/=]+$/.test(authorization)) throw new LabError('INVALID_AUTHORIZATION');
   const started = performance.now();
   const timeout = new AbortController();
   const combined = signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal;
@@ -107,7 +107,7 @@ export async function requestGet({ url = ORDER_URL, authorization, signal, timeo
     if (combined.aborted) throw new LabError('ABORTED');
     response = await fetchImpl(url, {
       method: 'GET', redirect: 'manual', cache: 'no-store', signal: combined,
-      headers: { authorization, accept: 'application/json' },
+      headers: { accept: 'application/json' },
     });
     status = Number.isInteger(response.status) ? response.status : 0;
     if (response.headers.get(MARKER_HEADER) !== MARKER) kind = 'safetyError';
@@ -118,6 +118,7 @@ export async function requestGet({ url = ORDER_URL, authorization, signal, timeo
     }
   } catch (failure) {
     kind = signal?.aborted ? 'aborted' : timeout.signal.aborted ? 'timeout'
+      : failure?.message === 'SESSION_ENVIRONMENT_INVALID' ? 'safetyError'
       : failure instanceof LabError && failure.code === 'INVALID_RESPONSE' ? 'invalidResponse' : 'networkError';
   } finally {
     clearTimeout(timer);
@@ -237,10 +238,12 @@ async function saveReport(report) {
   return destination;
 }
 
-async function runBenchmark(options, authorization, signal) {
+async function runBenchmark(options, session, signal) {
+  const fetchImpl = (url, init) => session.fetch(new URL(url).pathname, init);
   const report = {
     schemaVersion: 1, purpose: 'local_isolated_learning_measurement_not_production_capacity',
     target: LAB_ORIGIN, route: '/api/v1/shops/100/orders/LAB-000001', methods: ['GET'], automaticRetries: 0,
+    authentication: { mechanism: 'server_cookie_session', loginBeforeMeasurement: true },
     startedAt: new Date().toISOString(), configuration: { ...options, timeoutMs: 5000, warmupMaxRequests: 20, warmupDurationMs: 3000 },
     machine: { platform: os.platform(), release: os.release(), arch: os.arch(), node: process.version,
       cpuModel: os.cpus()[0]?.model ?? 'unknown', logicalCpus: os.cpus().length, totalMemoryBytes: os.totalmem() },
@@ -251,7 +254,7 @@ async function runBenchmark(options, authorization, signal) {
     stages: [], status: 'RUNNING',
   };
   for (const url of [ACCOUNT_URL, ORDER_URL]) {
-    const checked = await requestGet({ url, authorization, signal });
+    const checked = await requestGet({ url, fetchImpl, signal });
     if (checked.kind !== 'ok') {
       report.status = signal.aborted ? 'STOPPED' : 'REFUSED';
       report.refusalCode = 'LAB_PREFLIGHT_FAILED';
@@ -261,7 +264,7 @@ async function runBenchmark(options, authorization, signal) {
     }
   }
   report.preflight = 'PASSED';
-  const request = ({ signal: activeSignal }) => requestGet({ authorization, signal: activeSignal });
+  const request = ({ signal: activeSignal }) => requestGet({ fetchImpl, signal: activeSignal });
   report.warmup = await runStage({ concurrency: 1, durationMs: 3000, maxRequests: 20, request, signal });
   if (report.warmup.stopReason !== 'SAFETY_CHECK_FAILED' && !signal.aborted) {
     for (const concurrency of options.concurrency) {
@@ -286,23 +289,27 @@ export async function main(args = process.argv.slice(2)) {
   const options = parseArgs(args);
   if (options.help) {
     console.log('Usage: node scripts/capacity-lab.mjs [--seconds=10|30] [--concurrency=1,4,8] [--max-requests=1000] [--docker-stats]');
-    console.log(`Fixed isolated target: ${LAB_ORIGIN}; GET only; no model calls; local learning results only.`);
+    console.log(`Fixed isolated target: ${LAB_ORIGIN}; measured GET only after session login; no model calls; local learning results only.`);
     return;
   }
   assertLabTarget(LAB_ORIGIN);
   const password = await readLabPassword();
-  const authorization = `Basic ${Buffer.from(`lab-buyer:${password}`, 'utf8').toString('base64')}`;
+  const session = createSessionClient(LAB_ORIGIN, { cookieName: 'SF_LAB_SESSION', marker: 'isolated-lab' });
   const stop = new AbortController();
   const onStop = () => stop.abort();
   process.once('SIGINT', onStop);
   process.once('SIGTERM', onStop);
   try {
-    const report = await runBenchmark(options, authorization, stop.signal);
+    await session.login('lab-buyer', password);
+    const report = await runBenchmark(options, session, stop.signal);
     const destination = await saveReport(report);
     console.log(`CAPACITY_STATUS=${report.status}`);
     console.log(`CAPACITY_REPORT=${destination}`);
     if (report.status !== 'COMPLETED') process.exitCode = report.status === 'STOPPED' ? 130 : 1;
-  } finally { process.removeListener('SIGINT', onStop); process.removeListener('SIGTERM', onStop); }
+  } finally {
+    try { if (session.hasSessionCookie()) await session.logout(); } catch { /* A failed cleanup cannot expose credentials or trigger a request replay. */ }
+    process.removeListener('SIGINT', onStop); process.removeListener('SIGTERM', onStop);
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

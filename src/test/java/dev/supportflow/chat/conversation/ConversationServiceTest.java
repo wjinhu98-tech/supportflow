@@ -123,6 +123,17 @@ class ConversationServiceTest {
     }
 
     @Test
+    void quotaRejectionKeepsIts429ClassificationWithoutReplayingOrCompletingTheTurn() {
+        when(store.reserve(BUYER, SHOP, ID, request)).thenReturn(fresh());
+        var limited = new dev.supportflow.common.traffic.TrafficLimitExceededException(30);
+        when(engine.reply(principal, SHOP, request, ConversationContextRef.none(), runKey())).thenThrow(limited);
+        assertThatThrownBy(() -> service.send(principal, SHOP, ID, request)).isSameAs(limited);
+        verify(store).fail(BUYER, SHOP, ID, request.clientMessageId(), PROCESSING_TOKEN);
+        verify(store, never()).succeed(eq(BUYER), eq(SHOP), eq(ID), any(), any(), any());
+        verify(engine).reply(principal, SHOP, request, ConversationContextRef.none(), runKey());
+    }
+
+    @Test
     void snapshotFailureAfterBusinessExecutionNeverReplaysBusinessLogic() {
         when(store.reserve(BUYER, SHOP, ID, request)).thenReturn(fresh());
         when(engine.reply(principal, SHOP, request, ConversationContextRef.none(), runKey()))

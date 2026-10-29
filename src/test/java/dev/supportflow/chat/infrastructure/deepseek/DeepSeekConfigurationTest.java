@@ -24,7 +24,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 class DeepSeekConfigurationTest {
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
-            .withUserConfiguration(DeepSeekConfiguration.class)
+            .withUserConfiguration(DeepSeekConfiguration.class, dev.supportflow.common.traffic.TrafficConfiguration.class)
+            .withBean(io.micrometer.core.instrument.MeterRegistry.class,
+                    io.micrometer.core.instrument.simple.SimpleMeterRegistry::new)
             .withBean(ObjectMapper.class, () -> JsonMapper.builder().build());
 
     @Test
@@ -103,12 +105,27 @@ class DeepSeekConfigurationTest {
             OrderIntentRecognizer recognizer = context.getBean(OrderIntentRecognizer.class);
             ToolPlanner planner = context.getBean(ToolPlanner.class);
             DeepSeekCallExecutor executor = context.getBean(DeepSeekCallExecutor.class);
+            assertThat(ReflectionTestUtils.getField(executor, "quotas"))
+                    .isSameAs(context.getBean(dev.supportflow.common.traffic.TrafficQuotaService.class));
             assertThat(recognizer)
                     .isInstanceOf(DeepSeekOrderIntentRecognizer.class);
             assertThat(planner).isInstanceOf(DeepSeekToolPlanner.class);
             assertThat(ReflectionTestUtils.getField(recognizer, "executor")).isSameAs(executor);
             assertThat(ReflectionTestUtils.getField(planner, "executor")).isSameAs(executor);
         });
+    }
+
+    @Test
+    void enabledQuotaConfigurationIsBoundAndCannotBeSilentlyBypassedByTheExecutor() {
+        enabledContext().withPropertyValues("supportflow.traffic.enabled=true", "supportflow.traffic.model-limit=1")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    var quotas = context.getBean(dev.supportflow.common.traffic.TrafficQuotaService.class);
+                    assertThat(context.getBean(dev.supportflow.common.traffic.TrafficProperties.class).enabled()).isTrue();
+                    assertThat(ReflectionTestUtils.getField(context.getBean(DeepSeekCallExecutor.class), "quotas")).isSameAs(quotas);
+                });
+        enabledContext().withPropertyValues("supportflow.traffic.enabled=true", "supportflow.traffic.model-limit=0")
+                .run(context -> assertThat(context).hasFailed());
     }
 
     @Test

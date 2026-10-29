@@ -29,8 +29,14 @@ public class RagConfiguration {
     }
 
     @Bean
+    @ConditionalOnProperty(name={"supportflow.rag.enabled","supportflow.rag.persistent-index-enabled"},havingValue="true")
+    KnowledgeVectorStore knowledgeVectorStore(org.springframework.jdbc.core.simple.JdbcClient jdbc) {
+        return new JdbcKnowledgeVectorStore(jdbc);
+    }
+
+    @Bean
     RagKnowledgeSearch ragKnowledgeSearch(RagProperties properties, ObjectProvider<KnowledgeEmbedding> embeddings,
-                                          MeterRegistry meters) {
-        return new RagKnowledgeSearch(properties, embeddings.getIfAvailable(), meters);
+                                          MeterRegistry meters,ObjectProvider<KnowledgeVectorStore> stores) {
+        return new RagKnowledgeSearch(properties, embeddings.getIfAvailable(), meters,stores.getIfAvailable());
     }
 }
