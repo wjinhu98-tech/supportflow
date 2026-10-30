@@ -2,6 +2,7 @@ package dev.supportflow.frontend;
 
 import dev.supportflow.SupportFlowApplication;
 import dev.supportflow.testsupport.OrderVisibilityFixtures;
+import dev.supportflow.testsupport.HumanSupportFixtures;
 import dev.supportflow.common.security.database.DatabaseAccountAdministration;
 import dev.supportflow.common.security.local.LocalCustomerAccountsProperties;
 import org.flywaydb.core.Flyway;
@@ -110,10 +111,10 @@ public final class FrontendTestServer {
             addAccount(settings, 0, "frontend-buyer", 200L, passwordHash);
             addAccount(settings, 1, "frontend-other", 201L, passwordHash);
             addAccount(settings, 2, "frontend-reviewer", 999L, passwordHash,
-                    "ORDER_READ,AFTER_SALE_REVIEW,KNOWLEDGE_MANAGE");
+                    "ORDER_READ,AFTER_SALE_REVIEW,KNOWLEDGE_MANAGE,CHAT_SUPPORT");
             settings.add("--supportflow.security.local.accounts[2].account-type=MERCHANT_STAFF");
             addAccount(settings, 3, "frontend-reviewer-other", 998L, passwordHash,
-                    "ORDER_READ,AFTER_SALE_REVIEW,KNOWLEDGE_MANAGE");
+                    "ORDER_READ,AFTER_SALE_REVIEW,KNOWLEDGE_MANAGE,CHAT_SUPPORT");
             settings.add("--supportflow.security.local.accounts[3].account-type=MERCHANT_STAFF");
             addAccount(settings, 4, "frontend-unassigned", 997L, passwordHash,
                     "ORDER_READ,AFTER_SALE_REVIEW");
@@ -126,6 +127,10 @@ public final class FrontendTestServer {
             addAccount(settings, 7, "frontend-editor-other", 994L, passwordHash, "KNOWLEDGE_MANAGE");
             settings.add("--supportflow.security.local.accounts[7].account-type=MERCHANT_STAFF");
             addAccount(settings, 8, "frontend-delete-buyer", 202L, passwordHash);
+            addAccount(settings, 9, "frontend-chat-staff", 993L, passwordHash, "CHAT_SUPPORT");
+            settings.add("--supportflow.security.local.accounts[9].account-type=MERCHANT_STAFF");
+            addAccount(settings, 10, "frontend-chat-unassigned", 992L, passwordHash, "CHAT_SUPPORT");
+            settings.add("--supportflow.security.local.accounts[10].account-type=MERCHANT_STAFF");
 
             seedAccounts(mysql, settings);
 
@@ -146,7 +151,7 @@ public final class FrontendTestServer {
                 .bind("supportflow.security.local", Bindable.of(LocalCustomerAccountsProperties.class)).get();
         var operator = new JdbcTemplate(new DriverManagerDataSource(mysql.getJdbcUrl(), mysql.getUsername(), mysql.getPassword()));
         int imported = new DatabaseAccountAdministration(operator).importMissingConfiguredAccounts(accounts.accounts());
-        if (imported != 9) throw new IllegalStateException("The isolated frontend account fixture did not match");
+        if (imported != 11) throw new IllegalStateException("The isolated frontend account fixture did not match");
     }
 
     private static void addAccount(
@@ -183,6 +188,7 @@ public final class FrontendTestServer {
             createReader.setString(1, readerPassword);
             createReader.execute();
             OrderVisibilityFixtures.grantRead(connection, DATABASE_NAME, "frontend_reader");
+            HumanSupportFixtures.grantAiAdmission(connection, DATABASE_NAME, "frontend_reader");
             statement.execute("GRANT INSERT ON " + DATABASE_NAME
                     + ".support_order_buyer_deletion TO 'frontend_reader'@'%'");
             statement.execute("GRANT SELECT ON " + DATABASE_NAME
@@ -213,6 +219,10 @@ public final class FrontendTestServer {
             }
             statement.execute("GRANT SELECT, INSERT ON " + DATABASE_NAME
                     + ".support_chat_message TO 'frontend_reader'@'%'");
+            statement.execute("GRANT SELECT, INSERT, UPDATE ON " + DATABASE_NAME
+                    + ".support_human_session TO 'frontend_reader'@'%'");
+            statement.execute("GRANT SELECT, INSERT ON " + DATABASE_NAME
+                    + ".support_human_message TO 'frontend_reader'@'%'");
             for (String table : List.of("support_merchant", "support_merchant_shop",
                     "support_merchant_staff", "support_merchant_staff_shop_grant")) {
                 statement.execute("GRANT SELECT ON " + DATABASE_NAME + "." + table + " TO 'frontend_reader'@'%'");
@@ -244,12 +254,14 @@ public final class FrontendTestServer {
                            (3, 1, 'frontend-unassigned', 997, 'ACTIVE'),
                            (4, 1, 'frontend-editor', 996, 'ACTIVE'),
                            (5, 1, 'frontend-review-only', 995, 'ACTIVE'),
-                           (6, 2, 'frontend-editor-other', 994, 'ACTIVE')
+                           (6, 2, 'frontend-editor-other', 994, 'ACTIVE'),
+                           (7, 1, 'frontend-chat-staff', 993, 'ACTIVE'),
+                           (8, 1, 'frontend-chat-unassigned', 992, 'ACTIVE')
                     """);
             statement.executeUpdate("""
                     INSERT INTO support_merchant_staff_shop_grant (staff_id, shop_id, enabled)
                     VALUES (1, 100, TRUE), (2, 101, TRUE),
-                           (4, 100, TRUE), (5, 100, TRUE), (6, 101, TRUE)
+                           (4, 100, TRUE), (5, 100, TRUE), (6, 101, TRUE), (7, 100, TRUE)
                     """);
             statement.executeUpdate("""
                     INSERT INTO support_order (

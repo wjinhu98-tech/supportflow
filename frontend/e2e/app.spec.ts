@@ -45,11 +45,11 @@ test('buyer confirms order deletion, sees pending-after-sale conflicts, and remo
 }, testInfo) => {
   const target = 'SF10001'
   let deletions = 0
-  await page.route('**/api/v1/shops/100/chat/messages', async (route) => {
+  await page.route('**/api/v1/shops/100/orders?*', async (route) => {
     const response = await route.fetch()
     const data = await response.json()
-    if (data.type === 'ORDER_SELECTION')
-      data.orders = data.orders.map((order: { orderNo: string }) =>
+    if (Array.isArray(data.items))
+      data.items = data.items.map((order: { orderNo: string }) =>
         order.orderNo === target
           ? { ...order, status: 'COMPLETED', statusDescription: '已完成' }
           : order,
@@ -222,12 +222,12 @@ for (const viewport of [
     await page.route('**/products/demo/white-mouse.png', async (route) => {
       await route.fulfill({ status: 404, body: 'Missing test product image' })
     })
-    await page.route('**/api/v1/shops/100/chat/messages', async (route) => {
+    await page.route('**/api/v1/shops/100/orders?*', async (route) => {
       const upstream = await route.fetch()
       const result = await upstream.json()
-      result.orders = [
+      result.items = [
         {
-          ...result.orders[0],
+          ...result.items[0],
           items: [
             {
               productName: '无线耳机',
@@ -245,7 +245,7 @@ for (const viewport of [
           ],
           itemKinds: 3,
         },
-        result.orders[1],
+        result.items[1],
       ]
       result.nextAfterId = null
       await route.fulfill({ response: upstream, json: result })
@@ -403,8 +403,17 @@ test('login exchanges credentials once, then proxy uses HttpOnly session cookie 
     ),
   ).toBe(true)
   expect((await recorded(request)).every((entry) => !entry.hasAuthorization)).toBe(true)
-  expect(business[0]?.path).toBe('/api/v1/shops/100/chat/messages')
-  expect(business[0]?.body).toEqual({ message: '我的订单' })
+  expect(business[0]?.path).toBe('/api/v1/shops/100/chat/window')
+  const orderRead = (await recorded(request)).find(
+    (entry) => entry.path === '/api/v1/shops/100/orders?afterId=0&size=20',
+  )
+  expect(orderRead).toMatchObject({
+    method: 'GET',
+    authenticated: true,
+    hasSessionCookie: true,
+    accepted: true,
+    hasAuthorization: false,
+  })
   const sessionCookie = (await page.context().cookies()).find(
     (cookie) => cookie.name === 'JSESSIONID',
   )
@@ -468,8 +477,11 @@ test('pagination uses the opaque server cursor and appends without losing earlie
   await expect(cards.first()).toContainText('SF10001')
   await expect(cards.last()).toContainText('SF10021')
   await expect(page.getByTestId('load-more-orders')).toHaveCount(0)
-  const body = (await recorded(request)).filter((entry) => entry.method === 'POST').at(-1)?.body
-  expect(body).toEqual({ message: '我的订单 7347' })
+  const read = (await recorded(request))
+    .filter((entry) => entry.path.startsWith('/api/v1/shops/100/orders?'))
+    .at(-1)
+  expect(read?.method).toBe('GET')
+  expect(read?.path).toBe('/api/v1/shops/100/orders?afterId=7347&size=20')
 })
 
 test('order selection submits the scoped order and retains it for the next question', async ({

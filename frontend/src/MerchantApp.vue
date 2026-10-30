@@ -5,6 +5,7 @@ import ReviewPanel from './components/ReviewPanel.vue'
 import KnowledgePanel from './components/KnowledgePanel.vue'
 import KnowledgeIndexPanel from './components/KnowledgeIndexPanel.vue'
 import KnowledgeImportDialog from './components/KnowledgeImportDialog.vue'
+import HumanSupportPanel from './components/HumanSupportPanel.vue'
 import { useMerchantDesk } from './composables/useMerchantDesk'
 
 const {
@@ -18,6 +19,30 @@ const {
   activeModule,
   canReviewAfterSales,
   canManageKnowledge,
+  canServeChats,
+  supportSessions,
+  supportView,
+  supportNextBeforeId,
+  supportSelectedId,
+  supportLoading,
+  supportSubmitting,
+  supportError,
+  supportSession,
+  supportMessages,
+  supportMessageBeforeId,
+  supportDetailLoading,
+  supportDetailError,
+  supportWritable,
+  supportUncertainMessage,
+  supportUncertainClose,
+  loadSupportSessions,
+  changeSupportView,
+  openSupport,
+  claimSupport,
+  refreshSupport,
+  sendSupportReply,
+  closeSupportSession,
+  retrySupportReply,
   navigationBlocked,
   switchModule,
   tickets,
@@ -215,12 +240,22 @@ function switchShop(event: Event) {
       <section class="merchant-workspace-heading">
         <div>
           <p class="merchant-eyebrow">SHOP OPERATIONS</p>
-          <h1>{{ activeModule === 'knowledge' ? '店铺知识库管理' : '店铺售后管理' }}</h1>
+          <h1>
+            {{
+              activeModule === 'support'
+                ? '人工接待'
+                : activeModule === 'knowledge'
+                  ? '店铺知识库管理'
+                  : '店铺售后管理'
+            }}
+          </h1>
           <p>
             {{
-              activeModule === 'knowledge'
-                ? '维护当前店铺的纯文本知识；草稿保存与发布分离，操作记录可追溯。'
-                : '只处理当前账号已授权的店铺；批准后执行学习版模拟退款，不涉及真实资金。'
+              activeModule === 'support'
+                ? '接待当前授权店铺的买家咨询，结束服务后买家可继续使用智能客服。'
+                : activeModule === 'knowledge'
+                  ? '维护当前店铺的纯文本知识；草稿保存与发布分离，操作记录可追溯。'
+                  : '只处理当前账号已授权的店铺；批准后执行学习版模拟退款，不涉及真实资金。'
             }}
           </p>
         </div>
@@ -267,6 +302,16 @@ function switchShop(event: Event) {
         aria-label="店铺管理分区"
       >
         <button
+          v-if="canServeChats"
+          type="button"
+          data-testid="merchant-tab-support"
+          :aria-pressed="activeModule === 'support'"
+          :disabled="navigationBlocked"
+          @click="switchModule('support')"
+        >
+          人工接待
+        </button>
+        <button
           v-if="canReviewAfterSales"
           type="button"
           data-testid="merchant-tab-after-sales"
@@ -302,6 +347,34 @@ function switchShop(event: Event) {
         @refresh="loadReviews"
         @decide="submitReview"
         @retry="retryExecution"
+      />
+      <HumanSupportPanel
+        v-if="selectedShop && canServeChats && activeModule === 'support'"
+        :sessions="supportSessions"
+        :view="supportView"
+        :selected="supportSession"
+        :selected-id="supportSelectedId"
+        :messages="supportMessages"
+        :loading="supportLoading"
+        :detail-loading="supportDetailLoading"
+        :submitting="supportSubmitting"
+        :writable="supportWritable"
+        :more="supportNextBeforeId !== null"
+        :message-more="supportMessageBeforeId !== null"
+        :error="supportError"
+        :detail-error="supportDetailError"
+        :uncertain-message="supportUncertainMessage"
+        :uncertain-close="supportUncertainClose"
+        @view="changeSupportView"
+        @refresh="loadSupportSessions()"
+        @more="loadSupportSessions(true)"
+        @open="openSupport"
+        @claim="claimSupport"
+        @detail-refresh="refreshSupport()"
+        @messages-more="refreshSupport(true)"
+        @send="sendSupportReply"
+        @retry="retrySupportReply"
+        @close="closeSupportSession"
       />
       <KnowledgeIndexPanel
         v-if="selectedShop && canManageKnowledge && activeModule === 'knowledge'"

@@ -131,7 +131,7 @@ public final class LabDeploymentTool {
                         Set.of(SecurityPermission.ORDER_READ, SecurityPermission.ORDER_CONFIRM_RECEIPT), AccountType.BUYER),
                 new LocalCustomerAccount("lab-merchant", accountHash("lab_merchant_hash"), new CustomerIdentity(999),
                         Set.of(SecurityPermission.ORDER_READ, SecurityPermission.AFTER_SALE_REVIEW,
-                                SecurityPermission.KNOWLEDGE_MANAGE), AccountType.MERCHANT_STAFF));
+                                SecurityPermission.KNOWLEDGE_MANAGE, SecurityPermission.CHAT_SUPPORT), AccountType.MERCHANT_STAFF));
         try (Connection connection = DriverManager.getConnection(JDBC_URL, "lab_migrator", migrationPassword())) {
             connection.setAutoCommit(false);
             try {
@@ -142,9 +142,11 @@ public final class LabDeploymentTool {
                 }
                 var administration = new DatabaseAccountAdministration(new JdbcTemplate(new SingleConnectionDataSource(connection, true)));
                 int inserted = administration.importMissingConfiguredAccounts(accounts);
+                boolean chatEnabled = administration.enableChatSupport("lab-merchant");
                 connection.commit();
                 System.out.println("LAB_ACCOUNTS_READY accountsInserted=" + inserted
-                        + " existingAccountsPreserved=true staffGrantsChanged=0 opsBusinessAccounts=0");
+                        + " chatSupportEnabled=" + chatEnabled
+                        + " existingPasswordsPreserved=true staffGrantsChanged=0 opsBusinessAccounts=0");
             } catch (SQLException | RuntimeException failure) {
                 connection.rollback();
                 throw failure;
@@ -312,6 +314,10 @@ public final class LabDeploymentTool {
                     "DELETE FROM support_knowledge_import WHERE 1=0",
                     "UPDATE support_knowledge_vector SET dimensions=dimensions WHERE 1=0",
                     "DELETE FROM support_knowledge_vector WHERE 1=0",
+                    "UPDATE support_human_message SET text=text WHERE 1=0",
+                    "DELETE FROM support_human_message WHERE 1=0",
+                    "DELETE FROM support_human_session WHERE 1=0",
+                    "DELETE FROM support_chat_scope WHERE 1=0",
                     "UPDATE support_security_account SET enabled=enabled WHERE 1=0",
                     "DELETE FROM support_security_account WHERE 1=0",
                     "INSERT INTO support_security_account (username,password_hash,principal_id,account_type) "
@@ -342,11 +348,35 @@ public final class LabDeploymentTool {
                     FROM support_knowledge_vector WHERE 1=0
                     """);
             if (vectorRows != 0) throw new SQLException("Empty vector insert privilege probe changed a row");
+            for (String allowed : new String[]{
+                    """
+                    INSERT INTO support_human_session
+                    (public_id,request_id,conversation_id,tenant_id,buyer_id)
+                    SELECT public_id,request_id,conversation_id,tenant_id,buyer_id
+                    FROM support_human_session WHERE 1=0
+                    """,
+                    "UPDATE support_human_session SET status=status WHERE 1=0",
+                    """
+                    INSERT INTO support_human_message
+                    (public_id,client_message_id,conversation_id,session_id,role,sender_staff_id,text)
+                    SELECT public_id,client_message_id,conversation_id,session_id,role,sender_staff_id,text
+                    FROM support_human_message WHERE 1=0
+                    """,
+                    """
+                    INSERT INTO support_chat_scope (buyer_id,tenant_id)
+                    SELECT buyer_id,tenant_id FROM support_chat_scope WHERE 1=0
+                    """,
+                    "UPDATE support_chat_scope SET legacy_processing_token=legacy_processing_token WHERE 1=0"}) {
+                if (query.executeUpdate(allowed) != 0) {
+                    throw new SQLException("Empty human support privilege probe changed a row");
+                }
+            }
             try (ResultSet count = query.executeQuery("SELECT COUNT(*) FROM support_order WHERE tenant_id=100 AND buyer_id=200")) {
                 if (!count.next() || count.getLong(1) != ORDER_COUNT) throw new SQLException("Lab fixture count differs");
             }
             System.out.println("LAB_RUNTIME_PRIVILEGES=PASS shop100Buyer200Orders=5000 buyerDeletionImmutable=true"
-                    + " knowledgeImportsImmutable=true securityAccountsReadOnly=true knowledgeVectorsAppendOnly=true");
+                    + " knowledgeImportsImmutable=true securityAccountsReadOnly=true knowledgeVectorsAppendOnly=true"
+                    + " humanMessagesAppendOnly=true humanSessionWrites=true chatAdmissionWrites=true");
         }
     }
 }

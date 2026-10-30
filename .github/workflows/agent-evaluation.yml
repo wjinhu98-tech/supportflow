@@ -28,7 +28,7 @@ concurrency:
 jobs:
   offline:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
         with:
@@ -79,6 +79,12 @@ jobs:
           mvn -B -ntp
           -Dtest=BrowserAuthenticationFilterTest,BrowserAuthenticationPropertiesTest,BoundedWindowLimiterTest,TrafficQuotaServiceTest,AuthenticatedTrafficSecurityTest,RequestTraceFilterTest,DeepSeekModelQuotaTest,RealModelEvaluationToolTest
           -Dit.test=BrowserSessionIT,PersistentKnowledgeVectorIT
+          test-compile surefire:test failsafe:integration-test failsafe:verify
+      - name: Regress human support ownership, AI fencing and immutable transcripts
+        run: >-
+          mvn -B -ntp
+          -Dtest=HumanSupportValidationTest,MerchantAccessServiceTest,LocalConfigurationTemplateTest
+          -Dit.test=HumanSupportApiIT,OrderApiIT
           test-compile surefire:test failsafe:integration-test failsafe:verify
       - name: Publish readable job summary
         if: always()

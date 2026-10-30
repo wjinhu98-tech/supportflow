@@ -8,7 +8,7 @@ const json = (data: unknown, status = 200) =>
 const account = {
   username: 'buyer',
   accountType: 'BUYER',
-  capabilities: { reviewAfterSales: false, manageKnowledge: false },
+  capabilities: { reviewAfterSales: false, manageKnowledge: false, serveChats: false },
 }
 const sessions: ApiClient[] = []
 const session = (fetch: typeof globalThis.fetch, invalidated?: () => void) => {

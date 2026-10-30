@@ -3,6 +3,7 @@ package dev.supportflow.assistant;
 import dev.supportflow.SupportFlowApplication;
 import dev.supportflow.testsupport.KnowledgeFixtures;
 import dev.supportflow.testsupport.OrderVisibilityFixtures;
+import dev.supportflow.testsupport.HumanSupportFixtures;
 import dev.supportflow.testsupport.MerchantFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
@@ -135,6 +136,7 @@ class KnowledgeManagementIT {
             KnowledgeFixtures.grantManagement(connection, DATABASE, RUNTIME);
             sql.execute("GRANT SELECT,INSERT ON " + DATABASE + ".support_knowledge_import TO '" + RUNTIME + "'@'%'");
             OrderVisibilityFixtures.grantRead(connection, DATABASE, RUNTIME);
+            HumanSupportFixtures.grantAiAdmission(connection, DATABASE, RUNTIME);
             MerchantFixtures.merchant(connection, 1, "Knowledge merchant", "ACTIVE");
             MerchantFixtures.merchant(connection, 2, "Other merchant", "ACTIVE");
             MerchantFixtures.shop(connection, 100, 1, "Editor shop", "ACTIVE");

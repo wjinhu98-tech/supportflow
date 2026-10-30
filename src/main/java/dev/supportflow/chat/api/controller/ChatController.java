@@ -4,6 +4,8 @@ import dev.supportflow.chat.api.request.ChatRequest;
 import dev.supportflow.chat.api.response.ChatResponse;
 import dev.supportflow.chat.application.InvalidChatCommandException;
 import dev.supportflow.common.security.model.CustomerPrincipal;
+import dev.supportflow.chat.support.HumanSupportAiGate;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -25,11 +27,15 @@ public class ChatController {
 
     private final ConversationContextEngine engine;
     private final ConversationOrchestrator orchestrator;
+    private HumanSupportAiGate humanSupport;
 
     public ChatController(ConversationContextEngine engine, ConversationOrchestrator orchestrator) {
         this.engine = engine;
         this.orchestrator = orchestrator;
     }
+
+    @Autowired
+    public void setHumanSupport(HumanSupportAiGate humanSupport) { this.humanSupport = humanSupport; }
 
     @GetMapping("/api/v1/chat/welcome")
     public String welcome() {
@@ -42,6 +48,11 @@ public class ChatController {
             @PathVariable("shopId") @Positive(message = "商铺ID必须为正整数") long shopId,
             @Valid @RequestBody ChatRequest request
     ) {
+        if (humanSupport != null) return humanSupport.call(principal, shopId, () -> reply(principal, shopId, request));
+        return reply(principal, shopId, request);
+    }
+
+    private ChatResponse reply(CustomerPrincipal principal, long shopId, ChatRequest request) {
         // Preserve the existing stateless model/command contract; only the new product path needs resolution.
         if (ExplicitOrderNumbers.extract(request.message()).isEmpty()
                 && (ProductOrderQuestion.parse(request.message()).isPresent()

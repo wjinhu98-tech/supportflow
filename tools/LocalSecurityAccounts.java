@@ -22,7 +22,7 @@ public final class LocalSecurityAccounts {
                 throw new IllegalArgumentException("Run from repository root");
             }
             if (args.length < 1 || args.length > 2
-                    || !java.util.Set.of("import-missing", "disable", "enable", "revoke", "reset-password").contains(args[0])) {
+                    || !java.util.Set.of("import-missing", "disable", "enable", "enable-chat", "revoke", "reset-password").contains(args[0])) {
                 throw new IllegalArgumentException("Expected account command");
             }
             if (!args[0].equals("import-missing")
@@ -60,6 +60,7 @@ public final class LocalSecurityAccounts {
             boolean changed = switch (args[0]) {
                 case "disable" -> accounts.disable(args[1]);
                 case "enable" -> accounts.enable(args[1]);
+                case "enable-chat" -> accounts.enableChatSupport(args[1]);
                 case "revoke" -> accounts.invalidateSessions(args[1]);
                 case "reset-password" -> accounts.changePassword(args[1], System.getenv("SUPPORTFLOW_NEW_PASSWORD"),
                         PasswordEncoderFactories.createDelegatingPasswordEncoder());

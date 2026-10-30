@@ -31,14 +31,15 @@ public final class DatabaseAccountAdministration {
             inserted += operatorJdbc.update("""
                     INSERT INTO support_security_account
                     (username, password_hash, principal_id, account_type, order_read, order_confirm_receipt,
-                     after_sale_review, knowledge_manage)
-                    SELECT ?, ?, ?, ?, ?, ?, ?, ?
+                     after_sale_review, knowledge_manage, chat_support)
+                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
                     WHERE NOT EXISTS (SELECT 1 FROM support_security_account WHERE username = ?)
                     """, account.username(), account.passwordHash(), account.identity().buyerId(), account.accountType().name(),
                     account.permissions().contains(SecurityPermission.ORDER_READ),
                     account.permissions().contains(SecurityPermission.ORDER_CONFIRM_RECEIPT),
                     account.permissions().contains(SecurityPermission.AFTER_SALE_REVIEW),
-                    account.permissions().contains(SecurityPermission.KNOWLEDGE_MANAGE), account.username());
+                    account.permissions().contains(SecurityPermission.KNOWLEDGE_MANAGE),
+                    account.permissions().contains(SecurityPermission.CHAT_SUPPORT), account.username());
         }
         return inserted;
     }
@@ -49,6 +50,26 @@ public final class DatabaseAccountAdministration {
 
     public boolean enable(String username) {
         return setEnabled(username, true);
+    }
+
+    /** Explicitly enables chat support only for an existing, currently bound merchant staff account. */
+    public boolean enableChatSupport(String username) {
+        return operatorJdbc.update("""
+                UPDATE support_security_account account
+                SET account.chat_support = TRUE, account.security_version = account.security_version + 1
+                WHERE account.username = ? AND account.account_type = 'MERCHANT_STAFF'
+                  AND account.enabled = TRUE AND account.chat_support = FALSE
+                  AND EXISTS (
+                    SELECT 1 FROM support_merchant_staff staff
+                    JOIN support_merchant merchant ON merchant.id = staff.merchant_id
+                    JOIN support_merchant_staff_shop_grant access_grant ON access_grant.staff_id = staff.id
+                    JOIN support_merchant_shop shop ON shop.shop_id = access_grant.shop_id
+                      AND shop.merchant_id = merchant.id
+                    WHERE staff.username = account.username AND staff.linked_buyer_id = account.principal_id
+                      AND staff.status = 'ACTIVE' AND merchant.status = 'ACTIVE' AND shop.status = 'ACTIVE'
+                      AND access_grant.enabled = TRUE
+                  )
+                """, username) == 1;
     }
 
     private boolean setEnabled(String username, boolean enabled) {

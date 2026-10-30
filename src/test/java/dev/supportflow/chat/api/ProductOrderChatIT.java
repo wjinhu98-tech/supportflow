@@ -4,6 +4,7 @@ import dev.supportflow.SupportFlowApplication;
 import dev.supportflow.assistant.tool.LogisticsTool;
 import dev.supportflow.testsupport.KnowledgeFixtures;
 import dev.supportflow.testsupport.OrderVisibilityFixtures;
+import dev.supportflow.testsupport.HumanSupportFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -114,6 +115,7 @@ class ProductOrderChatIT {
             create.execute();
             KnowledgeFixtures.grantRead(connection, DATABASE, RUNTIME);
             OrderVisibilityFixtures.grantRead(connection, DATABASE, RUNTIME);
+            HumanSupportFixtures.grantAiAdmission(connection, DATABASE, RUNTIME);
             for (String table : List.of("support_order", "support_shipment_event", "support_merchant", "support_merchant_shop"))
                 grants.execute("GRANT SELECT ON " + DATABASE + "." + table + " TO '" + RUNTIME + "'@'%'");
             for (String table : List.of("support_after_sale", "support_after_sale_execution", "support_chat_conversation",

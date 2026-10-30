@@ -2,6 +2,7 @@ package dev.supportflow.order.api;
 
 import dev.supportflow.testsupport.KnowledgeFixtures;
 import dev.supportflow.testsupport.OrderVisibilityFixtures;
+import dev.supportflow.testsupport.HumanSupportFixtures;
 
 import dev.supportflow.SupportFlowApplication;
 import dev.supportflow.chat.application.ModelUnavailableException;
@@ -180,6 +181,7 @@ class OrderApiIT {
             createUser.execute();
             KnowledgeFixtures.grantRead(connection, "supportflow_api_test", "order_reader");
             OrderVisibilityFixtures.grantRead(connection, "supportflow_api_test", "order_reader");
+            HumanSupportFixtures.grantAiAdmission(connection, "supportflow_api_test", "order_reader");
             statement.execute(
                     """
                     GRANT SELECT
@@ -249,6 +251,40 @@ class OrderApiIT {
         mockMvc = MockMvcBuilders.webAppContextSetup(applicationContext)
                 .apply(springSecurity())
                 .build();
+    }
+
+    @Test
+    void shopOrderListUsesBuyerAndShopScopeWithBoundedKeysetPagesAndNoChatCalls() throws Exception {
+        MvcResult first = mockMvc.perform(get("/api/v1/shops/100/orders?size=1&buyerId=201")
+                        .with(httpBasic("customer-200", LOGIN_PASSWORD)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].orderNo").value("SF10001"))
+                .andExpect(jsonPath("$.items[0].shopId").value(100))
+                .andReturn();
+        long cursor = objectMapper.readTree(first.getResponse().getContentAsString()).path("nextAfterId").asLong();
+        assertThat(cursor).isPositive();
+        mockMvc.perform(get("/api/v1/shops/100/orders?size=1&afterId=" + cursor)
+                        .with(httpBasic("customer-200", LOGIN_PASSWORD)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].orderNo").value("SF10002"))
+                .andExpect(jsonPath("$.nextAfterId").isEmpty());
+        mockMvc.perform(get("/api/v1/shops/300/orders").with(httpBasic("customer-200", LOGIN_PASSWORD)))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].orderNo").value("SF10001"))
+                .andExpect(jsonPath("$.items[0].shopId").value(300));
+        mockMvc.perform(get("/api/v1/shops/100/orders").with(httpBasic("customer-201", LOGIN_PASSWORD)))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].orderNo").value("SF20001"));
+        mockMvc.perform(get("/api/v1/shops/100/orders").with(httpBasic("no-order-access", LOGIN_PASSWORD)))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/v1/shops/100/orders")).andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/v1/shops/100/orders?size=101").with(httpBasic("customer-200", LOGIN_PASSWORD)))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/v1/shops/100/orders?afterId=-1").with(httpBasic("customer-200", LOGIN_PASSWORD)))
+                .andExpect(status().isBadRequest());
+        verifyNoInteractions(orderIntentRecognizer);
     }
 
     @Test

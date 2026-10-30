@@ -5,6 +5,7 @@ import dev.supportflow.order.application.OrderQueryService;
 import dev.supportflow.order.domain.model.OrderItemSnapshot;
 import dev.supportflow.order.domain.model.SupportOrder;
 import dev.supportflow.testsupport.OrderVisibilityFixtures;
+import dev.supportflow.testsupport.HumanSupportFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -71,9 +72,10 @@ class JdbcOrderProductSearchIT {
                     WHERE order_no='SFV16'
                     """)).isInstanceOfSatisfying(SQLException.class, error -> assertThat(error.getErrorCode()).isEqualTo(3819));
         }
-        assertThat(migration(null)).isEqualTo(5);
+        assertThat(migration(null)).isEqualTo(6);
         try (var connection = admin()) {
             OrderVisibilityFixtures.grantRead(connection, "order_product_test", "product_reader");
+            HumanSupportFixtures.grantAiAdmission(connection, "order_product_test", "product_reader");
         }
         repository = new JdbcSupportOrderRepository(JdbcClient.create(new DriverManagerDataSource(
                 MYSQL.getJdbcUrl(), "product_reader", PASSWORD)));

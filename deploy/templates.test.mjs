@@ -53,12 +53,24 @@ test("runtime does not mount migration/root/ops plaintext secrets and cannot run
     /lab_root_password|lab_migrator_password|lab_ops_password|lab_buyer_hash|lab_merchant_hash/,
   );
   assert.match(backend, /SUPPORTFLOW_SECURITY_AUTHENTICATION_MODE: database/);
-  assert.match(backend, /SUPPORTFLOW_SECURITY_AUTHENTICATION_BASIC_ENABLED: "false"/);
-  assert.match(backend, /SUPPORTFLOW_SECURITY_AUTHENTICATION_SESSION_TIMEOUT: 30m/);
+  assert.match(
+    backend,
+    /SUPPORTFLOW_SECURITY_AUTHENTICATION_BASIC_ENABLED: "false"/,
+  );
+  assert.match(
+    backend,
+    /SUPPORTFLOW_SECURITY_AUTHENTICATION_SESSION_TIMEOUT: 30m/,
+  );
   assert.match(backend, /SUPPORTFLOW_TRAFFIC_ENABLED: "true"/);
   assert.match(backend, /SUPPORTFLOW_RAG_PERSISTENT_INDEX_ENABLED: "true"/);
-  assert.match(service("seed-accounts"), /secrets: \[lab_migrator_password, lab_buyer_hash, lab_merchant_hash\]/);
-  assert.doesNotMatch(service("seed-accounts"), /lab_root_password|lab_ops_hash|lab_ops_password/);
+  assert.match(
+    service("seed-accounts"),
+    /secrets: \[lab_migrator_password, lab_buyer_hash, lab_merchant_hash\]/,
+  );
+  assert.doesNotMatch(
+    service("seed-accounts"),
+    /lab_root_password|lab_ops_hash|lab_ops_password/,
+  );
   assert.match(service("prometheus"), /secrets: \[lab_ops_password\]/);
   assert.doesNotMatch(service("frontend"), /secrets:/);
   const networks =
@@ -88,7 +100,10 @@ test("migration, post-schema grants, seeding and runtime are ordered by success"
     service("seed-accounts"),
     /seed:[\s\S]*condition: service_completed_successfully/,
   );
-  assert.match(service("backend"), /seed-accounts:[\s\S]*condition: service_completed_successfully/);
+  assert.match(
+    service("backend"),
+    /seed-accounts:[\s\S]*condition: service_completed_successfully/,
+  );
   assert.match(service("seed-accounts"), /command: \[seed-accounts\]/);
   assert.match(compose, /dev\.supportflow\.deployment\.LabDeploymentTool/);
   assert.match(
@@ -129,25 +144,59 @@ test("app writes remain table/column scoped with no authorization-table mutation
   assert.deepEqual(importGrants, [
     "GRANT INSERT ON `supportflow_lab`.`support_knowledge_import` TO 'lab_app'@'%';",
   ]);
-  assert.deepEqual(grants.filter((grant) => grant.includes("`support_knowledge_vector`")), [
-    "GRANT INSERT ON `supportflow_lab`.`support_knowledge_vector` TO 'lab_app'@'%';",
-  ]);
-  assert.equal(grants.filter((grant) => grant.includes("`support_security_account`")).length, 0,
-    "account reads use the existing SELECT grant and account writes must never be granted");
+  assert.deepEqual(
+    grants.filter((grant) => grant.includes("`support_knowledge_vector`")),
+    [
+      "GRANT INSERT ON `supportflow_lab`.`support_knowledge_vector` TO 'lab_app'@'%';",
+    ],
+  );
+  assert.equal(
+    grants.filter((grant) => grant.includes("`support_security_account`"))
+      .length,
+    0,
+    "account reads use the existing SELECT grant and account writes must never be granted",
+  );
+  assert.deepEqual(
+    grants
+      .filter((grant) =>
+        /`support_(human_session|human_message|chat_scope)`/.test(grant),
+      )
+      .sort(),
+    [
+      "GRANT INSERT, UPDATE ON `supportflow_lab`.`support_chat_scope` TO 'lab_app'@'%';",
+      "GRANT INSERT, UPDATE ON `supportflow_lab`.`support_human_session` TO 'lab_app'@'%';",
+      "GRANT INSERT ON `supportflow_lab`.`support_human_message` TO 'lab_app'@'%';",
+    ].sort(),
+  );
 });
 
 test("account bootstrap copies only the two existing business identities and preserves accounts", () => {
-  const tool = read("src/main/java/dev/supportflow/deployment/LabDeploymentTool.java");
+  const tool = read(
+    "src/main/java/dev/supportflow/deployment/LabDeploymentTool.java",
+  );
   const profile = read("src/main/resources/application-lab.yml");
   assert.match(tool, /case "seed-accounts" -> seedAccounts\(\)/);
   assert.match(tool, /importMissingConfiguredAccounts\(accounts\)/);
-  assert.match(tool, /new LocalCustomerAccount\("lab-buyer", accountHash\("lab_buyer_hash"\)/);
-  assert.match(tool, /new LocalCustomerAccount\("lab-merchant", accountHash\("lab_merchant_hash"\)/);
+  assert.match(
+    tool,
+    /new LocalCustomerAccount\("lab-buyer", accountHash\("lab_buyer_hash"\)/,
+  );
+  assert.match(
+    tool,
+    /new LocalCustomerAccount\("lab-merchant", accountHash\("lab_merchant_hash"\)/,
+  );
   assert.match(tool, /new CustomerIdentity\(200\)/);
   assert.match(tool, /new CustomerIdentity\(999\)/);
   assert.doesNotMatch(tool, /new LocalCustomerAccount\("lab-ops"/);
-  assert.match(tool, /securityAccountsReadOnly=true knowledgeVectorsAppendOnly=true/);
-  assert.match(profile, /authentication:\n      mode: database\n      basic-enabled: false\n      session-timeout: 30m/);
+  assert.match(tool, /enableChatSupport\("lab-merchant"\)/);
+  assert.match(
+    tool,
+    /securityAccountsReadOnly=true knowledgeVectorsAppendOnly=true/,
+  );
+  assert.match(
+    profile,
+    /authentication:\n      mode: database\n      basic-enabled: false\n      session-timeout: 30m/,
+  );
   assert.doesNotMatch(profile, /lab_buyer_hash|lab_merchant_hash/);
 });
 

@@ -1,6 +1,6 @@
 # SupportFlow 前端
 
-Vue 3 + TypeScript + Vite 的店铺客服工作台，支持订单咨询、知识检索、学习版物流、售后人工审批与模拟退款进度。与根目录的 Spring Boot 后端配套运行；默认访问真实后端，不内置订单、不偷偷切换到 mock 数据。
+Vue 3 + TypeScript + Vite 的店铺客服工作台，支持订单咨询、知识检索、人工客服接待、学习版物流、售后人工审批与模拟退款进度。与根目录的 Spring Boot 后端配套运行；默认访问真实后端，不内置订单、不偷偷切换到 mock 数据。
 
 ## 本地启动
 
@@ -42,6 +42,10 @@ API_PROXY_TARGET=http://127.0.0.1:8080
 
 ## 已实现的操作
 
+买家点击「联系人工客服」才会进入等待接待；等待和接待期间，输入框只发送人工消息。商家须有独立 `CHAT_SUPPORT` 权限且获得当前店铺授权，才会显示「人工接待」模块；只有成功接待本次咨询的客服可以回复和结束服务。知识管理、售后审核权限不会自动授予接待权限。取消等待或结束人工服务后恢复智能客服，并清除转人工前的订单选择与话题引用。消息均按纯文本显示，人工沟通不能直接触发退款等业务动作。迁移、最小数据库权限与接口见[转人工客服说明](../docs/human-support.md)。
+
+人工记录与智能回复按时间共同展示；重新连接或切回店铺会读取该店铺记录，较早人工消息单独分页加载，刷新不会丢弃已加载的历史。可见页面每 4 秒读取等待队列或当前人工咨询，隐藏页面、离开对应模块、换店、换号和退出时停止轮询或丢弃旧结果；已结束的咨询停止轮询。写操作只由用户显式触发，超时后保留待核实消息及原消息编号，刷新只读取记录，手动重试复用同一编号。人工服务未结束时不能删除当前店铺对话。
+
 会话中的物流查询已接入观察驱动的持久化运行器（V13/V14）：模型读取工具结果后决定下一步，Java 校验归属与工具顺序，并限制整轮步数、期限、Token 和估算费用。新运行的只读步骤遇到白名单临时故障可自动重试一次，次数和规则持久化；失败后仍可显式恢复，但不自动重发原消息。模型连续失败时共享熔断器暂停调用并以单请求探测恢复，详见[故障治理说明](../docs/agent-resilience.md)。聊天提交等待上限为105秒，覆盖后端最多100秒的运行期限；普通接口仍为25秒。当前聊天页保持简洁，不新增运行管理面板；查询进度和恢复 API 见[多轮 Agent 说明](../docs/agent-loop-budget.md)。已完成 V12 两张运行表授权的环境升级 V13/V14 不需要额外授权；新环境仍需先执行[运行表授权脚本](../config/agent-runtime-grants.sql)。
 
 - 「会话」与「订单」独立切换。默认只显示聊天，订单列表和详情放在订单页；点击「咨询此订单」自动回到会话并重新查询订单。普通切换保留草稿和消息，不自动发送消息。
@@ -67,7 +71,7 @@ API_PROXY_TARGET=http://127.0.0.1:8080
 1. 用户点击连接，`ApiClient` 的显式 `session` 模式先匿名请求 `GET /api/v1/security/csrf`，再用此校验信息 POST `/api/v1/security/login`，JSON 只提交本次输入的用户名和密码。登录返回 204 后重新读取 CSRF，再 GET `/api/v1/security/me` 核对账号类型与能力；买家、商家入口不互相接纳账号。
 2. 浏览器保存后端的 HttpOnly 会话 Cookie；后续业务请求不携带 Basic 凭证，密码、令牌均不写入浏览器存储。每次写操作重新获取 CSRF，不长期缓存。登录后携带 `X-Session-Account` 作为账号一致性检查；它不能建立身份或授予权限，服务端仍以会话认证为准。
 3. 加载订单通过 `POST /api/v1/shops/{shopId}/chat/messages` 发送 `{"message":"我的订单"}`，继续翻页发送 `我的订单 <原样游标>`。
-4. 页面聊天使用 POST `/api/v1/shops/{shopId}/chat/conversations/{id}/messages`，发送 `clientMessageId`、`message`、可选 `orderNo` 和可选 `resetContext`（缺省为 `false`），同时发送 CSRF 请求头及同源 Cookie。无状态聊天接口继续承担加载订单等兼容请求，不保存会话话题。
+4. 订单浏览器使用 GET `/api/v1/shops/{shopId}/orders?afterId=0&size=20` 读取当前店铺本人订单，分页仍使用服务端游标，人工接待期间也可查看。智能聊天使用 POST `/api/v1/shops/{shopId}/chat/conversations/{id}/messages`，发送 `clientMessageId`、`message`、可选 `orderNo` 和可选 `resetContext`（缺省为 `false`），同时发送 CSRF 请求头及同源 Cookie。无状态聊天接口仅保留兼容用途，不保存会话话题。人工接待期间选择订单改为直接读取订单详情，不提交智能聊天。
 5. 页面按响应的 `TEXT / ORDER_DETAILS / ORDER_SELECTION / AFTER_SALE_FORM` 展示文本、订单卡片或退款原因表单。表单指令最多携带一笔已验证归属的订单；空列表时必须先选订单。买家身份和订单归属始终由后端验证，前端不传 `buyerId/customerId`。
 6. 商家页 GET `/api/v1/merchant/shops/{shopId}/after-sales` 读取当前授权店铺最多50条待审，POST 同前缀 `/{uuid}/decision` 提交人工决定；保留会话 Cookie 与新 CSRF，不自动重试决定。
 7. 买家进度读取 GET `/api/v1/shops/{shopId}/after-sales`；商家进度读取 GET `/api/v1/merchant/shops/{shopId}/after-sales/history`。金额来自后端公开 DTO，前端不能修改退款金额。
@@ -125,7 +129,7 @@ npm.cmd run test:e2e -- --output=test-results/new-mock-run   # 使用尚不存�
 
 浏览器测试默认使用本机 Microsoft Edge，不读取你的浏览器资料或登录态。其他环境可设置 `$env:PLAYWRIGHT_CHANNEL='chromium'` 并先安装 Playwright Chromium。测试默认独占 5173 和 mock 18080；已有日常 Vite 时，可设置 `$env:E2E_FRONTEND_PORT='5174'` 使用独立测试前端，无需停止日常服务。mock 只由测试命令启动，不是正常开发模式的后备数据。每次传入新的、尚不存在的 `--output` 目录；不要复用旧测试结果目录，避免测试运行器自动清理既有文件。
 
-真实Java后端浏览器验证使用 `src/test/java/dev/supportflow/frontend/FrontendTestServer.java`：它只加载测试配置，在一次性Testcontainers MySQL中执行所有当前迁移（V1–V21）并创建公开假买家/商家账号；强制关闭DeepSeek。普通应用运行不会加载这个类。测试覆盖会话、订单、退款与确认收货、独立商家审批、跨店隔离，以及知识草稿/发布/下线、旧发布快照、审计、知识/审核专职账号、409冲突保留输入和丢失发布响应不重放。`SF10002`为期限内订单，`PAGE-001`为过期订单，`SF10001`缺少收货时间；这些测试日期只写入临时容器。
+真实Java后端浏览器验证使用 `src/test/java/dev/supportflow/frontend/FrontendTestServer.java`：它只加载测试配置，在一次性Testcontainers MySQL中执行所有当前迁移并创建公开假买家/商家账号；强制关闭DeepSeek。普通应用运行不会加载这个类。测试覆盖会话、订单、退款与确认收货、独立商家审批、跨店隔离，以及知识草稿/发布/下线、旧发布快照、审计、知识/审核专职账号、409冲突保留输入和丢失发布响应不重放；人工接待用例覆盖买家请求、专职客服接待与回复、结束后恢复智能客服。`SF10002`为期限内订单，`PAGE-001`为过期订单，`SF10001`缺少收货时间；这些测试日期只写入临时容器。
 
 确认收货浏览器用例使用独立的已发货订单 `SFRECEIPT01`，不会改变其他测试依赖的 `SF10001`。店铺 100 的买家共有 24 笔订单，第一页 20 笔，加载更多后可见新订单。用例验证打开或取消不提交、明确确认后状态和时间同步、后台截止时间恰为收货后 15 天、重复请求不刷新日期，以及刷新页面后仍可读取期限；`PAGE-021` 为已完成但缺少收货时间的历史订单，不提供确认按钮。运行后生成 `test-results/receipt-confirmation.png` 供界面检查。这个用例要求新启动的隔离测试容器，不在日常业务库回退订单状态。
 

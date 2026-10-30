@@ -30,10 +30,27 @@ import ReceiptConfirmationDialog from './components/ReceiptConfirmationDialog.vu
 import OrderDeletionDialog from './components/OrderDeletionDialog.vue'
 import { formatAmount, formatDate, formatTime } from './components/format'
 import { useSupportDesk } from './composables/useSupportDesk'
-import type { Order, OrderSelectionIntent } from './types'
+import type { ChatMessage, Order, OrderSelectionIntent } from './types'
 
 const {
   activeConversation,
+  humanSession,
+  humanMessages,
+  humanNextBeforeId,
+  humanLoading,
+  humanSubmitting,
+  humanReady,
+  humanError,
+  humanActive,
+  humanUncertainMessage,
+  humanUncertainClose,
+  humanVisible,
+  humanRequesting,
+  humanRequestUncertain,
+  refreshHumanSupport,
+  retryHumanMessage,
+  closeHumanSupport,
+  requestHumanSupport,
   shopOptions,
   shopDirectoryError,
   deletingConversation,
@@ -121,6 +138,25 @@ const messageInput = ref<HTMLTextAreaElement | null>(null)
 const messageList = ref<HTMLDivElement | null>(null)
 type WorkspaceView = 'chat' | 'orders'
 const activeView = ref<WorkspaceView>('chat')
+watch(
+  activeView,
+  (view) => {
+    humanVisible.value = view === 'chat'
+  },
+  { immediate: true },
+)
+const timelineMessages = computed<ChatMessage[]>(() =>
+  [
+    ...messages.value,
+    ...humanMessages.value.map((item): ChatMessage => ({
+      id: `support:${item.id}`,
+      role: item.role === 'STAFF' ? 'assistant' : 'user',
+      text: item.text,
+      createdAt: item.createdAt,
+      human: true,
+    })),
+  ].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+)
 const compositionActive = ref(false)
 const showAfterSales = ref(false)
 const loadingEarlier = ref(false)
@@ -132,6 +168,12 @@ const canSend = computed(
   () =>
     connected.value &&
     !busy.value &&
+    !humanRequesting.value &&
+    !humanSubmitting.value &&
+    !(humanActive.value && humanUncertainMessage.value) &&
+    !humanUncertainClose.value &&
+    !humanRequestUncertain.value &&
+    (!activeConversation.value || humanReady.value) &&
     !historyLoading.value &&
     !conversationsLoading.value &&
     !deletingConversation.value &&
@@ -225,7 +267,8 @@ async function requestOrders(loadMore = false) {
 
 async function consultOrder(order: Order, selectionIntent: OrderSelectionIntent | null = null) {
   retryAction = refreshConversation
-  await focusConversation()
+  if (humanActive.value) activeView.value = 'orders'
+  else await focusConversation()
   await selectOrder(order, selectionIntent)
 }
 
@@ -233,6 +276,7 @@ async function refreshConversation() {
   dismissError()
   if (activeConversation.value) await loadEarlierMessages(false)
   else await loadConversations()
+  await refreshHumanSupport()
 }
 
 async function readEarlierMessages() {
@@ -305,7 +349,7 @@ async function confirmDeleteConversation() {
   } else deleteError.value = error.value ?? '暂时无法删除对话，请稍后重试。'
 }
 
-watch([() => messages.value.length, busy], async () => {
+watch([() => timelineMessages.value.length, busy], async () => {
   if (loadingEarlier.value) return
   await nextTick()
   // Hidden panels have no scroll height. Follow new replies once chat is visible again.
@@ -728,7 +772,7 @@ watch(
                 />
               </span>
               <div>
-                <h2 id="conversation-heading">店铺智能客服</h2>
+                <h2 id="conversation-heading">{{ humanActive ? '店铺客服' : '店铺智能客服' }}</h2>
                 <p>
                   <span :class="['small-status-dot', { active: connected }]"></span>
                   {{ connected ? `店铺 ${shopId} · 在线` : '尚未连接账号' }}
@@ -742,7 +786,12 @@ watch(
               :disabled="
                 !connected ||
                 !activeConversation ||
-                !messages.length ||
+                !timelineMessages.length ||
+                !humanReady ||
+                humanActive ||
+                humanRequesting ||
+                humanRequestUncertain ||
+                humanSubmitting ||
                 connecting ||
                 busy ||
                 historyLoading ||
@@ -770,7 +819,81 @@ watch(
             {{ conversationError }}
           </p>
 
+          <div
+            class="human-support-status"
+            data-testid="buyer-support-status"
+          >
+            <template v-if="humanActive">
+              <span role="status">
+                {{
+                  humanSession?.status === 'WAITING'
+                    ? '正在等待店铺客服接待，可以先发送问题。'
+                    : '店铺客服正在为你服务'
+                }}
+              </span>
+              <button
+                type="button"
+                data-testid="close-human-support"
+                :disabled="humanSubmitting || humanRequesting"
+                @click="closeHumanSupport"
+              >
+                {{ humanSession?.status === 'WAITING' ? '取消等待' : '结束人工服务' }}
+              </button>
+            </template>
+            <template v-else>
+              <span v-if="humanSession?.status === 'CLOSED'">
+                人工服务已结束，可继续咨询智能客服。
+              </span>
+              <button
+                type="button"
+                data-testid="request-human-support"
+                :disabled="
+                  !connected ||
+                  busy ||
+                  humanRequesting ||
+                  humanSubmitting ||
+                  historyLoading ||
+                  conversationsLoading ||
+                  refundSubmitting ||
+                  receiptSubmitting ||
+                  deletingConversation
+                "
+                @click="requestHumanSupport"
+              >
+                {{ humanRequesting ? '正在联系…' : '联系人工客服' }}
+              </button>
+            </template>
+            <button
+              v-if="connected && activeConversation"
+              type="button"
+              :disabled="humanLoading || humanSubmitting || humanRequesting"
+              @click="refreshHumanSupport()"
+            >
+              刷新人工服务
+            </button>
+            <p
+              v-if="humanError"
+              role="alert"
+            >
+              {{ humanError }}
+            </p>
+            <p
+              v-if="humanUncertainMessage"
+              role="status"
+            >
+              待核实消息：{{ humanUncertainMessage.text }}
+              <button
+                v-if="humanActive"
+                type="button"
+                :disabled="humanSubmitting"
+                @click="retryHumanMessage"
+              >
+                重试这条消息
+              </button>
+            </p>
+          </div>
           <ConversationContextNotice
+            v-if="!humanActive"
             :context="conversationContext"
             :pending-reset="contextResetPending"
             :expired="contextExpired"
@@ -859,15 +982,24 @@ watch(
             >
               {{ historyLoading ? '加载中…' : '加载更早消息' }}
             </button>
+            <button
+              v-if="humanNextBeforeId"
+              type="button"
+              class="load-more history-load-earlier"
+              :disabled="humanLoading || humanSubmitting"
+              @click="refreshHumanSupport(true)"
+            >
+              更早的人工消息
+            </button>
             <p
-              v-if="historyLoading && !messages.length"
+              v-if="historyLoading && !timelineMessages.length"
               class="history-notice"
               role="status"
             >
               正在恢复咨询记录…
             </p>
             <div
-              v-if="!messages.length && !historyLoading"
+              v-if="!timelineMessages.length && !historyLoading"
               class="conversation-welcome"
             >
               <h3>{{ connected ? '你好，有什么可以帮你？' : '从一段对话开始' }}</h3>
@@ -896,7 +1028,7 @@ watch(
                 <span>{{ activeConversation ? '咨询记录' : '新的咨询' }}</span>
               </div>
               <article
-                v-for="message in messages"
+                v-for="message in timelineMessages"
                 :key="message.id"
                 class="message"
                 :class="`message-${message.role}`"
@@ -913,7 +1045,15 @@ watch(
                 </span>
                 <div class="message-content">
                   <div class="message-byline">
-                    <span>{{ message.role === 'assistant' ? '店铺智能客服' : '你' }}</span>
+                    <span>
+                      {{
+                        message.role === 'assistant'
+                          ? message.human
+                            ? '店铺客服'
+                            : '店铺智能客服'
+                          : '你'
+                      }}
+                    </span>
                     <time :datetime="message.createdAt">{{ formatTime(message.createdAt) }}</time>
                   </div>
                   <div class="message-bubble">
@@ -1007,15 +1147,27 @@ watch(
                 ref="messageInput"
                 v-model="messageDraft"
                 data-testid="message-input"
-                :disabled="!connected || busy || historyLoading || conversationsLoading"
-                maxlength="1000"
+                :disabled="
+                  !connected ||
+                  busy ||
+                  historyLoading ||
+                  conversationsLoading ||
+                  humanRequesting ||
+                  humanSubmitting ||
+                  (humanActive && !!humanUncertainMessage) ||
+                  humanUncertainClose ||
+                  humanRequestUncertain
+                "
+                :maxlength="humanActive ? 2000 : 1000"
                 rows="2"
                 :placeholder="
-                  connected
-                    ? selectedOrder
-                      ? `关于 ${selectedOrder.items?.[0]?.productName || selectedOrder.orderNo}，你想了解什么？`
-                      : '直接说商品名称和问题，例如：我买的耳机发货了吗？'
-                    : '请先连接账号，再开始咨询…'
+                  humanActive
+                    ? '直接向店铺客服说明问题…'
+                    : connected
+                      ? selectedOrder
+                        ? `关于 ${selectedOrder.items?.[0]?.productName || selectedOrder.orderNo}，你想了解什么？`
+                        : '直接说商品名称和问题，例如：我买的耳机发货了吗？'
+                      : '请先连接账号，再开始咨询…'
                 "
                 @keydown="onComposerKeydown"
                 @compositionstart="compositionActive = true"
@@ -1030,10 +1182,10 @@ watch(
                 <div class="composer-right">
                   <span
                     class="character-count"
-                    :class="{ 'at-limit': messageDraft.length >= 1000 }"
+                    :class="{ 'at-limit': messageDraft.length >= (humanActive ? 2000 : 1000) }"
                   >
                     {{ messageDraft.length }}
-                    <span>/1000</span>
+                    <span>/{{ humanActive ? 2000 : 1000 }}</span>
                   </span>
                   <button
                     type="submit"

@@ -10,7 +10,8 @@ public enum SecurityPermission implements GrantedAuthority {
     ORDER_READ("order:read"),
     ORDER_CONFIRM_RECEIPT("order:confirm-receipt"),
     AFTER_SALE_REVIEW("after-sale:review"),
-    KNOWLEDGE_MANAGE("knowledge:manage");
+    KNOWLEDGE_MANAGE("knowledge:manage"),
+    CHAT_SUPPORT("chat:support");
 
     private final String authority;
 

@@ -6,6 +6,7 @@ import dev.supportflow.order.domain.OrderQueryLimits;
 import dev.supportflow.order.domain.model.OrderStatus;
 import dev.supportflow.order.domain.repository.SupportOrderRepository;
 import dev.supportflow.testsupport.OrderVisibilityFixtures;
+import dev.supportflow.testsupport.HumanSupportFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -102,6 +103,7 @@ class JdbcSupportOrderRepositoryIT {
             createUser.setString(1, QUERY_PASSWORD);
             createUser.execute();
             OrderVisibilityFixtures.grantRead(connection, "supportflow_test", QUERY_USERNAME);
+            HumanSupportFixtures.grantAiAdmission(connection, "supportflow_test", QUERY_USERNAME);
 
             statement.execute(
                     """

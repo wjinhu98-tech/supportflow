@@ -6,6 +6,7 @@ import dev.supportflow.assistant.orchestration.ConversationOrchestrator;
 import dev.supportflow.chat.application.ModelUnavailableException;
 import dev.supportflow.testsupport.KnowledgeFixtures;
 import dev.supportflow.testsupport.OrderVisibilityFixtures;
+import dev.supportflow.testsupport.HumanSupportFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -141,6 +142,7 @@ class ConversationApiIT {
             create.execute();
             KnowledgeFixtures.grantRead(connection, DATABASE, "conversation_runtime");
             OrderVisibilityFixtures.grantRead(connection, DATABASE, "conversation_runtime");
+            HumanSupportFixtures.grantAiAdmission(connection, DATABASE, "conversation_runtime");
             for (String table : List.of("support_order", "support_shipment_event")) {
                 grant.execute("GRANT SELECT ON " + DATABASE + "." + table + " TO 'conversation_runtime'@'%'");
             }

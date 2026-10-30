@@ -19,6 +19,11 @@ const mocks = vi.hoisted(() => ({
   dispose: vi.fn(),
   options: vi.fn(),
   currentAccount: vi.fn(),
+  supportSnapshot: vi.fn(),
+  requestSupport: vi.fn(),
+  sendSupportMessage: vi.fn(),
+  closeSupport: vi.fn(),
+  getShopOrder: vi.fn(),
   chat: vi.fn(),
   reply: vi.fn(),
   openShopWindow: vi.fn(),
@@ -48,7 +53,21 @@ vi.mock('../api/client', async (importOriginal) => {
       logout = mocks.logout
       dispose = mocks.dispose
       currentAccount = mocks.currentAccount
+      supportSnapshot = mocks.supportSnapshot
+      requestSupport = mocks.requestSupport
+      sendSupportMessage = mocks.sendSupportMessage
+      closeSupport = mocks.closeSupport
+      getShopOrder = mocks.getShopOrder
       chat = mocks.chat
+      async shopOrders(shopId: string, cursor: number | null, signal: AbortSignal) {
+        const response = await mocks.chat(
+          shopId,
+          cursor === null ? '我的订单' : `我的订单 ${cursor}`,
+          undefined,
+          signal,
+        )
+        return { items: response.orders, nextAfterId: response.nextAfterId }
+      }
       openShopWindow = mocks.openShopWindow
       shops = mocks.shops
       deleteShopWindow = mocks.deleteShopWindow
@@ -166,6 +185,106 @@ const createDesk = () => {
   scopes.push(scope)
   return scope.run(useSupportDesk)!
 }
+
+describe('explicit human handoff', () => {
+  it('requests a human, sends only human messages while waiting, blocks delete, then restores AI after close', async () => {
+    const timestamp = '2026-10-30T00:00:00Z'
+    const session = {
+      id: crypto.randomUUID(),
+      status: 'WAITING',
+      assigned: false,
+      assignedToMe: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      closedAt: null,
+    }
+    mocks.requestSupport.mockResolvedValue({ session, messages: [], nextBeforeId: null })
+    mocks.sendSupportMessage.mockImplementation(
+      async (_shop, _conversation, _session, clientMessageId, text) => ({
+        id: crypto.randomUUID(),
+        clientMessageId,
+        text,
+        role: 'BUYER',
+        createdAt: timestamp,
+      }),
+    )
+    mocks.closeSupport.mockResolvedValue({
+      session: { ...session, status: 'CLOSED', closedAt: timestamp },
+      messages: [],
+      nextBeforeId: null,
+    })
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    desk.selectedOrder.value = order
+    await desk.requestHumanSupport()
+    expect(desk.humanActive.value).toBe(true)
+    expect(desk.selectedOrder.value).toBeNull()
+    expect(desk.conversationContext.value).toBeNull()
+    await desk.sendMessage('我想咨询商品问题')
+    expect(mocks.sendSupportMessage).toHaveBeenCalledOnce()
+    expect(mocks.sendConversationMessage).not.toHaveBeenCalled()
+    await desk.selectOrder(order)
+    expect(mocks.getShopOrder).toHaveBeenCalledOnce()
+    expect(desk.selectedOrder.value?.orderNo).toBe(order.orderNo)
+    await desk.openRefundForm()
+    expect(desk.refundOpen.value).toBe(true)
+    desk.closeRefundForm()
+    expect(mocks.sendConversationMessage).not.toHaveBeenCalled()
+    expect(await desk.deleteCurrentConversation()).toBe(false)
+    expect(mocks.deleteShopWindow).not.toHaveBeenCalled()
+    await desk.closeHumanSupport()
+    expect(desk.humanActive.value).toBe(false)
+    expect(desk.humanMessages.value).toHaveLength(1)
+    await desk.sendMessage('你好')
+    expect(mocks.sendConversationMessage).toHaveBeenCalledOnce()
+    expect(mocks.sendConversationMessage.mock.calls[0]![4]).toBeUndefined()
+  })
+  it('never opens human reception from an ordinary model answer', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    await desk.sendMessage('不确定的问题')
+    expect(mocks.requestSupport).not.toHaveBeenCalled()
+    expect(desk.humanActive.value).toBe(false)
+  })
+  it('reads human state after an AI conflict without replaying the message', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const timestamp = '2026-10-30T00:00:00Z'
+    mocks.supportSnapshot.mockResolvedValue({
+      session: {
+        id: crypto.randomUUID(),
+        status: 'WAITING',
+        assigned: false,
+        assignedToMe: false,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        closedAt: null,
+      },
+      messages: [],
+      nextBeforeId: null,
+    })
+    mocks.sendConversationMessage.mockRejectedValueOnce(
+      new ApiError('human started elsewhere', 409),
+    )
+    await desk.sendMessage('本次只尝试一次')
+    expect(desk.humanActive.value).toBe(true)
+    expect(mocks.sendConversationMessage).toHaveBeenCalledOnce()
+    expect(mocks.sendSupportMessage).not.toHaveBeenCalled()
+  })
+  it('does not send an old draft into the next shop after a delayed human preflight', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    desk.humanReady.value = false
+    const pending = deferred<{ session: null; messages: never[]; nextBeforeId: null }>()
+    mocks.supportSnapshot.mockReturnValueOnce(pending.promise)
+    const send = desk.sendMessage('旧店铺草稿')
+    await desk.changeShop('101')
+    pending.resolve({ session: null, messages: [], nextBeforeId: null })
+    await send
+    expect(mocks.sendConversationMessage).not.toHaveBeenCalled()
+    expect(mocks.sendSupportMessage).not.toHaveBeenCalled()
+  })
+})
 function deferred<T>() {
   let resolve!: (value: T) => void
   const promise = new Promise<T>((done) => {
@@ -175,6 +294,13 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  mocks.getShopOrder.mockReset().mockResolvedValue(order)
+  mocks.supportSnapshot
+    .mockReset()
+    .mockResolvedValue({ session: null, messages: [], nextBeforeId: null })
+  mocks.requestSupport.mockReset()
+  mocks.sendSupportMessage.mockReset()
+  mocks.closeSupport.mockReset()
   mocks.logout.mockReset().mockResolvedValue(undefined)
   mocks.dispose.mockReset()
   mocks.options.mockReset()

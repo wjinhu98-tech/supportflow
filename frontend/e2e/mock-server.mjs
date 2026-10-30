@@ -9,6 +9,7 @@ const slowAuthorization = `Basic ${Buffer.from(`slow-buyer:${MOCK_PASSWORD}`).to
 const sessions = new Map()
 const requests = []
 const conversations = new Map()
+const support = new Map()
 const pendingReplies = new WeakMap()
 const nextCursor = 7347
 const timestamp = '2026-10-20T01:00:00Z'
@@ -98,6 +99,7 @@ const server = http.createServer(async (request, response) => {
   if (url.pathname === '/__e2e/reset' && request.method === 'POST') {
     sessions.clear()
     conversations.clear()
+    support.clear()
     requests.length = 0
     return respond(response, 200, { reset: true })
   }
@@ -149,7 +151,12 @@ const server = http.createServer(async (request, response) => {
     if (!hasCsrf) return failure(response, 403, 'ACCESS_DENIED', '请求安全校验未通过。')
     sessions.delete(sessionId)
     const body = await bodyOf(request)
-    if (![MOCK_USERNAME, 'slow-buyer'].includes(body.username) || body.password !== MOCK_PASSWORD)
+    if (
+      ![MOCK_USERNAME, 'slow-buyer', 'chat-staff', 'review-only', 'knowledge-only'].includes(
+        body.username,
+      ) ||
+      body.password !== MOCK_PASSWORD
+    )
       return failure(response, 401, 'UNAUTHENTICATED', '账号或密码不正确，请重新连接。')
     if (body.username === 'slow-buyer') await new Promise((resolve) => setTimeout(resolve, 1500))
     const id = randomUUID()
@@ -176,8 +183,14 @@ const server = http.createServer(async (request, response) => {
     record.accepted = true
     return respond(response, 200, {
       username: owner,
-      accountType: 'BUYER',
-      capabilities: { reviewAfterSales: false, manageKnowledge: false },
+      accountType: ['chat-staff', 'review-only', 'knowledge-only'].includes(owner)
+        ? 'MERCHANT_STAFF'
+        : 'BUYER',
+      capabilities: {
+        reviewAfterSales: owner === 'review-only',
+        manageKnowledge: owner === 'knowledge-only',
+        serveChats: owner === 'chat-staff',
+      },
     })
   }
   if (url.pathname === '/api/v1/shops' && request.method === 'GET') {
@@ -188,6 +201,171 @@ const server = http.createServer(async (request, response) => {
       { shopId: 102, name: '数码优选店' },
       { shopId: 103, name: '生活家居店' },
     ])
+  }
+  if (url.pathname === '/api/v1/merchant/shops' && request.method === 'GET') {
+    if (!['chat-staff', 'review-only', 'knowledge-only'].includes(owner))
+      return failure(response, 403, 'ACCESS_DENIED', '无权查看。')
+    return respond(response, 200, [
+      { id: 100, name: '演示店铺100', merchantId: 1, merchantName: '演示商家' },
+    ])
+  }
+  const orderList = /^\/api\/v1\/shops\/([1-9][0-9]*)\/orders$/.exec(url.pathname)
+  if (orderList && request.method === 'GET') {
+    const shopId = Number(orderList[1])
+    const afterId = Number(url.searchParams.get('afterId') ?? 0)
+    const items =
+      shopId === 100
+        ? afterId === 0
+          ? firstPage
+          : finalPage
+        : allOrders.filter((order) => order.shopId === shopId)
+    record.accepted = true
+    return respond(response, 200, {
+      items,
+      nextAfterId: shopId === 100 && afterId === 0 ? nextCursor : null,
+    })
+  }
+  const orderDetail = /^\/api\/v1\/shops\/([1-9][0-9]*)\/orders\/([^/]+)$/.exec(url.pathname)
+  if (orderDetail && request.method === 'GET') {
+    const order = allOrders.find(
+      (item) =>
+        item.shopId === Number(orderDetail[1]) &&
+        item.orderNo === decodeURIComponent(orderDetail[2]),
+    )
+    if (!order) return failure(response, 404, 'ORDER_NOT_FOUND', '未找到订单。')
+    record.accepted = true
+    return respond(response, 200, order)
+  }
+  const buyerSupport =
+    /^\/api\/v1\/shops\/([1-9][0-9]*)\/chat\/conversations\/([a-f0-9-]+)\/support(?:\/(messages|[a-f0-9-]+)(?:\/(messages|close))?)?$/.exec(
+      url.pathname,
+    )
+  const merchantSupport =
+    /^\/api\/v1\/merchant\/shops\/([1-9][0-9]*)\/support-sessions(?:\/([a-f0-9-]+)(?:\/(claim|messages|close))?)?$/.exec(
+      url.pathname,
+    )
+  if (buyerSupport || merchantSupport) {
+    const merchant = !!merchantSupport
+    const shopId = Number((buyerSupport ?? merchantSupport)[1])
+    if (merchant && (owner !== 'chat-staff' || shopId !== 100))
+      return failure(response, 403, 'ACCESS_DENIED', '没有人工接待权限。')
+    const target = buyerSupport ? conversations.get(buyerSupport[2]) : null
+    if (
+      buyerSupport &&
+      (!target || target.owner !== owner || target.deleted || target.conversation.shopId !== shopId)
+    )
+      return failure(response, 404, 'NOT_FOUND', '没有此咨询。')
+    let entry = buyerSupport
+      ? support.get(buyerSupport[2])
+      : [...support.values()].find(
+          (item) => item.session.id === merchantSupport[2] && item.shopId === shopId,
+        )
+    const sessionView = (item) => ({
+      ...item.session,
+      assigned: !!item.assignee,
+      assignedToMe: merchant && item.assignee === owner,
+    })
+    const snapshot = (item, cursor = url.searchParams.get('beforeId')) => {
+      const all = item && (!merchant || item.assignee === owner) ? item.messages : []
+      const end = cursor ? all.findIndex((message) => message.id === cursor) : all.length
+      const messages = all.slice(Math.max(0, end - 30), end)
+      return {
+        session: item ? sessionView(item) : null,
+        messages,
+        nextBeforeId: end > 30 ? messages[0].id : null,
+      }
+    }
+    if (merchant && !merchantSupport[2] && request.method === 'GET') {
+      const status = url.searchParams.get('status') ?? 'WAITING'
+      const items = [...support.values()]
+        .filter(
+          (item) =>
+            item.shopId === shopId &&
+            item.session.status === status &&
+            (status === 'WAITING' || item.assignee === owner),
+        )
+        .map(sessionView)
+      return respond(response, 200, { items: items.slice(0, 30), nextBeforeId: null })
+    }
+    if (merchant && (!entry || (entry.assignee && entry.assignee !== owner)))
+      return failure(response, 404, 'NOT_FOUND', '此咨询已由其他客服处理。')
+    if (
+      buyerSupport?.[3] &&
+      buyerSupport[3] !== 'messages' &&
+      entry?.session.id !== buyerSupport[3]
+    )
+      return failure(response, 404, 'NOT_FOUND', '没有此人工服务。')
+    if (request.method === 'GET') {
+      record.accepted = true
+      return respond(response, 200, snapshot(entry))
+    }
+    if (!hasCsrf) return failure(response, 403, 'ACCESS_DENIED', '安全校验未通过。')
+    session.token = randomUUID()
+    const body = await bodyOf(request)
+    record.body = body
+    const action = merchant ? merchantSupport[3] : buyerSupport[4]
+    if (!merchant && !buyerSupport[3]) {
+      const existing = entry?.requests.get(body.requestId)
+      if (existing) return respond(response, 200, snapshot(entry))
+      if (entry && entry.session.status !== 'CLOSED')
+        return failure(response, 409, 'SUPPORT_CONFLICT', '已有人工服务。')
+      const now = new Date().toISOString()
+      const oldMessages = entry?.messages ?? []
+      entry = {
+        shopId,
+        conversationId: buyerSupport[2],
+        assignee: null,
+        session: {
+          id: randomUUID(),
+          status: 'WAITING',
+          createdAt: now,
+          updatedAt: now,
+          closedAt: null,
+        },
+        messages: oldMessages,
+        requests: new Map([[body.requestId, true]]),
+      }
+      support.set(buyerSupport[2], entry)
+      record.accepted = true
+      return respond(response, 200, snapshot(entry))
+    }
+    if (!entry || entry.session.status === 'CLOSED')
+      return failure(response, 409, 'SUPPORT_CONFLICT', '人工服务已结束。')
+    if (action === 'claim' && merchant) {
+      if (entry.session.status !== 'WAITING')
+        return failure(response, 409, 'SUPPORT_CONFLICT', '咨询已被接待。')
+      entry.assignee = owner
+      entry.session.status = 'ACTIVE'
+      record.accepted = true
+      return respond(response, 200, snapshot(entry))
+    }
+    if (merchant && entry.assignee !== owner)
+      return failure(response, 403, 'ACCESS_DENIED', '请先接待。')
+    if (action === 'messages') {
+      const previous = entry.messages.find(
+        (message) => message.clientMessageId === body.clientMessageId,
+      )
+      if (previous) return respond(response, 200, previous)
+      if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 2000)
+        return failure(response, 400, 'INVALID_ARGUMENT', '请输入消息。')
+      const message = {
+        id: randomUUID(),
+        clientMessageId: body.clientMessageId,
+        role: merchant ? 'STAFF' : 'BUYER',
+        text: body.text,
+        createdAt: new Date().toISOString(),
+      }
+      entry.messages.push(message)
+      record.accepted = true
+      return respond(response, 200, message)
+    }
+    if (action === 'close') {
+      entry.session.status = 'CLOSED'
+      entry.session.closedAt = new Date().toISOString()
+      record.accepted = true
+      return respond(response, 200, snapshot(entry))
+    }
+    return failure(response, 404, 'NOT_FOUND', '没有此接口。')
   }
   const windowMatch = /^\/api\/v1\/shops\/([1-9][0-9]*)\/chat\/window(?:\/([a-f0-9-]+))?$/.exec(
     url.pathname,

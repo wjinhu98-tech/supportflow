@@ -505,7 +505,7 @@ class AgentLoopPersistenceIT {
         }
         var migration = Flyway.configure().dataSource(url, MYSQL.getUsername(), MYSQL.getPassword())
                 .locations("classpath:db/migration").cleanDisabled(true).load().migrate();
-        assertThat(migration.migrationsExecuted).isEqualTo(9);
+        assertThat(migration.migrationsExecuted).isEqualTo(10);
         var upgraded = new JdbcAgentRunStore(upgradeJdbc, json, manager);
         AgentRun old = upgraded.find(key);
         assertThat(old.workflowVersion()).isEqualTo(1);
@@ -555,7 +555,7 @@ class AgentLoopPersistenceIT {
                 .param("conversation", conversation.id().toString()).update();
         var migrated = Flyway.configure().dataSource(url, MYSQL.getUsername(), MYSQL.getPassword())
                 .locations("classpath:db/migration").cleanDisabled(true).load().migrate();
-        assertThat(migrated.migrationsExecuted).isEqualTo(8);
+        assertThat(migrated.migrationsExecuted).isEqualTo(9);
         var upgraded = new JdbcAgentRunStore(upgradeJdbc, json, manager);
         assertThat(upgraded.find(key).retryPolicy().maxRetries()).isZero();
         assertThat(upgraded.find(key).workflowVersion()).isEqualTo(2);

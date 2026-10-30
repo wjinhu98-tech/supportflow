@@ -1,6 +1,7 @@
 package dev.supportflow.chat.conversation;
 
 import dev.supportflow.chat.api.response.ChatResponse;
+import dev.supportflow.chat.support.HumanSupportScope;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
@@ -93,6 +94,7 @@ public class JdbcConversationStore implements ConversationStore {
     @Override
     public void deleteWindow(long buyerId, long shopId, UUID id) {
         transaction.executeWithoutResult(status -> {
+            HumanSupportScope.lock(jdbc, buyerId, shopId);
             var target = jdbc.sql("""
                     SELECT deleted_at, window_slot FROM support_chat_conversation
                     WHERE public_id=:id AND buyer_id=:buyer AND tenant_id=:shop FOR UPDATE
@@ -100,6 +102,10 @@ public class JdbcConversationStore implements ConversationStore {
                     .query((row, ignored) -> new WindowDeletion(row.getObject("deleted_at", LocalDateTime.class),
                             row.getObject("window_slot", Integer.class))).optional().orElseThrow(ConversationException::notFound);
             if (target.deletedAt() != null) return; // A lost response cannot delete a subsequently created window.
+            HumanSupportScope.requireAiAllowed(jdbc, buyerId, shopId);
+            if (HumanSupportScope.legacyProcessing(jdbc, buyerId, shopId)) {
+                throw ConversationException.conflict("AI正在回复，请稍后再删除会话");
+            }
             if (!Integer.valueOf(1).equals(target.slot())) throw ConversationException.notFound();
             jdbc.sql("""
                     SELECT id FROM support_chat_conversation
@@ -183,7 +189,9 @@ public class JdbcConversationStore implements ConversationStore {
     @Override
     public Reservation reserve(long buyerId, long shopId, UUID id, ConversationMessageRequest request) {
         ReserveDecision decision = transaction.execute(status -> {
+            HumanSupportScope.lock(jdbc, buyerId, shopId);
             StoredConversation conversation = owned(buyerId, shopId, id, true);
+            HumanSupportScope.requireAiAllowed(jdbc, buyerId, shopId);
             // Lease expiry is terminal for that key. A new key may proceed, but no old side effect is replayed.
             jdbc.sql("""
                     UPDATE support_chat_turn SET status='FAILED', updated_at=UTC_TIMESTAMP(3)
@@ -240,6 +248,7 @@ public class JdbcConversationStore implements ConversationStore {
             throw ConversationException.unavailable();
         }
         return transaction.execute(status -> {
+            HumanSupportScope.lock(jdbc, buyerId, shopId);
             StoredConversation conversation = owned(buyerId, shopId, id, true);
             StoredTurn turn = turns(conversation.storageId(), request.clientMessageId()).stream()
                     .findFirst().orElseThrow(ConversationException::notFound);
@@ -269,6 +278,7 @@ public class JdbcConversationStore implements ConversationStore {
     @Override
     public void fail(long buyerId, long shopId, UUID id, UUID clientMessageId, UUID processingToken) {
         transaction.executeWithoutResult(status -> {
+            HumanSupportScope.lock(jdbc, buyerId, shopId);
             StoredConversation conversation = owned(buyerId, shopId, id, true);
             jdbc.sql("""
                     UPDATE support_chat_turn SET status='FAILED', updated_at=UTC_TIMESTAMP(3)
@@ -300,6 +310,7 @@ public class JdbcConversationStore implements ConversationStore {
     @Override
     public boolean recoverable(long buyerId, long shopId, UUID id, UUID clientMessageId, boolean reclaimProcessing) {
         StoredConversation conversation = owned(buyerId, shopId, id, false);
+        if (HumanSupportScope.active(jdbc, buyerId, shopId)) return false;
         return jdbc.sql("""
                 SELECT COUNT(*) FROM support_chat_turn
                 WHERE conversation_id=:conversation AND client_message_id=:client
@@ -312,7 +323,9 @@ public class JdbcConversationStore implements ConversationStore {
     public Reservation reserveResume(long buyerId, long shopId, UUID id, ConversationMessageRequest request,
                                      boolean reclaimProcessing) {
         return transaction.execute(status -> {
+            HumanSupportScope.lock(jdbc, buyerId, shopId);
             StoredConversation conversation = owned(buyerId, shopId, id, true);
+            HumanSupportScope.requireAiAllowed(jdbc, buyerId, shopId);
             StoredTurn turn = turns(conversation.storageId(), request.clientMessageId()).stream()
                     .findFirst().orElseThrow(ConversationException::notFound);
             if (!turn.requestHash().equals(hash(request))) {
@@ -347,6 +360,7 @@ public class JdbcConversationStore implements ConversationStore {
                 FROM support_chat_message message
                 JOIN support_chat_turn turn ON turn.id=message.turn_id AND turn.conversation_id=message.conversation_id
                 WHERE message.conversation_id=:conversation AND message.role='ASSISTANT' AND turn.status='SUCCEEDED'
+                  AND message.id>(SELECT human_context_reset_after_message_id FROM support_chat_conversation WHERE id=:conversation)
                 ORDER BY message.id DESC LIMIT 1
                 """).param("conversation", conversationId).query((row, ignored) -> {
                     String value = row.getString("context_json");

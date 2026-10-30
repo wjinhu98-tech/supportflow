@@ -7,6 +7,11 @@ const mocks = vi.hoisted(() => ({
   logout: vi.fn(),
   dispose: vi.fn(),
   currentAccount: vi.fn(),
+  supportSessions: vi.fn(),
+  merchantSupportSnapshot: vi.fn(),
+  claimSupport: vi.fn(),
+  sendSupportMessage: vi.fn(),
+  closeSupport: vi.fn(),
   merchantShops: vi.fn(),
   pendingReviews: vi.fn(),
   reviewHistory: vi.fn(),
@@ -31,6 +36,11 @@ vi.mock('./api/client', async (importOriginal) => {
       logout = mocks.logout
       dispose = mocks.dispose
       currentAccount = mocks.currentAccount
+      supportSessions = mocks.supportSessions
+      merchantSupportSnapshot = mocks.merchantSupportSnapshot
+      claimSupport = mocks.claimSupport
+      sendSupportMessage = mocks.sendSupportMessage
+      closeSupport = mocks.closeSupport
       merchantShops = mocks.merchantShops
       pendingReviews = mocks.pendingReviews
       reviewHistory = mocks.reviewHistory
@@ -51,6 +61,7 @@ vi.mock('./api/client', async (importOriginal) => {
 beforeEach(() => {
   for (const mock of Object.values(mocks)) mock.mockReset()
   mocks.logout.mockResolvedValue(undefined)
+  mocks.supportSessions.mockResolvedValue({ items: [], nextBeforeId: null })
   mocks.knowledgeArticles.mockResolvedValue({ items: [], nextBeforeId: null })
   mocks.knowledgeIndex.mockResolvedValue({
     status: 'DISABLED',
@@ -84,6 +95,73 @@ async function login(view: ReturnType<typeof mount>) {
   await flushPromises()
 }
 describe('MerchantApp', () => {
+  it('isolates human reception as a dedicated capability and lets its assigned staff reply', async () => {
+    const timestamp = '2026-10-30T00:00:00Z'
+    const waiting = {
+      id: crypto.randomUUID(),
+      status: 'WAITING',
+      assigned: false,
+      assignedToMe: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      closedAt: null,
+    }
+    const active = { ...waiting, status: 'ACTIVE', assigned: true, assignedToMe: true }
+    mocks.currentAccount.mockResolvedValueOnce({
+      username: 'chat-only',
+      accountType: 'MERCHANT_STAFF',
+      capabilities: { reviewAfterSales: false, manageKnowledge: false, serveChats: true },
+    })
+    mocks.supportSessions.mockResolvedValue({ items: [waiting], nextBeforeId: null })
+    mocks.merchantSupportSnapshot.mockResolvedValue({
+      session: waiting,
+      messages: [],
+      nextBeforeId: null,
+    })
+    mocks.claimSupport.mockResolvedValue({ session: active, messages: [], nextBeforeId: null })
+    mocks.sendSupportMessage.mockImplementation(
+      async (_shop, _conversation, _session, clientMessageId, text) => ({
+        id: crypto.randomUUID(),
+        clientMessageId,
+        text,
+        role: 'STAFF',
+        createdAt: timestamp,
+      }),
+    )
+    const view = mount(MerchantApp)
+    await login(view)
+    expect(view.find('[data-testid="merchant-tab-after-sales"]').exists()).toBe(false)
+    expect(view.find('[data-testid="merchant-tab-knowledge"]').exists()).toBe(false)
+    expect(view.find('[data-testid="merchant-tab-support"]').exists()).toBe(true)
+    await view.get('.human-session').trigger('click')
+    await flushPromises()
+    expect(view.find('[data-testid="support-reply"]').exists()).toBe(false)
+    await view.get('[data-testid="support-claim"]').trigger('click')
+    await flushPromises()
+    await view.get('[data-testid="support-reply"]').setValue('<script>纯文本</script>')
+    await view.get('.human-reply').trigger('submit')
+    await flushPromises()
+    expect(mocks.sendSupportMessage).toHaveBeenCalledOnce()
+    expect(view.get('[data-testid="support-message"]').text()).toContain('<script>纯文本</script>')
+    expect(view.find('script').exists()).toBe(false)
+    expect(mocks.pendingReviews).not.toHaveBeenCalled()
+    view.unmount()
+  })
+  it.each([
+    { reviewAfterSales: true, manageKnowledge: false },
+    { reviewAfterSales: false, manageKnowledge: true },
+  ])('hides human reception when the server grants only other work: %o', async (capabilities) => {
+    mocks.currentAccount.mockResolvedValueOnce({
+      username: 'other-role',
+      accountType: 'MERCHANT_STAFF',
+      capabilities,
+    })
+    const view = mount(MerchantApp)
+    await login(view)
+    expect(view.find('[data-testid="merchant-tab-support"]').exists()).toBe(false)
+    expect(mocks.supportSessions).not.toHaveBeenCalled()
+    view.unmount()
+  })
   it('shows index readiness only to knowledge staff and prepares it only after an explicit click', async () => {
     mocks.currentAccount.mockResolvedValueOnce({
       username: 'editor',

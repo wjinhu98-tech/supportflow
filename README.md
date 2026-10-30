@@ -1,5 +1,7 @@
 # SupportFlow
 
+- 转人工客服：[`docs/human-support.md`](docs/human-support.md)，包括买家申请、商家按店铺接待、双向消息、结束后恢复智能客服及持久化记录。
+
 - 本轮求职工程补全：[`docs/job-readiness.md`](docs/job-readiness.md)，包括数据库账号与服务端会话、按认证身份限流、请求追踪、持久化知识向量和默认关闭的真实模型评测工具。
 
 Java / Spring Boot + Vue 店铺订单客服学习项目，包含店铺本人订单、版本化知识检索、受限 DeepSeek 工具调用、学习版物流、售后人工审批与持久化模拟退款处理。

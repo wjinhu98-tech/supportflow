@@ -123,6 +123,49 @@ class MerchantAccessServiceTest {
         verifyNoInteractions(repository);
     }
 
+    @Test
+    void chatOnlyStaffMayListAssignedShopsWithoutReceivingOtherCapabilities() {
+        var supporter = principal(AccountType.MERCHANT_STAFF, SecurityPermission.CHAT_SUPPORT);
+        when(repository.activeStaff("staff", 999)).thenReturn(true);
+        when(repository.list("staff", 999)).thenReturn(List.of(new MerchantShop(100, "Shop", 1, "Merchant")));
+        assertThat(service.shops(supporter)).hasSize(1);
+        assertThat(MerchantCapabilities.from(supporter)).isEqualTo(new MerchantCapabilities(false, false, true));
+        assertThatThrownBy(() -> service.requireShop(supporter, 100)).isInstanceOf(AccessDeniedException.class);
+        assertThatThrownBy(() -> service.requireKnowledgeShop(supporter, 100)).isInstanceOf(AccessDeniedException.class);
+    }
+
+    @Test
+    void chatAuthorizationUsesLiveUsernameIdentityAndShopGrantForReadsAndWrites() {
+        var supporter = principal(AccountType.MERCHANT_STAFF, SecurityPermission.CHAT_SUPPORT);
+        var authorization = new MerchantShopAccess(7, 100);
+        when(repository.find("staff", 999, 100, false)).thenReturn(Optional.of(authorization)).thenReturn(Optional.empty());
+        when(repository.find("staff", 999, 100, true)).thenReturn(Optional.of(authorization));
+        when(repository.find("staff", 999, 101, true)).thenReturn(Optional.empty());
+        assertThat(service.requireChatShop(supporter, 100)).isEqualTo(authorization);
+        assertThat(service.lockChatShop(supporter, 100)).isEqualTo(authorization);
+        assertThatThrownBy(() -> service.requireChatShop(supporter, 100)).isInstanceOf(AccessDeniedException.class);
+        assertThatThrownBy(() -> service.lockChatShop(supporter, 101)).isInstanceOf(AccessDeniedException.class);
+        verify(repository, times(2)).find("staff", 999, 100, false);
+        verify(repository).find("staff", 999, 100, true);
+        verify(repository).find("staff", 999, 101, true);
+        verifyNoMoreInteractions(repository);
+    }
+
+    @Test
+    void chatRequiresMerchantRoleAndItsOwnPermission() {
+        var buyer = principal(AccountType.BUYER, SecurityPermission.CHAT_SUPPORT);
+        var editor = principal(AccountType.MERCHANT_STAFF, SecurityPermission.KNOWLEDGE_MANAGE);
+        for (var ineligible : List.of(buyer, staff, editor)) {
+            assertThatThrownBy(() -> service.requireChatShop(ineligible, 100)).isInstanceOf(AccessDeniedException.class);
+            assertThatThrownBy(() -> service.lockChatShop(ineligible, 100)).isInstanceOf(AccessDeniedException.class);
+            assertThat(MerchantCapabilities.from(ineligible).serveChats()).isFalse();
+        }
+        assertThatThrownBy(() -> service.requireChatShop(null, 100)).isInstanceOf(AccessDeniedException.class);
+        assertThatThrownBy(() -> service.lockChatShop(null, 100)).isInstanceOf(AccessDeniedException.class);
+        assertThat(MerchantCapabilities.from(null).any()).isFalse();
+        verifyNoInteractions(repository);
+    }
+
     private static CustomerPrincipal principal(AccountType type, SecurityPermission... permissions) {
         return new CustomerPrincipal("staff", "unused", new CustomerIdentity(999), List.of(permissions), type);
     }

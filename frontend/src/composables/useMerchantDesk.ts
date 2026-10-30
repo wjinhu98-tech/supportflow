@@ -2,6 +2,7 @@ import { computed, onScopeDispose, ref } from 'vue'
 import { ApiClient, ApiError } from '../api/client'
 import type { AccountCapabilities, AfterSaleTicket, MerchantShop } from '../types'
 import { useMerchantKnowledge } from './useMerchantKnowledge'
+import { useMerchantSupport } from './useMerchantSupport'
 
 /** Merchant-only workflow. The server's current authorization is authoritative on every request. */
 export function useMerchantDesk() {
@@ -9,10 +10,15 @@ export function useMerchantDesk() {
   const connected = ref(false)
   const connecting = ref(false)
   const loginError = ref<string | null>(null)
-  const capabilities = ref<AccountCapabilities>({ reviewAfterSales: false, manageKnowledge: false })
-  const activeModule = ref<'after-sales' | 'knowledge'>('after-sales')
+  const capabilities = ref<AccountCapabilities>({
+    reviewAfterSales: false,
+    manageKnowledge: false,
+    serveChats: false,
+  })
+  const activeModule = ref<'after-sales' | 'knowledge' | 'support'>('after-sales')
   const canReviewAfterSales = computed(() => connected.value && capabilities.value.reviewAfterSales)
   const canManageKnowledge = computed(() => connected.value && capabilities.value.manageKnowledge)
+  const canServeChats = computed(() => connected.value && capabilities.value.serveChats === true)
   const shops = ref<MerchantShop[]>([])
   const shopId = ref('')
   const selectedShop = computed(() => shops.value.find((shop) => String(shop.id) === shopId.value))
@@ -35,9 +41,17 @@ export function useMerchantDesk() {
     submitting,
     report,
   })
+  const support = useMerchantSupport({
+    client: () => client,
+    scope: () => `${connected.value}/${username.value}/${shopId.value}`,
+    shop: () => shopId.value,
+    allowed: () => canServeChats.value && !!selectedShop.value && activeModule.value === 'support',
+    report,
+  })
   const navigationBlocked = computed(
     () =>
       submitting.value ||
+      support.supportSubmitting.value ||
       knowledge.knowledgeDirty.value ||
       knowledge.knowledgeImportOpen.value ||
       knowledge.knowledgeNeedsVerification.value,
@@ -60,6 +74,7 @@ export function useMerchantDesk() {
     error.value = null
     needsVerification.value = false
     knowledge.resetKnowledge()
+    support.resetSupport()
   }
 
   function resetAccount() {
@@ -76,7 +91,7 @@ export function useMerchantDesk() {
     shops.value = []
     shopId.value = ''
     loginError.value = null
-    capabilities.value = { reviewAfterSales: false, manageKnowledge: false }
+    capabilities.value = { reviewAfterSales: false, manageKnowledge: false, serveChats: false }
     activeModule.value = 'after-sales'
   }
 
@@ -134,7 +149,9 @@ export function useMerchantDesk() {
         throw new ApiError('这是买家账号，请使用用户端登录。', 0, 'WRONG_ACCOUNT_TYPE')
       }
       const granted =
-        identity.capabilities.reviewAfterSales || identity.capabilities.manageKnowledge
+        identity.capabilities.reviewAfterSales ||
+        identity.capabilities.manageKnowledge ||
+        identity.capabilities.serveChats === true
           ? await candidate.merchantShops(signal)
           : []
       if (signal.aborted) return false
@@ -143,7 +160,11 @@ export function useMerchantDesk() {
       username.value = identity.username
       shops.value = granted
       capabilities.value = identity.capabilities
-      activeModule.value = identity.capabilities.reviewAfterSales ? 'after-sales' : 'knowledge'
+      activeModule.value = identity.capabilities.reviewAfterSales
+        ? 'after-sales'
+        : identity.capabilities.manageKnowledge
+          ? 'knowledge'
+          : 'support'
       connected.value = true
       connecting.value = false
       if (granted[0]) await changeShop(String(granted[0].id))
@@ -172,23 +193,24 @@ export function useMerchantDesk() {
     resetShop()
     shopId.value = nextId
     if (activeModule.value === 'after-sales') await loadReviews('pending')
-    else {
+    else if (activeModule.value === 'knowledge') {
       await knowledge.loadKnowledge()
       await knowledge.loadKnowledgeIndex()
     }
   }
 
-  async function switchModule(next: 'after-sales' | 'knowledge') {
+  async function switchModule(next: 'after-sales' | 'knowledge' | 'support') {
     if (navigationBlocked.value || !connected.value || activeModule.value === next) return
     if (
       (next === 'after-sales' && !canReviewAfterSales.value) ||
-      (next === 'knowledge' && !canManageKnowledge.value)
+      (next === 'knowledge' && !canManageKnowledge.value) ||
+      (next === 'support' && !canServeChats.value)
     )
       return
     resetShop()
     activeModule.value = next
     if (next === 'after-sales') await loadReviews('pending')
-    else {
+    else if (next === 'knowledge') {
       await knowledge.loadKnowledge()
       await knowledge.loadKnowledgeIndex()
     }
@@ -326,10 +348,12 @@ export function useMerchantDesk() {
 
   return {
     ...knowledge,
+    ...support,
     capabilities,
     activeModule,
     canReviewAfterSales,
     canManageKnowledge,
+    canServeChats,
     navigationBlocked,
     switchModule,
     username,

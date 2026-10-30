@@ -67,4 +67,17 @@ public class OrderController {
         OrderPage page = orderQueryService.listOwnedOrders(principal.getIdentity(), afterId, size);
         return OrderPageResponse.from(page);
     }
+
+    /** Read-only shop browsing remains available while a human is handling the chat. */
+    @GetMapping("/shops/{shopId}/orders")
+    public OrderPageResponse listOwnedOrdersInShop(
+            @AuthenticationPrincipal(errorOnInvalidType = true) CustomerPrincipal principal,
+            @PathVariable @Positive long shopId,
+            @RequestParam(defaultValue = "0") @Min(0) long afterId,
+            @RequestParam(defaultValue = "" + OrderQueryLimits.DEFAULT_PAGE_SIZE)
+            @Min(1) @Max(OrderQueryLimits.MAX_PAGE_SIZE) int size
+    ) {
+        return OrderPageResponse.from(orderQueryService.listOwnedOrdersInShop(
+                principal.getIdentity(), shopId, afterId, size));
+    }
 }

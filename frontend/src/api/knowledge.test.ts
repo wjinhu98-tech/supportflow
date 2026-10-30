@@ -35,7 +35,7 @@ describe('knowledge API contract', () => {
     const me = {
       username: 'editor',
       accountType: 'MERCHANT_STAFF',
-      capabilities: { reviewAfterSales: false, manageKnowledge: true },
+      capabilities: { reviewAfterSales: false, manageKnowledge: true, serveChats: false },
     }
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(json(me))
     expect(await new ApiClient('editor', 'test', fetcher).currentAccount()).toEqual(me)

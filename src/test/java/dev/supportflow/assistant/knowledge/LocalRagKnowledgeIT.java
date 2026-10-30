@@ -3,6 +3,7 @@ package dev.supportflow.assistant.knowledge;
 import dev.supportflow.SupportFlowApplication;
 import dev.supportflow.testsupport.KnowledgeFixtures;
 import dev.supportflow.testsupport.OrderVisibilityFixtures;
+import dev.supportflow.testsupport.HumanSupportFixtures;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -82,6 +83,7 @@ class LocalRagKnowledgeIT {
             create.setString(1, DB_PASSWORD); create.execute();
             KnowledgeFixtures.grantRead(connection, "rag_test", "rag_reader");
             OrderVisibilityFixtures.grantRead(connection, "rag_test", "rag_reader");
+            HumanSupportFixtures.grantAiAdmission(connection, "rag_test", "rag_reader");
             try (var grant = connection.createStatement()) {
                 grant.execute("GRANT SELECT,INSERT ON rag_test.support_knowledge_vector TO 'rag_reader'@'%'");
             }

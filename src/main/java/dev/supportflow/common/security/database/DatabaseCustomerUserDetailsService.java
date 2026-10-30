@@ -26,6 +26,7 @@ public final class DatabaseCustomerUserDetailsService implements UserDetailsServ
             if (row.getBoolean("order_confirm_receipt")) permissions.add(SecurityPermission.ORDER_CONFIRM_RECEIPT);
             if (row.getBoolean("after_sale_review")) permissions.add(SecurityPermission.AFTER_SALE_REVIEW);
             if (row.getBoolean("knowledge_manage")) permissions.add(SecurityPermission.KNOWLEDGE_MANAGE);
+            if (row.getBoolean("chat_support")) permissions.add(SecurityPermission.CHAT_SUPPORT);
             return new CustomerPrincipal(row.getString("username"), row.getString("password_hash"),
                     new CustomerIdentity(row.getLong("principal_id")), permissions,
                     AccountType.valueOf(row.getString("account_type")), row.getLong("security_version"),

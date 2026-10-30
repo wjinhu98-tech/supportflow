@@ -34,6 +34,19 @@ public class MerchantAccessService {
                 .orElseThrow(MerchantAccessService::denied);
     }
 
+    public MerchantShopAccess requireChatShop(CustomerPrincipal principal, long shopId) {
+        if (!MerchantCapabilities.from(principal).serveChats()) throw denied();
+        return repository.find(principal.getUsername(), principal.getIdentity().buyerId(), shopId, false)
+                .orElseThrow(MerchantAccessService::denied);
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public MerchantShopAccess lockChatShop(CustomerPrincipal principal, long shopId) {
+        if (!MerchantCapabilities.from(principal).serveChats()) throw denied();
+        return repository.find(principal.getUsername(), principal.getIdentity().buyerId(), shopId, true)
+                .orElseThrow(MerchantAccessService::denied);
+    }
+
     @Transactional(propagation = Propagation.MANDATORY)
     public MerchantShopAccess lockKnowledgeShop(CustomerPrincipal principal, long shopId) {
         if (!MerchantCapabilities.from(principal).manageKnowledge()) throw denied();

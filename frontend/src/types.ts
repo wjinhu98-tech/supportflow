@@ -21,6 +21,11 @@ export interface Order {
   itemKinds?: number
 }
 
+export interface OrderPage {
+  items: Order[]
+  nextAfterId: number | null
+}
+
 export interface ReceiptConfirmation {
   order: Order & { receivedAt: string; status: 'COMPLETED' }
   alreadyConfirmed: boolean
@@ -82,6 +87,7 @@ export interface ChatMessage {
   /** Restored order cards are immutable historical snapshots, never current business state. */
   historical?: boolean
   pending?: boolean
+  human?: boolean
 }
 
 export interface Conversation {
@@ -175,6 +181,39 @@ export interface CurrentAccount {
 export interface AccountCapabilities {
   reviewAfterSales: boolean
   manageKnowledge: boolean
+  serveChats?: boolean
+}
+
+export interface SupportSession {
+  id: string
+  status: 'WAITING' | 'ACTIVE' | 'CLOSED'
+  assigned: boolean
+  assignedToMe: boolean
+  createdAt: string
+  updatedAt: string
+  closedAt: string | null
+}
+
+export interface SupportMessage {
+  id: string
+  clientMessageId: string
+  role: 'BUYER' | 'STAFF'
+  text: string
+  createdAt: string
+}
+
+export interface SupportMessagePage {
+  messages: SupportMessage[]
+  nextBeforeId: string | null
+}
+
+export interface SupportSnapshot extends SupportMessagePage {
+  session: SupportSession | null
+}
+
+export interface SupportSessionPage {
+  items: SupportSession[]
+  nextBeforeId: string | null
 }
 
 export interface MerchantShop {

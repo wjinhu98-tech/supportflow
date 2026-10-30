@@ -493,12 +493,13 @@ test('real buyer deletion hides an ended order across reads and reconnect while 
   expect(productAfter.type).not.toBe('ORDER_DETAILS')
   const refresh = page.waitForResponse(
     (response) =>
-      response.request().method() === 'POST' &&
-      new URL(response.url()).pathname === '/api/v1/shops/100/chat/messages' &&
-      response.request().postDataJSON()?.message === '我的订单',
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/v1/shops/100/orders',
   )
   await page.getByRole('button', { name: '刷新订单', exact: true }).click()
-  expect((await refresh).status()).toBe(200)
+  const refreshed = await refresh
+  expect(refreshed.status()).toBe(200)
+  expect((await refreshed.json()).items).toEqual([])
   await expect(panel.getByTestId('order-card')).toHaveCount(0)
   const historyAfter = await page.request.get(historyPath, { headers })
   expect(historyAfter.status()).toBe(200)

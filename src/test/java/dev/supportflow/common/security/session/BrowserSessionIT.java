@@ -85,6 +85,13 @@ class BrowserSessionIT {
         operator = new JdbcTemplate(new DriverManagerDataSource(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword()));
         operator.execute("CREATE USER 'session_reader'@'%' IDENTIFIED BY '" + READER_PASSWORD + "'");
         operator.execute("GRANT SELECT ON browser_session_test.support_security_account TO 'session_reader'@'%'");
+        operator.update("INSERT INTO support_merchant (id, name) VALUES (1, 'Browser test merchant')");
+        operator.update("INSERT INTO support_merchant_shop (shop_id, merchant_id, name) VALUES (700, 1, 'Browser test shop')");
+        operator.update("""
+                INSERT INTO support_merchant_staff (id, merchant_id, username, linked_buyer_id)
+                VALUES (1, 1, 'browser-merchant', 700)
+                """);
+        operator.update("INSERT INTO support_merchant_staff_shop_grant (staff_id, shop_id, enabled) VALUES (1, 700, TRUE)");
         prepared = true;
     }
 
@@ -95,9 +102,14 @@ class BrowserSessionIT {
                 account("browser-buyer", AccountType.BUYER, 200, Set.of(SecurityPermission.ORDER_READ)),
                 account("browser-merchant", AccountType.MERCHANT_STAFF, 700, Set.of(SecurityPermission.KNOWLEDGE_MANAGE))));
         operator.update("""
-                UPDATE support_security_account SET enabled = TRUE, password_hash = ?, security_version = security_version + 1
+                UPDATE support_security_account SET enabled = TRUE, password_hash = ?, chat_support = FALSE,
+                  security_version = security_version + 1
                 WHERE username IN ('browser-buyer', 'browser-merchant')
                 """, PASSWORD_HASH);
+        operator.update("UPDATE support_merchant SET status = 'ACTIVE' WHERE id = 1");
+        operator.update("UPDATE support_merchant_shop SET status = 'ACTIVE', merchant_id = 1 WHERE shop_id = 700");
+        operator.update("UPDATE support_merchant_staff SET status = 'ACTIVE', linked_buyer_id = 700 WHERE id = 1");
+        operator.update("UPDATE support_merchant_staff_shop_grant SET enabled = TRUE WHERE staff_id = 1 AND shop_id = 700");
     }
 
     @Test void authenticatesWithRotatedSessionAndNoPasswordOrInternalIdentityInResponse() throws Exception {
@@ -215,6 +227,70 @@ class BrowserSessionIT {
                 .isInstanceOf(DataAccessException.class);
         assertThatThrownBy(() -> new DatabaseAccountAdministration(runtime).invalidateSessions("browser-buyer"))
                 .isInstanceOf(DataAccessException.class);
+    }
+
+    @Test void chatPermissionIsExplicitAndEnablingItRevokesOldSessionsExactlyOnce() throws Exception {
+        var session = login("browser-merchant", PASSWORD);
+        mvc.perform(get("/api/v1/security/me").session(session)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.capabilities.manageKnowledge").value(true))
+                .andExpect(jsonPath("$.capabilities.serveChats").value(false));
+        mvc.perform(get("/api/v1/merchant/shops/700/support-sessions").session(session))
+                .andExpect(status().isForbidden());
+        long before = securityVersion("browser-merchant");
+        assertThat(accounts.enableChatSupport("browser-merchant")).isTrue();
+        assertThat(securityVersion("browser-merchant")).isEqualTo(before + 1);
+        assertThat(accounts.enableChatSupport("browser-merchant")).isFalse();
+        assertThat(securityVersion("browser-merchant")).isEqualTo(before + 1);
+        mvc.perform(get("/api/v1/security/me").session(session)).andExpect(status().isUnauthorized());
+        var refreshed = login("browser-merchant", PASSWORD);
+        mvc.perform(get("/api/v1/security/me").session(refreshed)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.capabilities.serveChats").value(true));
+        assertThatThrownBy(() -> new DatabaseAccountAdministration(runtime).enableChatSupport("browser-merchant"))
+                .isInstanceOf(DataAccessException.class);
+    }
+
+    @Test void chatEnableRequiresExistingMerchantAccountAndCurrentCompleteShopBinding() {
+        long before = securityVersion("browser-merchant");
+        assertThat(accounts.enableChatSupport("missing-account")).isFalse();
+        assertThat(accounts.enableChatSupport("browser-buyer")).isFalse();
+        operator.update("UPDATE support_security_account SET enabled = FALSE WHERE username = 'browser-merchant'");
+        assertThat(accounts.enableChatSupport("browser-merchant")).isFalse();
+        operator.update("UPDATE support_security_account SET enabled = TRUE WHERE username = 'browser-merchant'");
+        operator.update("UPDATE support_merchant_staff SET linked_buyer_id = 701 WHERE id = 1");
+        assertThat(accounts.enableChatSupport("browser-merchant")).isFalse();
+        operator.update("UPDATE support_merchant_staff SET linked_buyer_id = 700, status = 'DISABLED' WHERE id = 1");
+        assertThat(accounts.enableChatSupport("browser-merchant")).isFalse();
+        operator.update("UPDATE support_merchant_staff SET status = 'ACTIVE' WHERE id = 1");
+        operator.update("UPDATE support_merchant SET status = 'DISABLED' WHERE id = 1");
+        assertThat(accounts.enableChatSupport("browser-merchant")).isFalse();
+        operator.update("UPDATE support_merchant SET status = 'ACTIVE' WHERE id = 1");
+        operator.update("UPDATE support_merchant_shop SET status = 'DISABLED' WHERE shop_id = 700");
+        assertThat(accounts.enableChatSupport("browser-merchant")).isFalse();
+        operator.update("UPDATE support_merchant_shop SET status = 'ACTIVE', merchant_id = 2 WHERE shop_id = 700");
+        assertThat(accounts.enableChatSupport("browser-merchant")).isFalse();
+        operator.update("UPDATE support_merchant_shop SET merchant_id = 1 WHERE shop_id = 700");
+        operator.update("UPDATE support_merchant_staff_shop_grant SET enabled = FALSE WHERE staff_id = 1 AND shop_id = 700");
+        assertThat(accounts.enableChatSupport("browser-merchant")).isFalse();
+        assertThat(securityVersion("browser-merchant")).isEqualTo(before);
+    }
+
+    @Test void bootstrapCopiesExplicitChatPermissionWithoutExpandingExistingAccounts() throws Exception {
+        assertThat(accounts.importMissingConfiguredAccounts(List.of(account("browser-merchant", AccountType.MERCHANT_STAFF,
+                700, Set.of(SecurityPermission.CHAT_SUPPORT))))).isZero();
+        var existing = login("browser-merchant", PASSWORD);
+        mvc.perform(get("/api/v1/security/me").session(existing)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.capabilities.manageKnowledge").value(true))
+                .andExpect(jsonPath("$.capabilities.serveChats").value(false));
+        assertThat(accounts.importMissingConfiguredAccounts(List.of(account("browser-configured-chat", AccountType.MERCHANT_STAFF,
+                701, Set.of(SecurityPermission.CHAT_SUPPORT))))).isEqualTo(1);
+        var configured = login("browser-configured-chat", PASSWORD);
+        mvc.perform(get("/api/v1/security/me").session(configured)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.capabilities.manageKnowledge").value(false))
+                .andExpect(jsonPath("$.capabilities.serveChats").value(true));
+    }
+
+    private long securityVersion(String username) {
+        return operator.queryForObject("SELECT security_version FROM support_security_account WHERE username = ?", Long.class, username);
     }
 
     private MockHttpSession login(String username, String password) throws Exception {

@@ -1,5 +1,6 @@
 import { onScopeDispose, ref, watch } from 'vue'
 import { ApiClient, ApiError, validShopId } from '../api/client'
+import { useSupportChannel } from './useSupportChannel'
 import type {
   AfterSaleEligibility,
   AfterSaleTicket,
@@ -78,6 +79,108 @@ export function useSupportDesk() {
   let connectingClient: ApiClient | null = null
   let context = new AbortController()
   let messageId = 0
+  const humanVisible = ref(true)
+  const humanRequesting = ref(false)
+  const humanRequestUncertain = ref(false)
+  let humanRequestId: string | null = null
+  const human = useSupportChannel({
+    scope: () =>
+      `${connected.value}/${username.value}/${shopId.value}/${activeConversation.value?.id ?? ''}`,
+    enabled: () => !!client && connected.value && !!activeConversation.value,
+    visible: () => humanVisible.value,
+    read: (signal, beforeId) =>
+      beforeId
+        ? client!.supportMessages(shopId.value, activeConversation.value!.id, beforeId, signal)
+        : client!.supportSnapshot(shopId.value, activeConversation.value!.id, signal),
+    send: (sessionId, id, text, signal) =>
+      client!.sendSupportMessage(
+        shopId.value,
+        activeConversation.value!.id,
+        sessionId,
+        id,
+        text,
+        signal,
+      ),
+    close: (sessionId, signal) =>
+      client!.closeSupport(shopId.value, activeConversation.value!.id, sessionId, signal),
+    canWrite: () => true,
+    onError: (failure, signal) => {
+      if (failure instanceof ApiError && failure.status === 401) report(failure, signal)
+    },
+    onClosed: () => {
+      selectedOrder.value = null
+      resetConversationContext()
+    },
+  })
+  watch(
+    () =>
+      `${connected.value}/${username.value}/${shopId.value}/${activeConversation.value?.id ?? ''}`,
+    () => {
+      humanRequestId = null
+      humanRequesting.value = false
+      humanRequestUncertain.value = false
+    },
+    { flush: 'sync' },
+  )
+  watch(
+    human.active,
+    (active) => {
+      if (active) {
+        humanRequestUncertain.value = false
+        humanRequestId = null
+      }
+    },
+    { flush: 'sync' },
+  )
+
+  async function requestHumanSupport() {
+    if (
+      !client ||
+      !connected.value ||
+      busy.value ||
+      humanRequesting.value ||
+      human.submitting.value ||
+      conversationsLoading.value ||
+      historyLoading.value ||
+      businessWriteInProgress()
+    )
+      return
+    const signal = context.signal
+    humanRequesting.value = true
+    try {
+      if (!activeConversation.value) {
+        const conversation = await client.openShopWindow(shopId.value, signal)
+        if (signal.aborted) return
+        activeConversation.value = conversation
+        humanRequesting.value = true
+      }
+      await human.refresh()
+      if (signal.aborted || !human.ready.value || human.active.value) return
+      humanRequestId ??= crypto.randomUUID()
+      const result = await client.requestSupport(
+        shopId.value,
+        activeConversation.value!.id,
+        humanRequestId,
+        signal,
+      )
+      if (signal.aborted) return
+      human.accept(result)
+      humanRequestId = null
+      humanRequestUncertain.value = false
+      selectedOrder.value = null
+      resetConversationContext()
+      human.error.value = null
+    } catch (failure) {
+      if (!signal.aborted) {
+        humanRequestUncertain.value = true
+        human.error.value = '联系人工的结果暂无法确认，请刷新记录核实。再次联系会核实同一次请求。'
+        if (failure instanceof ApiError && failure.status === 401) report(failure, signal)
+        if (failure instanceof ApiError && failure.status === 409) await human.refresh()
+      }
+    } finally {
+      if (!signal.aborted) humanRequesting.value = false
+    }
+  }
 
   function expireConversationContext() {
     contextExpired.value = true
@@ -256,18 +359,12 @@ export function useSupportDesk() {
     ordersBusy.value = true
     error.value = null
     try {
-      const response = await client.chat(
-        activeShop,
-        cursor === null ? '我的订单' : `我的订单 ${cursor}`,
-        undefined,
-        signal,
-      )
+      const response = await client.shopOrders(activeShop, cursor, signal)
       if (signal.aborted) return
-      if (response.type !== 'ORDER_SELECTION') throw new ApiError('订单列表响应格式不正确。')
       if (response.nextAfterId !== null && cursor !== null && response.nextAfterId <= cursor) {
         throw new ApiError('分页游标没有前进，请刷新订单后重试。')
       }
-      const items = loadMore ? [...orders.value, ...response.orders] : response.orders
+      const items = loadMore ? [...orders.value, ...response.items] : response.items
       orders.value = Array.from(
         new Map(
           items.filter((order) => !isOrderDeleted(order)).map((order) => [order.orderNo, order]),
@@ -423,7 +520,7 @@ export function useSupportDesk() {
   async function sendMessage(text: string, orderNo?: string) {
     const message = text.trim()
     if (!message) return
-    if (message.length > 1000) {
+    if (message.length > (human.active.value ? 2000 : 1000)) {
       error.value = '消息不能超过 1000 个字符。'
       return
     }
@@ -433,6 +530,8 @@ export function useSupportDesk() {
     }
     if (
       busy.value ||
+      humanRequesting.value ||
+      human.submitting.value ||
       historyLoading.value ||
       conversationsLoading.value ||
       receiptSubmitting.value ||
@@ -442,6 +541,23 @@ export function useSupportDesk() {
       return
     const signal = AbortSignal.any([context.signal, conversationRequest.signal])
     const activeShop = shopId.value
+    const activeClient = client
+    if (activeConversation.value) {
+      if (!human.ready.value) await human.refresh()
+      if (signal.aborted || client !== activeClient) return
+      if (!human.ready.value || humanRequestUncertain.value) {
+        human.error.value = '请先刷新人工服务状态，确认后再发送消息。'
+        return
+      }
+      if (human.active.value) {
+        if (orderNo) {
+          human.error.value = '人工服务期间，请直接说明订单和问题。'
+          return
+        }
+        await human.send(message)
+        return
+      }
+    }
     const selected = orderNo ?? selectedOrder.value?.orderNo
     if (selected && deletedOrderKeys.value.has(`${activeShop}/${selected}`)) {
       error.value = '这笔订单已从你的订单记录中删除。'
@@ -461,11 +577,11 @@ export function useSupportDesk() {
     try {
       let conversation = activeConversation.value
       if (!conversation) {
-        conversation = await client.openShopWindow(activeShop, signal)
+        conversation = await activeClient.openShopWindow(activeShop, signal)
         if (signal.aborted) return
         upsertConversation(conversation)
       }
-      const result = await client.sendConversationMessage(
+      const result = await activeClient.sendConversationMessage(
         activeShop,
         conversation.id,
         clientMessageId,
@@ -496,6 +612,7 @@ export function useSupportDesk() {
     } catch (failure) {
       report(failure, signal)
       if (!signal.aborted && connected.value) {
+        if (failure instanceof ApiError && failure.status === 409) await human.refresh()
         messages.value = messages.value.filter((item) => item.id !== clientMessageId)
         if (
           failure instanceof ApiError &&
@@ -525,6 +642,22 @@ export function useSupportDesk() {
       order.shopId !== Number(shopId.value)
     )
       return
+    if (human.active.value) {
+      if (!client || ordersBusy.value) return
+      const signal = context.signal
+      const sessionId = human.session.value?.id
+      ordersBusy.value = true
+      try {
+        const current = await client.getShopOrder(shopId.value, order.orderNo, signal)
+        if (!signal.aborted && human.active.value && human.session.value?.id === sessionId)
+          selectedOrder.value = current
+      } catch (failure) {
+        report(failure, signal)
+      } finally {
+        if (!signal.aborted) ordersBusy.value = false
+      }
+      return
+    }
     // Re-query ownership and state before treating a historical snapshot as current.
     selectedOrder.value = null
     // A candidate can continue only these two reads; never replay the user's original text.
@@ -539,6 +672,11 @@ export function useSupportDesk() {
       !client ||
       !connected.value ||
       !activeConversation.value ||
+      !human.ready.value ||
+      human.active.value ||
+      humanRequesting.value ||
+      humanRequestUncertain.value ||
+      human.submitting.value ||
       busy.value ||
       historyLoading.value ||
       conversationsLoading.value ||
@@ -558,6 +696,7 @@ export function useSupportDesk() {
     } catch (failure) {
       if (!signal.aborted) {
         report(failure, signal)
+        if (failure instanceof ApiError && failure.status === 409) await human.refresh()
         if (!(failure instanceof ApiError) || ![400, 403, 404, 409].includes(failure.status))
           error.value = '删除结果暂时无法确认，请刷新对话核实，不会自动重复删除。'
       }
@@ -1004,6 +1143,23 @@ export function useSupportDesk() {
   })
 
   return {
+    humanSession: human.session,
+    humanMessages: human.messages,
+    humanNextBeforeId: human.nextBeforeId,
+    humanLoading: human.loading,
+    humanSubmitting: human.submitting,
+    humanReady: human.ready,
+    humanError: human.error,
+    humanActive: human.active,
+    humanUncertainMessage: human.uncertainMessage,
+    humanUncertainClose: human.uncertainClose,
+    humanVisible,
+    humanRequesting,
+    humanRequestUncertain,
+    refreshHumanSupport: human.refresh,
+    retryHumanMessage: () => human.send('', true),
+    closeHumanSupport: human.close,
+    requestHumanSupport,
     activeConversation,
     shopOptions,
     shopDirectoryError,

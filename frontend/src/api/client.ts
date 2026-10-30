@@ -23,7 +23,13 @@ import type {
   KnowledgePage,
   KnowledgeAuditPage,
   Order,
+  OrderPage,
   ReceiptConfirmation,
+  SupportSession,
+  SupportMessage,
+  SupportSnapshot,
+  SupportMessagePage,
+  SupportSessionPage,
 } from '../types'
 import {
   validKnowledgeArticle,
@@ -248,6 +254,58 @@ const reviewIdPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-
 
 function nullableString(value: unknown): boolean {
   return value === null || typeof value === 'string'
+}
+
+function parseSupportSession(value: unknown): SupportSession {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== 'string' ||
+    !reviewIdPattern.test(value.id) ||
+    !['WAITING', 'ACTIVE', 'CLOSED'].includes(String(value.status)) ||
+    typeof value.assigned !== 'boolean' ||
+    typeof value.assignedToMe !== 'boolean' ||
+    !isTimestamp(value.createdAt) ||
+    !isTimestamp(value.updatedAt) ||
+    !(value.closedAt === null || isTimestamp(value.closedAt)) ||
+    (value.assignedToMe && !value.assigned)
+  )
+    throw new ApiError('人工服务信息不完整，请刷新后重试。', 0, 'INVALID_RESPONSE')
+  return value as unknown as SupportSession
+}
+
+function parseSupportMessage(value: unknown): SupportMessage {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== 'string' ||
+    !reviewIdPattern.test(value.id) ||
+    typeof value.clientMessageId !== 'string' ||
+    !reviewIdPattern.test(value.clientMessageId) ||
+    !['BUYER', 'STAFF'].includes(String(value.role)) ||
+    typeof value.text !== 'string' ||
+    !value.text.trim() ||
+    value.text.length > 2000 ||
+    !isTimestamp(value.createdAt)
+  )
+    throw new ApiError('人工消息格式不正确，请刷新后核实。', 0, 'INVALID_RESPONSE')
+  return value as unknown as SupportMessage
+}
+
+function parseSupportPage(value: unknown): SupportMessagePage {
+  if (!isRecord(value) || !Array.isArray(value.messages) || value.messages.length > 30)
+    throw new ApiError('人工记录格式不正确，请刷新后核实。', 0, 'INVALID_RESPONSE')
+  const messages = value.messages.map(parseSupportMessage)
+  if (new Set(messages.map((item) => item.id)).size !== messages.length)
+    throw new ApiError('人工记录重复，请刷新后核实。', 0, 'INVALID_RESPONSE')
+  return { messages, nextBeforeId: parseCursor(value.nextBeforeId) }
+}
+
+function parseSupportSnapshot(value: unknown, expectedSessionId?: string): SupportSnapshot {
+  const page = parseSupportPage(value)
+  const session = (value as Record<string, unknown>).session
+  const parsed = session === null ? null : parseSupportSession(session)
+  if (expectedSessionId && parsed?.id !== expectedSessionId)
+    throw new ApiError('人工服务记录不匹配，请刷新后核实。', 0, 'INVALID_RESPONSE')
+  return { ...page, session: parsed }
 }
 
 function isTimestamp(value: unknown): value is string {
@@ -537,7 +595,9 @@ export class ApiClient {
       !['BUYER', 'MERCHANT_STAFF'].includes(String(data.accountType)) ||
       !isRecord(data.capabilities) ||
       typeof data.capabilities.reviewAfterSales !== 'boolean' ||
-      typeof data.capabilities.manageKnowledge !== 'boolean'
+      typeof data.capabilities.manageKnowledge !== 'boolean' ||
+      (data.capabilities.serveChats !== undefined &&
+        typeof data.capabilities.serveChats !== 'boolean')
     )
       throw new ApiError('无法确认账号身份，请重新登录。', 0, 'INVALID_RESPONSE')
     return {
@@ -546,6 +606,7 @@ export class ApiClient {
       capabilities: {
         reviewAfterSales: data.capabilities.reviewAfterSales,
         manageKnowledge: data.capabilities.manageKnowledge,
+        serveChats: data.capabilities.serveChats === true,
       },
     } as CurrentAccount
   }
@@ -1097,6 +1158,155 @@ export class ApiClient {
     })
   }
 
+  private supportPath(shopId: string, conversationId?: string): string {
+    if (!validShopId(shopId)) throw new ApiError('请选择有效的店铺。')
+    return conversationId
+      ? `${this.conversationPath(shopId)}/${this.validConversationId(conversationId)}/support`
+      : `/api/v1/merchant/shops/${shopId}/support-sessions`
+  }
+
+  private supportWrite(
+    path: string,
+    body: object | undefined,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    return this.queued(async () => {
+      if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
+      const csrf = await this.getCsrf(signal)
+      return this.request(
+        path,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', [csrf.headerName]: csrf.token },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+        },
+        signal,
+      )
+    })
+  }
+
+  async supportSnapshot(
+    shopId: string,
+    conversationId: string,
+    signal?: AbortSignal,
+  ): Promise<SupportSnapshot> {
+    return parseSupportSnapshot(
+      await this.queued(() =>
+        this.request(this.supportPath(shopId, conversationId), { method: 'GET' }, signal),
+      ),
+    )
+  }
+
+  async requestSupport(
+    shopId: string,
+    conversationId: string,
+    requestId: string,
+    signal?: AbortSignal,
+  ): Promise<SupportSnapshot> {
+    this.validConversationId(requestId)
+    return parseSupportSnapshot(
+      await this.supportWrite(this.supportPath(shopId, conversationId), { requestId }, signal),
+    )
+  }
+
+  async supportMessages(
+    shopId: string,
+    conversationId: string,
+    beforeId: string,
+    signal?: AbortSignal,
+  ): Promise<SupportMessagePage> {
+    const path = `${this.supportPath(shopId, conversationId)}/messages?beforeId=${this.validConversationId(beforeId)}`
+    return parseSupportPage(await this.queued(() => this.request(path, { method: 'GET' }, signal)))
+  }
+
+  async sendSupportMessage(
+    shopId: string,
+    conversationId: string | null,
+    sessionId: string,
+    clientMessageId: string,
+    text: string,
+    signal?: AbortSignal,
+  ): Promise<SupportMessage> {
+    this.validConversationId(clientMessageId)
+    if (!text.trim() || text.length > 2000) throw new ApiError('请输入 1–2000 字的消息。')
+    const path = `${this.supportPath(shopId, conversationId ?? undefined)}/${this.validConversationId(sessionId)}/messages`
+    const message = parseSupportMessage(
+      await this.supportWrite(path, { clientMessageId, text }, signal),
+    )
+    if (
+      message.clientMessageId !== clientMessageId ||
+      message.text !== text ||
+      message.role !== (conversationId ? 'BUYER' : 'STAFF')
+    )
+      throw new ApiError('消息结果暂无法确认，请刷新记录核实。', 0, 'INVALID_RESPONSE')
+    return message
+  }
+
+  async closeSupport(
+    shopId: string,
+    conversationId: string | null,
+    sessionId: string,
+    signal?: AbortSignal,
+  ): Promise<SupportSnapshot> {
+    return parseSupportSnapshot(
+      await this.supportWrite(
+        `${this.supportPath(shopId, conversationId ?? undefined)}/${this.validConversationId(sessionId)}/close`,
+        undefined,
+        signal,
+      ),
+      sessionId,
+    )
+  }
+
+  async supportSessions(
+    shopId: string,
+    status: SupportSession['status'],
+    beforeId: string | null,
+    signal?: AbortSignal,
+  ): Promise<SupportSessionPage> {
+    const path = `${this.supportPath(shopId)}?status=${status}${beforeId ? `&beforeId=${this.validConversationId(beforeId)}` : ''}`
+    const data = await this.queued(() => this.request(path, { method: 'GET' }, signal))
+    if (!isRecord(data) || !Array.isArray(data.items) || data.items.length > 30)
+      throw new ApiError('接待列表格式不正确，请刷新后重试。', 0, 'INVALID_RESPONSE')
+    return {
+      items: data.items.map(parseSupportSession),
+      nextBeforeId: parseCursor(data.nextBeforeId),
+    }
+  }
+
+  async merchantSupportSnapshot(
+    shopId: string,
+    sessionId: string,
+    signal?: AbortSignal,
+    beforeId?: string,
+  ): Promise<SupportSnapshot> {
+    return parseSupportSnapshot(
+      await this.queued(() =>
+        this.request(
+          `${this.supportPath(shopId)}/${this.validConversationId(sessionId)}${beforeId ? `?beforeId=${this.validConversationId(beforeId)}` : ''}`,
+          { method: 'GET' },
+          signal,
+        ),
+      ),
+      sessionId,
+    )
+  }
+
+  async claimSupport(
+    shopId: string,
+    sessionId: string,
+    signal?: AbortSignal,
+  ): Promise<SupportSnapshot> {
+    return parseSupportSnapshot(
+      await this.supportWrite(
+        `${this.supportPath(shopId)}/${this.validConversationId(sessionId)}/claim`,
+        undefined,
+        signal,
+      ),
+      sessionId,
+    )
+  }
+
   private conversationPath(shopId: string): string {
     if (!validShopId(shopId)) throw new ApiError('店铺 ID 必须为有效的正整数。')
     return `/api/v1/shops/${shopId}/chat/conversations`
@@ -1105,6 +1315,54 @@ export class ApiClient {
   private validConversationId(id: string): string {
     if (!reviewIdPattern.test(id)) throw new ApiError('咨询记录编号格式不正确。')
     return id
+  }
+
+  async getShopOrder(shopId: string, orderNo: string, signal?: AbortSignal): Promise<Order> {
+    this.validateOrderTarget(shopId, orderNo)
+    const data = await this.queued(() =>
+      this.request(
+        `/api/v1/shops/${shopId}/orders/${encodeURIComponent(orderNo)}`,
+        { method: 'GET' },
+        signal,
+      ),
+    )
+    if (!validOrder(data) || data.shopId !== Number(shopId) || data.orderNo !== orderNo)
+      throw new ApiError('订单详情与当前店铺不匹配，请刷新后重试。', 0, 'INVALID_RESPONSE')
+    return data
+  }
+
+  async shopOrders(
+    shopId: string,
+    afterId: number | null = null,
+    signal?: AbortSignal,
+  ): Promise<OrderPage> {
+    if (
+      !validShopId(shopId) ||
+      (afterId !== null && (!Number.isSafeInteger(afterId) || afterId < 1))
+    )
+      throw new ApiError('请选择有效的店铺和订单分页位置。')
+    const data = await this.queued(() =>
+      this.request(
+        `/api/v1/shops/${shopId}/orders?afterId=${afterId ?? 0}&size=20`,
+        { method: 'GET' },
+        signal,
+      ),
+    )
+    if (
+      !isRecord(data) ||
+      !Array.isArray(data.items) ||
+      data.items.length > 20 ||
+      !data.items.every(validOrder) ||
+      data.items.some((order) => order.shopId !== Number(shopId)) ||
+      !(
+        data.nextAfterId === null ||
+        (typeof data.nextAfterId === 'number' &&
+          Number.isSafeInteger(data.nextAfterId) &&
+          data.nextAfterId > (afterId ?? 0))
+      )
+    )
+      throw new ApiError('订单列表格式不正确，请刷新后重试。', 0, 'INVALID_RESPONSE')
+    return data as unknown as OrderPage
   }
 
   async deleteOrder(shopId: string, orderNo: string, signal?: AbortSignal): Promise<void> {

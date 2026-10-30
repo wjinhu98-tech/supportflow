@@ -2218,3 +2218,32 @@ a {
 .history-load-earlier {
   margin: 0 auto 16px;
 }
+.human-support-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 24px;
+  border-bottom: 1px solid #eee8f3;
+  color: #7f6b92;
+  font-size: 13px;
+  line-height: 1.8;
+}
+.human-support-status button {
+  border: 1px solid #ddd1e8;
+  border-radius: 7px;
+  padding: 6px 10px;
+  color: #765699;
+  background: #faf7fd;
+  font: inherit;
+  cursor: pointer;
+}
+.human-support-status button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.human-support-status p {
+  flex-basis: 100%;
+  margin: 0;
+  overflow-wrap: anywhere;
+}

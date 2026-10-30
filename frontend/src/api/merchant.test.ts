@@ -46,7 +46,7 @@ describe('merchant API boundaries', () => {
     expect(await api.currentAccount()).toEqual({
       username: 'unpredictable-name',
       accountType: 'BUYER',
-      capabilities: { reviewAfterSales: false, manageKnowledge: false },
+      capabilities: { reviewAfterSales: false, manageKnowledge: false, serveChats: false },
     })
     expect(request.mock.calls[0]?.[0]).toBe('/api/v1/security/me')
     expect(request.mock.calls[0]?.[1]?.method).toBe('GET')

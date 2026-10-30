@@ -76,6 +76,7 @@ public class ApiSecurityConfiguration {
                         .requestMatchers(
                                 HttpMethod.GET,
                                 "/api/v1/orders",
+                                "/api/v1/shops/*/orders",
                                 "/api/v1/shops/*/orders/*",
                                 "/api/v1/shops/*/orders/*/after-sale-eligibility",
                                 "/api/v1/shops/*/knowledge/search"
@@ -95,8 +96,10 @@ public class ApiSecurityConfiguration {
                         .requestMatchers(HttpMethod.GET, "/api/v1/merchant/shops")
                         .access((authentication, context) -> new AuthorizationDecision(
                                 authentication.get().getPrincipal() instanceof CustomerPrincipal principal
-                                        && (MerchantCapabilities.from(principal).reviewAfterSales()
-                                        || MerchantCapabilities.from(principal).manageKnowledge())))
+                                        && MerchantCapabilities.from(principal).any()))
+                        .requestMatchers("/api/v1/merchant/shops/*/support-sessions",
+                                "/api/v1/merchant/shops/*/support-sessions/**")
+                        .access(accountAccess(AccountType.MERCHANT_STAFF, SecurityPermission.CHAT_SUPPORT))
                         .requestMatchers("/api/v1/merchant/shops/*/knowledge",
                                 "/api/v1/merchant/shops/*/knowledge/**")
                         .access(accountAccess(AccountType.MERCHANT_STAFF, SecurityPermission.KNOWLEDGE_MANAGE))
@@ -127,6 +130,14 @@ public class ApiSecurityConfiguration {
                         .requestMatchers(HttpMethod.POST,
                                 "/api/v1/shops/*/chat/conversations/*/runs/*/resume")
                         .access(accountAccess(AccountType.BUYER, SecurityPermission.ORDER_READ))
+                        .requestMatchers(HttpMethod.GET,
+                                "/api/v1/shops/*/chat/conversations/*/support",
+                                "/api/v1/shops/*/chat/conversations/*/support/**")
+                        .access(accountAccess(AccountType.BUYER))
+                        .requestMatchers(HttpMethod.POST,
+                                "/api/v1/shops/*/chat/conversations/*/support",
+                                "/api/v1/shops/*/chat/conversations/*/support/**")
+                        .access(accountAccess(AccountType.BUYER))
                         .requestMatchers(HttpMethod.GET,
                                 "/api/v1/shops/*/chat/conversations",
                                 "/api/v1/shops/*/chat/conversations/*/messages")
