@@ -206,15 +206,22 @@ class OrderDeletionIT {
     @Test void concurrentDuplicateRequestsCreateExactlyOneImmutableDeletion() throws Exception {
         var order = order(OrderStatus.COMPLETED);
         var ready = new CountDownLatch(4); var go = new CountDownLatch(1);
-        List<CompletableFuture<MvcResult>> calls = java.util.stream.IntStream.range(0, 4)
-                .mapToObj(ignored -> CompletableFuture.supplyAsync(() -> {
-                    ready.countDown(); await(go);
-                    try { return remove("buyer", order).andReturn(); } catch (Exception failure) { throw new AssertionError(failure); }
-                })).toList();
-        assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue(); go.countDown();
-        for (var call : calls) assertThat(call.get(15, TimeUnit.SECONDS).getResponse().getStatus()).isEqualTo(204);
-        assertThat(count("support_order_buyer_deletion", "order_id", order.id())).isEqualTo(1);
-        assertThat(count("support_order", "id", order.id())).isEqualTo(1);
+        // Blocking start gates need one dedicated worker per participant, regardless of CPU count.
+        try (var workers = java.util.concurrent.Executors.newFixedThreadPool(4)) {
+            List<CompletableFuture<MvcResult>> calls = java.util.stream.IntStream.range(0, 4)
+                    .mapToObj(ignored -> CompletableFuture.supplyAsync(() -> {
+                        ready.countDown(); await(go);
+                        try { return remove("buyer", order).andReturn(); } catch (Exception failure) { throw new AssertionError(failure); }
+                    }, workers)).toList();
+            try {
+                assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+            } finally {
+                go.countDown();
+            }
+            for (var call : calls) assertThat(call.get(15, TimeUnit.SECONDS).getResponse().getStatus()).isEqualTo(204);
+            assertThat(count("support_order_buyer_deletion", "order_id", order.id())).isEqualTo(1);
+            assertThat(count("support_order", "id", order.id())).isEqualTo(1);
+        }
     }
 
     @Test void afterSaleCommittedWhileDeleteWaitsForOrderLockIsObserved() throws Exception {

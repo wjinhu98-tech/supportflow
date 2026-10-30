@@ -748,19 +748,25 @@ class KnowledgeManagementIT {
     @Test void concurrentImportsCreateOneDraftOneImportIdentityAndOneAudit() throws Exception {
         long shop=isolatedShop(); String keyword=unique(), content=keyword+" concurrent";
         var ready=new CountDownLatch(4);var start=new CountDownLatch(1);
-        List<CompletableFuture<MvcResult>> tasks=new ArrayList<>();
-        for(int i=0;i<4;i++)tasks.add(CompletableFuture.supplyAsync(()->{
-            ready.countDown();try { if(!start.await(10,TimeUnit.SECONDS))throw new IllegalStateException();
-                return importFile("editor",shop,content,keyword,true).andReturn();
-            }catch(Exception failure){throw new IllegalStateException(failure);} }));
-        assertThat(ready.await(10,TimeUnit.SECONDS)).isTrue();start.countDown();
-        Set<String> ids=new HashSet<>();int created=0;
-        for(var task:tasks){var response=task.get(20,TimeUnit.SECONDS);assertThat(response.getResponse().getStatus()).isEqualTo(200);
-            var result=body(response);ids.add(result.path("articleId").asString());if(!result.path("reused").asBoolean())created++;}
-        assertThat(ids).hasSize(1);assertThat(created).isEqualTo(1);
-        assertThat(scalar("SELECT COUNT(*) FROM support_knowledge_import WHERE tenant_id=?",shop)).isEqualTo(1);
-        assertThat(scalar("SELECT COUNT(*) FROM support_knowledge_article WHERE tenant_id=?",shop)).isEqualTo(1);
-        assertThat(auditCount(getArticle(shop,ids.iterator().next()))).isEqualTo(1);
+        try (var workers = java.util.concurrent.Executors.newFixedThreadPool(4)) {
+            List<CompletableFuture<MvcResult>> tasks=new ArrayList<>();
+            for(int i=0;i<4;i++)tasks.add(CompletableFuture.supplyAsync(()->{
+                ready.countDown();try { if(!start.await(10,TimeUnit.SECONDS))throw new IllegalStateException();
+                    return importFile("editor",shop,content,keyword,true).andReturn();
+                }catch(Exception failure){throw new IllegalStateException(failure);} }, workers));
+            try {
+                assertThat(ready.await(10,TimeUnit.SECONDS)).isTrue();
+            } finally {
+                start.countDown();
+            }
+            Set<String> ids=new HashSet<>();int created=0;
+            for(var task:tasks){var response=task.get(20,TimeUnit.SECONDS);assertThat(response.getResponse().getStatus()).isEqualTo(200);
+                var result=body(response);ids.add(result.path("articleId").asString());if(!result.path("reused").asBoolean())created++;}
+            assertThat(ids).hasSize(1);assertThat(created).isEqualTo(1);
+            assertThat(scalar("SELECT COUNT(*) FROM support_knowledge_import WHERE tenant_id=?",shop)).isEqualTo(1);
+            assertThat(scalar("SELECT COUNT(*) FROM support_knowledge_article WHERE tenant_id=?",shop)).isEqualTo(1);
+            assertThat(auditCount(getArticle(shop,ids.iterator().next()))).isEqualTo(1);
+        }
     }
 
     @Test void importRequiresCurrentShopPermissionAndCsrfAndRejectsExtraInputs() throws Exception {

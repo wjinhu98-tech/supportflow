@@ -340,34 +340,43 @@ class AssistantWorkflowIT {
         Fixture order = order(100L, 200L, OrderStatus.PAID);
         CountDownLatch ready = new CountDownLatch(4);
         CountDownLatch go = new CountDownLatch(1);
-        List<CompletableFuture<String>> requests = List.of(
-                concurrentApply(order, ready, go), concurrentApply(order, ready, go),
-                concurrentApply(order, ready, go), concurrentApply(order, ready, go));
-        assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
-        go.countDown();
-        String first = requests.get(0).get(30, TimeUnit.SECONDS);
-        String second = requests.get(1).get(30, TimeUnit.SECONDS);
-        String third = requests.get(2).get(30, TimeUnit.SECONDS);
-        String fourth = requests.get(3).get(30, TimeUnit.SECONDS);
-        String id = storedTicket(order).get("id");
-        assertThat(first).contains(id);
-        assertThat(second).contains(id);
-        assertThat(third).contains(id);
-        assertThat(fourth).contains(id);
-        assertThat(countCases(order)).isEqualTo(1);
-        assertThat(countAudit(id)).isEqualTo(1);
+        try (var workers = java.util.concurrent.Executors.newFixedThreadPool(4)) {
+            List<CompletableFuture<String>> requests = List.of(
+                    concurrentApply(order, ready, go, workers), concurrentApply(order, ready, go, workers),
+                    concurrentApply(order, ready, go, workers), concurrentApply(order, ready, go, workers));
+            try {
+                assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+            } finally {
+                go.countDown();
+            }
+            String first = requests.get(0).get(30, TimeUnit.SECONDS);
+            String second = requests.get(1).get(30, TimeUnit.SECONDS);
+            String third = requests.get(2).get(30, TimeUnit.SECONDS);
+            String fourth = requests.get(3).get(30, TimeUnit.SECONDS);
+            String id = storedTicket(order).get("id");
+            assertThat(first).contains(id);
+            assertThat(second).contains(id);
+            assertThat(third).contains(id);
+            assertThat(fourth).contains(id);
+            assertThat(countCases(order)).isEqualTo(1);
+            assertThat(countAudit(id)).isEqualTo(1);
+        }
     }
 
-    private CompletableFuture<String> concurrentApply(Fixture order, CountDownLatch ready, CountDownLatch go) {
+    private CompletableFuture<String> concurrentApply(Fixture order, CountDownLatch ready, CountDownLatch go,
+                                                      java.util.concurrent.Executor workers) {
         return CompletableFuture.supplyAsync(() -> {
             ready.countDown();
             try {
                 if (!go.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("Submission start timed out");
-                return apply(order, "商品破损");
+                // Exercise submission idempotency through the explicit write API. Legacy chat
+                // independently rejects overlapping AI calls for the same buyer and shop.
+                return refundForm("buyer", order, Map.of("reason", "商品破损"), true)
+                        .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
             } catch (Exception failure) {
                 throw new IllegalStateException("Isolated concurrent submission failed", failure);
             }
-        });
+        }, workers);
     }
 
     @Test
@@ -404,9 +413,11 @@ class AssistantWorkflowIT {
         Fixture order = order(100L, 200L, OrderStatus.PAID);
         setAuditInsertPermission(false);
         try {
+            // Legacy chat reports storage failures as an uncertain conversation result;
+            // the business transaction must still roll back before a later explicit retry.
             chat("buyer", 100L, "申请售后 " + order.number() + " 商品破损")
-                    .andExpect(status().isInternalServerError())
-                    .andExpect(jsonPath("$.code").value("INTERNAL_ERROR"));
+                    .andExpect(status().isServiceUnavailable())
+                    .andExpect(jsonPath("$.code").value("CONVERSATION_UNAVAILABLE"));
             assertThat(countCases(order)).isZero();
         } finally {
             setAuditInsertPermission(true);

@@ -1,109 +1,318 @@
-name: Agent offline evaluation
+name: SupportFlow CI and delivery
 
+# Keep the established workflow file; it now verifies the complete application.
 on:
-  workflow_dispatch:
+  pull_request:
   push:
     branches: [main]
-    paths:
-      - "src/**"
-      - "pom.xml"
-      - "scripts/*agent-evaluation*"
-      - "scripts/setup-rag-model.ps1"
-      - ".github/workflows/agent-evaluation.yml"
-  pull_request:
-    paths:
-      - "src/**"
-      - "pom.xml"
-      - "scripts/*agent-evaluation*"
-      - "scripts/setup-rag-model.ps1"
-      - ".github/workflows/agent-evaluation.yml"
+  workflow_dispatch:
+    inputs:
+      include_images:
+        description: Include all four runtime images for a fully offline delivery
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: agent-evaluation-${{ github.ref }}
+  group: supportflow-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
+env:
+  CI: "true"
+  PLAYWRIGHT_CHANNEL: chromium
+
 jobs:
-  offline:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
+  backend-live:
+    name: Backend unit, integration and live browser tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           clean: false
-      - uses: actions/setup-java@v6
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: "21"
           cache: maven
-      - name: Test report comparison
-        run: node --test scripts/compare-agent-evaluations.test.mjs
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.15.0"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Prepare checksum-verified local Chinese embedding model
         shell: pwsh
         run: ./scripts/setup-rag-model.ps1
-      - name: Evaluate local semantic retrieval and scoped publications
-        run: >-
-          mvn -B -ntp
-          -Dtest=RagKnowledgeSearchTest,RagResourcesTest,PublicKnowledgeServiceTest,DeepSeekPublicKnowledgeSelectorTest,DeepSeekCallMetricsTest
-          -Dit.test=LocalRagModelIT,LocalRagKnowledgeIT
-          test-compile surefire:test failsafe:integration-test failsafe:verify
-      - name: Evaluate fixed cases against temporary MySQL
-        run: >-
-          mvn -B -ntp
-          -Dtest=AgentEvaluationContractTest
-          -Dit.test=AgentScenarioEvaluationIT
-          test-compile surefire:test failsafe:integration-test failsafe:verify
-      - name: Regress product-name order resolution and legacy snapshots
-        run: >-
-          mvn -B -ntp
-          -Dtest=ProductOrderQuestionTest,ProductOrderKeywordTest,ConversationContextEngineTest,OrderItemSnapshotTest,OrderResponseTest,OrderProductQueryServiceTest,OrderItemSnapshotJsonTest
-          -Dit.test=ProductOrderChatIT,JdbcOrderProductSearchIT,DemoProductDataIT,DemoProductImageDataIT,LegacyDemoProductDataIT
-          test-compile surefire:test failsafe:integration-test failsafe:verify
-      - name: Regress buyer order deletion and retained business records
-        run: >-
-          mvn -B -ntp
-          -Dtest=OrderDeletionServiceTest
-          -Dit.test=OrderDeletionIT,OrderReceiptIT,MySqlMigrationIT
-          test-compile surefire:test failsafe:integration-test failsafe:verify
-      - name: Regress merchant knowledge file imports
-        run: >-
-          mvn -B -ntp
-          -Dtest=KnowledgeImportFileParserTest
-          -Dit.test=KnowledgeManagementIT
-          test-compile surefire:test failsafe:integration-test failsafe:verify
-      - name: Regress database sessions, quotas, safe tracing and persistent vectors
-        run: >-
-          mvn -B -ntp
-          -Dtest=BrowserAuthenticationFilterTest,BrowserAuthenticationPropertiesTest,BoundedWindowLimiterTest,TrafficQuotaServiceTest,AuthenticatedTrafficSecurityTest,RequestTraceFilterTest,DeepSeekModelQuotaTest,RealModelEvaluationToolTest
-          -Dit.test=BrowserSessionIT,PersistentKnowledgeVectorIT
-          test-compile surefire:test failsafe:integration-test failsafe:verify
-      - name: Regress human support ownership, AI fencing and immutable transcripts
-        run: >-
-          mvn -B -ntp
-          -Dtest=HumanSupportValidationTest,MerchantAccessServiceTest,LocalConfigurationTemplateTest
-          -Dit.test=HumanSupportApiIT,OrderApiIT
-          test-compile surefire:test failsafe:integration-test failsafe:verify
-      - name: Publish readable job summary
-        if: always()
-        shell: bash
+      - name: Verify every backend unit and integration test and build the JAR
+        run: mvn -B -ntp -Dspring.test.context.cache.maxSize=4 verify
+      - name: Prepare browser dependencies
+        working-directory: frontend
         run: |
-          if [ -f target/agent-evaluation/latest.md ]; then
-            cat target/agent-evaluation/latest.md >> "$GITHUB_STEP_SUMMARY"
-          fi
-          for report in target/knowledge-rag-evaluation/calibration.md target/knowledge-rag-evaluation/holdout.md; do
-            if [ -f "$report" ]; then cat "$report" >> "$GITHUB_STEP_SUMMARY"; fi
-          done
-      - uses: actions/upload-artifact@v7
+          npm ci --ignore-scripts
+          npx --no-install playwright install --with-deps chromium
+      - name: Test real HTTP application with isolated disposable MySQL
+        env:
+          E2E_BACKEND_URL: http://127.0.0.1:18081
+          PLAYWRIGHT_JUNIT_OUTPUT_FILE: ../target/ci-raw/frontend-live.xml
+        run: |
+          mkdir -p target/ci-raw
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          for report in sorted(Path('target/surefire-reports').glob('TEST-*.xml')):
+              value = ET.parse(report).find("./properties/property[@name='java.class.path']")
+              if value is not None and value.get('value'):
+                  Path('target/ci-test-classpath.txt').write_text(value.get('value'), encoding='utf-8')
+                  break
+          else:
+              raise SystemExit('The verified test runtime classpath is unavailable')
+          PY
+          java -cp "$(cat target/ci-test-classpath.txt)" dev.supportflow.frontend.FrontendTestServer > target/frontend-test-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          export FRONTEND_TEST_SERVER_PID="$server_pid"
+          python3 - <<'PY'
+          import os, time
+          from pathlib import Path
+          deadline = time.monotonic() + 150
+          while time.monotonic() < deadline:
+              os.kill(int(os.environ['FRONTEND_TEST_SERVER_PID']), 0)
+              if 'FRONTEND_TEST_BACKEND_READY http://127.0.0.1:18081' in Path('target/frontend-test-server.log').read_text(encoding='utf-8', errors='replace'):
+                  break
+              time.sleep(1)
+          else:
+              raise SystemExit('The isolated browser backend did not become ready')
+          PY
+          npm --prefix frontend run test:e2e -- --reporter=list,junit --output="test-results/live-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+      - name: Stage bounded backend and browser test reports
         if: always()
+        run: |
+          node .github/scripts/ci-reports.mjs backend
+          node .github/scripts/ci-reports.mjs live
+      - name: Upload sanitized backend and browser reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: agent-offline-evaluation-${{ github.run_id }}-${{ github.run_attempt }}
+          name: backend-reports-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            target/agent-evaluation/*.json
-            target/agent-evaluation/*.md
-            target/knowledge-rag-evaluation/*.json
-            target/knowledge-rag-evaluation/*.md
+            target/ci-reports/backend.xml
+            target/ci-reports/backend.json
+            target/ci-reports/live.xml
+            target/ci-reports/live.json
           if-no-files-found: warn
           retention-days: 14
+      - name: Upload verified backend delivery inputs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: backend-build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/supportflow-backend-*.jar
+            target/rag-native/ai/onnxruntime/native/linux-x64/libonnxruntime.so
+            target/rag-native/ai/onnxruntime/native/linux-x64/libonnxruntime4j_jni.so
+          if-no-files-found: error
+          retention-days: 14
+
+  frontend-mock:
+    name: Frontend types, unit tests, build and mock browser tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          clean: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.15.0"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts
+      - name: Check TypeScript and Vue types
+        working-directory: frontend
+        run: npx --no-install vue-tsc --noEmit
+      - name: Run every frontend unit test
+        working-directory: frontend
+        run: |
+          mkdir -p ../target/ci-raw
+          npm run test -- --reporter=default --reporter=junit --outputFile=../target/ci-raw/frontend-unit.xml
+      - name: Build the production frontend
+        working-directory: frontend
+        run: npm run build -- --emptyOutDir false
+      - name: Install Chromium
+        working-directory: frontend
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Run mock HTTP browser tests
+        working-directory: frontend
+        env:
+          PLAYWRIGHT_JUNIT_OUTPUT_FILE: ../target/ci-raw/frontend-mock.xml
+        run: npm run test:e2e -- --reporter=list,junit --output="test-results/mock-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+      - name: Stage bounded frontend test reports
+        if: always()
+        run: node .github/scripts/ci-reports.mjs frontend
+      - name: Upload sanitized frontend reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend-reports-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/ci-reports/frontend.xml
+            target/ci-reports/frontend.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload verified frontend delivery inputs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend-build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: frontend/dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  automation:
+    name: Delivery, deployment and automation contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          clean: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.15.0"
+          package-manager-cache: false
+      - name: Run automation and deployment contract tests
+        run: |
+          mkdir -p target/ci-raw
+          node --test --test-reporter=spec --test-reporter=junit --test-reporter-destination=stdout --test-reporter-destination=target/ci-raw/automation.xml scripts/*.test.mjs deploy/*.test.mjs
+      - name: Stage bounded automation reports
+        if: always()
+        run: node .github/scripts/ci-reports.mjs automation
+      - name: Upload sanitized automation reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: automation-reports-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/ci-reports/automation.xml
+            target/ci-reports/automation.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  checks:
+    name: CI gate
+    if: always()
+    needs: [backend-live, frontend-mock, automation]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all application checks to pass
+        env:
+          BACKEND_RESULT: ${{ needs.backend-live.result }}
+          FRONTEND_RESULT: ${{ needs.frontend-mock.result }}
+          AUTOMATION_RESULT: ${{ needs.automation.result }}
+        run: |
+          test "$BACKEND_RESULT" = success
+          test "$FRONTEND_RESULT" = success
+          test "$AUTOMATION_RESULT" = success
+          printf 'Source: `%s`; build: `%s.%s`. All backend, frontend, browser and automation checks passed.\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_STEP_SUMMARY"
+
+  delivery:
+    name: Versioned offline delivery bundle
+    needs: [checks]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DELIVERY_INCLUDE_IMAGES: ${{ github.event_name == 'workflow_dispatch' && inputs.include_images }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          clean: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.15.0"
+          package-manager-cache: false
+      - name: Download the verified backend from this run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: backend-build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/
+      - name: Download the verified frontend from this run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: frontend-build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: frontend/dist/
+      - name: Record version and successful check provenance
+        run: |
+          mkdir -p target/delivery-input
+          node --input-type=module <<'JS'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const pom = readFileSync('pom.xml', 'utf8').replace(/<parent>[\s\S]*?<\/parent>/, '');
+          const version = /<version>([^<]+)<\/version>/.exec(pom)?.[1];
+          if (!version || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/.test(version)) throw new Error('Invalid project version');
+          const sha = process.env.GITHUB_SHA;
+          if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error('Invalid source SHA');
+          const versionTag = `${version}-${sha.slice(0, 12)}`;
+          writeFileSync(process.env.GITHUB_ENV, `DELIVERY_VERSION_TAG=${versionTag}\nDELIVERY_BUILT_AT=${new Date().toISOString()}\n`, { flag: 'a' });
+          const checks = [
+            { name: 'backend-live', status: 'passed', command: 'mvn -B -ntp verify; Playwright Chromium live tests', exitCode: 0 },
+            { name: 'frontend-mock', status: 'passed', command: 'vue-tsc; vitest; vite build; Playwright Chromium mock tests', exitCode: 0 },
+            { name: 'automation', status: 'passed', command: 'node --test scripts/*.test.mjs deploy/*.test.mjs', exitCode: 0 },
+          ];
+          writeFileSync('target/delivery-input/validation.json', JSON.stringify({ sourceSha: sha, checks }, null, 2) + '\n', { flag: 'wx' });
+          JS
+      - name: Build runtime images from the verified JAR and frontend dist
+        run: |
+          docker build --file deploy/backend.Dockerfile --tag "supportflow-lab-backend:${DELIVERY_VERSION_TAG}" .
+          docker build --file deploy/bundle/frontend.Dockerfile --tag "supportflow-lab-frontend:${DELIVERY_VERSION_TAG}" .
+      - name: Save offline images and record exact image identities
+        if: env.DELIVERY_INCLUDE_IMAGES == 'true'
+        run: |
+          docker pull mysql:8.0.45
+          docker pull prom/prometheus:v3.2.1
+          docker save "supportflow-lab-backend:${DELIVERY_VERSION_TAG}" "supportflow-lab-frontend:${DELIVERY_VERSION_TAG}" mysql:8.0.45 prom/prometheus:v3.2.1 | gzip -1 > target/delivery-input/supportflow-images.tar.gz
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          import { writeFileSync } from 'node:fs';
+          const version = process.env.DELIVERY_VERSION_TAG;
+          const tags = [`supportflow-lab-backend:${version}`, `supportflow-lab-frontend:${version}`, 'mysql:8.0.45', 'prom/prometheus:v3.2.1'];
+          const images = tags.map(tag => {
+            const id = execFileSync('docker', ['image', 'inspect', '--format', '{{.Id}}', tag], { encoding: 'utf8' }).trim();
+            if (!/^sha256:[a-f0-9]{64}$/.test(id)) throw new Error('Invalid Docker image identity');
+            return { tag, id };
+          });
+          writeFileSync('target/delivery-input/images.json', JSON.stringify({ sourceSha: process.env.GITHUB_SHA, images }, null, 2) + '\n', { flag: 'wx' });
+          JS
+      - name: Assemble allowlisted, checksummed offline delivery
+        run: |
+          if [ "$DELIVERY_INCLUDE_IMAGES" = true ]; then
+            node scripts/build-delivery.mjs --sha "$GITHUB_SHA" --built-at "$DELIVERY_BUILT_AT" --with-images
+          else
+            node scripts/build-delivery.mjs --sha "$GITHUB_SHA" --built-at "$DELIVERY_BUILT_AT"
+          fi
+      - name: Upload versioned delivery archive and checksums
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: delivery-artifact
+        with:
+          name: supportflow-delivery-${{ env.DELIVERY_VERSION_TAG }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/delivery/*.zip
+            target/delivery/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Publish delivery provenance and download link
+        env:
+          ARTIFACT_URL: ${{ steps.delivery-artifact.outputs.artifact-url }}
+        run: |
+          printf '### Versioned delivery\n\nVersion: `%s`; source: `%s`; build: `%s.%s`; offline images included: `%s`.\n\n[Download the verified JAR, frontend and demo instructions](%s). Artifacts expire after 14 days.\n' "$DELIVERY_VERSION_TAG" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$DELIVERY_INCLUDE_IMAGES" "$ARTIFACT_URL" >> "$GITHUB_STEP_SUMMARY"

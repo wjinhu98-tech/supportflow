@@ -272,26 +272,28 @@ class OrderReceiptIT {
         Fixture order = order(OrderStatus.SHIPPED, null);
         CountDownLatch ready = new CountDownLatch(4);
         CountDownLatch go = new CountDownLatch(1);
-        List<CompletableFuture<MvcResult>> calls = List.of(
-                concurrentConfirm(order, ready, go), concurrentConfirm(order, ready, go),
-                concurrentConfirm(order, ready, go), concurrentConfirm(order, ready, go));
-        try {
-            assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
-        } finally {
-            go.countDown();
+        try (var workers = java.util.concurrent.Executors.newFixedThreadPool(4)) {
+            List<CompletableFuture<MvcResult>> calls = List.of(
+                    concurrentConfirm(order, ready, go, workers), concurrentConfirm(order, ready, go, workers),
+                    concurrentConfirm(order, ready, go, workers), concurrentConfirm(order, ready, go, workers));
+            try {
+                assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+            } finally {
+                go.countDown();
+            }
+            List<JsonNode> responses = new ArrayList<>();
+            for (CompletableFuture<MvcResult> call : calls) {
+                MvcResult result = call.get(30, TimeUnit.SECONDS);
+                assertThat(result.getResponse().getStatus()).isEqualTo(200);
+                responses.add(body(result));
+            }
+            assertThat(responses.stream().filter(value -> !value.get("alreadyConfirmed").asBoolean()).count()).isEqualTo(1);
+            assertThat(responses.stream().map(value -> value.get("order").get("receivedAt").asString()).distinct().count())
+                    .isEqualTo(1);
+            assertThat(stored(order).status()).isEqualTo(OrderStatus.COMPLETED);
+            assertThat(countReceiptAudit(order)).isEqualTo(1);
+            assertAuditMatches(order, stored(order).receivedAt());
         }
-        List<JsonNode> responses = new ArrayList<>();
-        for (CompletableFuture<MvcResult> call : calls) {
-            MvcResult result = call.get(30, TimeUnit.SECONDS);
-            assertThat(result.getResponse().getStatus()).isEqualTo(200);
-            responses.add(body(result));
-        }
-        assertThat(responses.stream().filter(value -> !value.get("alreadyConfirmed").asBoolean()).count()).isEqualTo(1);
-        assertThat(responses.stream().map(value -> value.get("order").get("receivedAt").asString()).distinct().count())
-                .isEqualTo(1);
-        assertThat(stored(order).status()).isEqualTo(OrderStatus.COMPLETED);
-        assertThat(countReceiptAudit(order)).isEqualTo(1);
-        assertAuditMatches(order, stored(order).receivedAt());
     }
 
     @Test
@@ -400,6 +402,11 @@ class OrderReceiptIT {
     }
 
     private CompletableFuture<MvcResult> concurrentConfirm(Fixture order, CountDownLatch ready, CountDownLatch go) {
+        return concurrentConfirm(order, ready, go, java.util.concurrent.ForkJoinPool.commonPool());
+    }
+
+    private CompletableFuture<MvcResult> concurrentConfirm(Fixture order, CountDownLatch ready, CountDownLatch go,
+                                                          java.util.concurrent.Executor workers) {
         return CompletableFuture.supplyAsync(() -> {
             ready.countDown();
             try {
@@ -408,7 +415,7 @@ class OrderReceiptIT {
             } catch (Exception failure) {
                 throw new IllegalStateException("Isolated confirmation failed", failure);
             }
-        });
+        }, workers);
     }
 
     private JsonNode body(MvcResult result) throws Exception {

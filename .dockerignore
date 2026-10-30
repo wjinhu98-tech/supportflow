@@ -18,10 +18,14 @@
 !frontend/src/**
 !frontend/public/
 !frontend/public/**
+!frontend/dist/
+!frontend/dist/**
 !deploy/
 !deploy/backend.Dockerfile
 !deploy/frontend.Dockerfile
 !deploy/nginx.conf
+!deploy/bundle/
+!deploy/bundle/frontend.Dockerfile
 
 # Keep these exclusions last, including unexpected nested copies.
 **/node_modules

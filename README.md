@@ -1,30 +1,28 @@
 # SupportFlow
 
-- 转人工客服：[`docs/human-support.md`](docs/human-support.md)，包括买家申请、商家按店铺接待、双向消息、结束后恢复智能客服及持久化记录。
+Java / Spring Boot + Vue 店铺客服学习项目：买家查本人订单与物流、看带来源的规则、申请退款；商家维护知识、人工审核并接待咨询。模型参与受限决策，Java 控制身份、权限、状态与执行边界。
 
-- 本轮求职工程补全：[`docs/job-readiness.md`](docs/job-readiness.md)，包括数据库账号与服务端会话、按认证身份限流、请求追踪、持久化知识向量和默认关闭的真实模型评测工具。
+## 从这里开始
 
-Java / Spring Boot + Vue 店铺订单客服学习项目，包含店铺本人订单、版本化知识检索、受限 DeepSeek 工具调用、学习版物流、售后人工审批与持久化模拟退款处理。
+| 想做什么 | 入口 |
+| --- | --- |
+| 下载可运行交付包 | 仓库 Actions → **SupportFlow CI and delivery** → 成功的 main 推送或手动 run → Summary / Artifacts；先看 [安装与包校验](docs/delivery-install.md) |
+| 五分钟展示买家到商家的闭环 | [演示步骤](docs/demo-guide.md)：隔离 LAB、双浏览器、默认关闭付费模型 |
+| 从业务看懂代码 | [项目地图与调用链](docs/project-overview.md)：角色、输入输出、谁调用谁、数据库边界 |
+| 准备 Java / AI 应用面试 | [面试指南](docs/interview-guide.md)：设计取舍、失败处理、证据与表述范围 |
+| 沿用本机开发环境 | [前端与联调](frontend/README.md)、[日常演示数据](docs/local-demo-data.md)、[源码 Compose 实验](deploy/README.md) |
 
-- 后端：当前目录 Maven 工程，沿用 `local` profile 与忽略提交的本地配置。
-- 前端：[`frontend/`](frontend/README.md)，Vue 3 + TypeScript + Vite，按店铺上下文接入真实后端。
-- 聊天接口：[`docs/shop-chat.md`](docs/shop-chat.md) 与 [`chat.http`](chat.http)。
-- 按商品名称查单：[`docs/product-order-lookup.md`](docs/product-order-lookup.md)，可以问“我买的耳机发货了吗”；单笔直接查询，多笔显示商品候选，沿用当前店铺和买家隔离。V16新增购买快照，V17支持商品缩略图；历史未知信息保留为空。[演示图片来源与提示词](docs/product-images.md)。
-- 买家删除订单：[`docs/order-deletion.md`](docs/order-deletion.md)，V18记录买家删除操作；仅本人已完成/已取消且无待处理售后的订单可删除，买家查单隐藏，原订单和商家审计保留。新表只需`SELECT, INSERT`权限。
-- 架构与首次启用：[`docs/assistant-architecture.md`](docs/assistant-architecture.md)。**新售后功能需要 V4、表级写权限与独立审核账号，不能直接沿用只有 SELECT 的旧账号完成写入。**
-- 本地演示数据与订单号：[`docs/local-demo-data.md`](docs/local-demo-data.md)。
-- 售后执行与重启恢复：[`docs/after-sale-execution.md`](docs/after-sale-execution.md)。**本轮新增 V5；运行账号需追加任务与模拟回执表权限后重启后端。**
-- 会话与聊天记录：[`docs/conversation-history.md`](docs/conversation-history.md)，**新环境需要 V8 和会话表最小运行权限；恢复历史不重放业务操作。**
-- 每店一个聊天窗口：[`docs/shop-chat-windows.md`](docs/shop-chat-windows.md)，V15 汇总旧咨询，切店 / 重连恢复同一窗口；支持主动删除确认。新增演示店铺 102 / 103，商家账号仍只管理店铺 100。
-- 受控会话话题：[`docs/conversation-context.md`](docs/conversation-context.md)，保存有限的订单号或知识来源引用，30 分钟过期；追问重新查实时订单或当前发布资料，写操作不继承历史订单。复用现有响应 JSON，无新增数据库迁移或授权。
-- 模型调用保护：[`docs/agent-resilience.md`](docs/agent-resilience.md)，DeepSeek 入口共享并发上限与熔断器；连续失败后暂停并以单请求探测恢复。只读 Agent 在持久化步骤层最多自动重试一次，原始聊天与业务写入不自动重发。V14 沿用已有运行表授权。
-- 容器部署、监控与容量验证：[`docs/deployment-and-capacity.md`](docs/deployment-and-capacity.md)，独立教学数据库与账号、受保护指标、真实读取压测及停机恢复记录；部署步骤见 [`deploy/README.md`](deploy/README.md)。
-- 持久化 Agent 运行：[`docs/agent-loop-budget.md`](docs/agent-loop-budget.md)，会话中由模型读取工具结果并决定下一步，只读工具、Java 校验、步骤 Checkpoint、双代次隔离和显式恢复；按运行限制步数、总期限、Token 与估算费用。V12 旧运行保留原三阶段恢复，售后继续人工审批。V13 沿用两张运行表的已有权限。
-- Agent 场景评测：[`docs/agent-evaluation.md`](docs/agent-evaluation.md)，47 个离线场景执行真实认证、路由、工具与临时 MySQL，输出逐条 JSON / Markdown、能力选择和安全回归指标，支持报告比较及 CI；不把规则结果作为真实模型准确率。
-- 用户/商家双入口与店铺授权：[`docs/merchant-workspace.md`](docs/merchant-workspace.md)，**V9后用户端仍为根页面，商家管理端为 `/merchant`，审核必须有显式店铺授权。**
-- 商家店铺知识库：[`docs/shop-knowledge-management.md`](docs/shop-knowledge-management.md)，**V10支持独立知识维护权限、草稿/发布/下线、版本审计和当前店铺已发布资料检索。**
-- 商家文件导入：[`docs/knowledge-file-import.md`](docs/knowledge-file-import.md)，TXT/Markdown本地预览、明确确认存草稿、持久化去重与原稿保护；V19新增导入记录表，发布仍需商家明确确认。
-- 知识问答质量与面试依据：[`docs/knowledge-quality-and-interview.md`](docs/knowledge-quality-and-interview.md)，有界同义检索、结构化引用、历史证据快照与可复现评测；不将词法检索包装成向量RAG。
-- 本地语义检索：[`docs/semantic-rag.md`](docs/semantic-rag.md)，真实中文BGE向量、关键词混合排序、18篇带来源和适用范围的公开参考摘要，以及独立保留集评测。首次启用先运行 `scripts/setup-rag-model.ps1`；经批准，聊天中最多两篇规范公开摘要和本次知识问题可交给DeepSeek筛选来源，商家资料保持本地。GET和历史恢复不调用模型。
+交付包包含后端、前端、隔离部署脚本与校验信息；需要可离线导入的运行镜像时，在手动工作流中选择 `include_images=true`。以具体 run 的结果为准，新增工作流或本地验证通过不代表云端已经通过。工作流见 [CI 配置](.github/workflows/agent-evaluation.yml)。
 
-本地完整操作顺序和前端测试说明见 [前端 README](frontend/README.md)。模型 API Key 只放在后端本地私密配置，不放进前端或 Git。
+## 能力与边界
+
+已有店铺/买家隔离、商品名查单与商品图、每店聊天窗口、退款原因与收货后 15 天规则、人工审批和持久化模拟退款；也有数据库账号、服务端会话、限流与追踪、只读 Agent 检查点/预算/有限重试/熔断、可选 BGE 与持久向量、TXT/MD 知识草稿发布、独立权限的人工接待。
+
+当前为单体学习系统。物流读取本地记录，退款只产生模拟回执；未实现真实支付、微服务、Redis、MQ、WebSocket 或 PDF/OCR。隔离演示默认关闭 DeepSeek 和 BGE，不会自动调用付费模型；模型 Key 只保存在后端私密配置。
+
+## 专项文档
+
+- 业务：[商品名查单](docs/product-order-lookup.md)、[订单删除标记](docs/order-deletion.md)、[商家授权](docs/merchant-workspace.md)、[售后执行](docs/after-sale-execution.md)、[人工接待](docs/human-support.md)。
+- AI 与状态：[Agent 循环与预算](docs/agent-loop-budget.md)、[模型保护](docs/agent-resilience.md)、[会话上下文](docs/conversation-context.md)、[语义检索](docs/semantic-rag.md)、[离线评测](docs/agent-evaluation.md)。
+- 知识与工程：[店铺知识发布](docs/shop-knowledge-management.md)、[文件导入](docs/knowledge-file-import.md)、[工程补全](docs/job-readiness.md)、[部署与容量实验](docs/deployment-and-capacity.md)。
+- 接口：[店铺聊天](docs/shop-chat.md)、[HTTP 示例](chat.http)；图片来源见 [商品图片说明](docs/product-images.md)。

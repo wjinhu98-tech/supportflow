@@ -1,0 +1,7 @@
+# Apply only after separately obtaining and checksum-verifying both pinned model files.
+services:
+  backend:
+    environment:
+      SUPPORTFLOW_RAG_ENABLED: "true"
+    volumes:
+      - ../.local/models/bge-small-zh-v1.5:/app/models/bge-small-zh-v1.5:ro

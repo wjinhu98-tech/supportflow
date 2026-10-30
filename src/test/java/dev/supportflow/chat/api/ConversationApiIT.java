@@ -444,33 +444,35 @@ class ConversationApiIT {
         String text = "CONCURRENT-HELLO";
         CountDownLatch ready = new CountDownLatch(3);
         CountDownLatch go = new CountDownLatch(1);
-        List<CompletableFuture<MvcResult>> requests = new ArrayList<>();
-        for (int index = 0; index < 3; index++) requests.add(CompletableFuture.supplyAsync(() -> {
-            ready.countDown();
+        try (var workers = java.util.concurrent.Executors.newFixedThreadPool(3)) {
+            List<CompletableFuture<MvcResult>> requests = new ArrayList<>();
+            for (int index = 0; index < 3; index++) requests.add(CompletableFuture.supplyAsync(() -> {
+                ready.countDown();
+                try {
+                    if (!go.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("Concurrent request start timeout");
+                    return send("buyer", shop, id, key, text, null).andReturn();
+                } catch (Exception failure) {
+                    throw new IllegalStateException("Isolated concurrent chat request failed", failure);
+                }
+            }, workers));
             try {
-                if (!go.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("Concurrent request start timeout");
-                return send("buyer", shop, id, key, text, null).andReturn();
-            } catch (Exception failure) {
-                throw new IllegalStateException("Isolated concurrent chat request failed", failure);
+                assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+            } finally {
+                go.countDown();
             }
-        }));
-        try {
-            assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
-        } finally {
-            go.countDown();
+            List<MvcResult> results = new ArrayList<>();
+            for (CompletableFuture<MvcResult> request : requests) results.add(request.get(30, TimeUnit.SECONDS));
+            assertThat(results.stream().map(result -> result.getResponse().getStatus()).toList())
+                    .allMatch(code -> code == 200 || code == 409).contains(200);
+            JsonNode successfulPair = body(results.stream().filter(result -> result.getResponse().getStatus() == 200)
+                    .findFirst().orElseThrow()).path("messages");
+            for (MvcResult result : results) {
+                if (result.getResponse().getStatus() == 200) assertThat(body(result).path("messages")).isEqualTo(successfulPair);
+            }
+            assertThat(messageCount(id)).isEqualTo(2);
+            assertThat(turnCount(id)).isEqualTo(1);
+            verify(orchestrator, times(1)).reply(any(), eq(shop), eq(text), isNull());
         }
-        List<MvcResult> results = new ArrayList<>();
-        for (CompletableFuture<MvcResult> request : requests) results.add(request.get(30, TimeUnit.SECONDS));
-        assertThat(results.stream().map(result -> result.getResponse().getStatus()).toList())
-                .allMatch(code -> code == 200 || code == 409).contains(200);
-        JsonNode successfulPair = body(results.stream().filter(result -> result.getResponse().getStatus() == 200)
-                .findFirst().orElseThrow()).path("messages");
-        for (MvcResult result : results) {
-            if (result.getResponse().getStatus() == 200) assertThat(body(result).path("messages")).isEqualTo(successfulPair);
-        }
-        assertThat(messageCount(id)).isEqualTo(2);
-        assertThat(turnCount(id)).isEqualTo(1);
-        verify(orchestrator, times(1)).reply(any(), eq(shop), eq(text), isNull());
     }
 
     @Test
