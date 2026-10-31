@@ -17,6 +17,7 @@ const RESULTS_DIR = path.join(ROOT, '.local', 'capacity-results');
 const MARKER_HEADER = 'x-supportflow-environment';
 const MARKER = 'isolated-lab';
 const MAX_BODY_BYTES = 32 * 1024;
+const MAX_REQUESTS_PER_STAGE = 10_000;
 const KINDS = new Set(['ok', 'httpError', 'timeout', 'networkError', 'invalidResponse', 'safetyError', 'aborted']);
 const CONTAINERS = Object.freeze([
   'supportflow-lab-backend-1', 'supportflow-lab-mysql-1', 'supportflow-lab-frontend-1',
@@ -38,7 +39,7 @@ export function parseArgs(args) {
     else if (name === '--docker-stats' && value === undefined) options.dockerStats = true;
     else if (name === '--seconds' && /^(10|30)$/.test(value ?? '')) options.seconds = Number(value);
     else if (name === '--max-requests' && /^\d+$/.test(value ?? '')
-      && Number(value) >= 1 && Number(value) <= 1000) options.maxRequests = Number(value);
+      && Number(value) >= 1 && Number(value) <= MAX_REQUESTS_PER_STAGE) options.maxRequests = Number(value);
     else if (name === '--concurrency' && /^(?:[1-9]|1[0-6])(?:,(?:[1-9]|1[0-6])){0,3}$/.test(value ?? '')) {
       const stages = value.split(',').map(Number);
       if (stages.some((number, index) => index > 0 && number <= stages[index - 1])) throw new LabError('INVALID_ARGUMENTS');
@@ -165,7 +166,7 @@ export function summarize(samples, elapsedMs) {
 export async function runStage({ concurrency, durationMs, maxRequests = 1000, request, signal }) {
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16
     || !Number.isInteger(durationMs) || durationMs < 1 || durationMs > 60_000
-    || !Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > 1000
+    || !Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > MAX_REQUESTS_PER_STAGE
     || typeof request !== 'function') throw new LabError('INVALID_STAGE');
   const started = performance.now();
   const controller = new AbortController();
@@ -289,6 +290,7 @@ export async function main(args = process.argv.slice(2)) {
   const options = parseArgs(args);
   if (options.help) {
     console.log('Usage: node scripts/capacity-lab.mjs [--seconds=10|30] [--concurrency=1,4,8] [--max-requests=1000] [--docker-stats]');
+    console.log('Bounds: 10 or 30 seconds per stage; 1-16 concurrent requests; 1-10000 requests per stage (default 1000).');
     console.log(`Fixed isolated target: ${LAB_ORIGIN}; measured GET only after session login; no model calls; local learning results only.`);
     return;
   }

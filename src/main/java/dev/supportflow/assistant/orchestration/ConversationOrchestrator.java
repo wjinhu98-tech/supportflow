@@ -3,6 +3,7 @@ package dev.supportflow.assistant.orchestration;
 import dev.supportflow.assistant.knowledge.KnowledgeService;
 import dev.supportflow.assistant.runtime.store.AgentRunInput;
 import dev.supportflow.chat.application.model.ChatReply;
+import dev.supportflow.chat.application.CustomerQuestionScope;
 import dev.supportflow.common.security.model.CustomerPrincipal;
 import org.springframework.stereotype.Service;
 
@@ -24,6 +25,7 @@ public class ConversationOrchestrator {
     }
 
     public ChatReply reply(CustomerPrincipal principal, long shopId, String message, String orderNo) {
+        if (CustomerQuestionScope.isClearlyUnrelated(message)) return ChatReply.outOfScope();
         AssistantRoute route = router.route(message);
         if (route == AssistantRoute.KNOWLEDGE) {
             var answer = knowledge.answerDetailed(shopId, message);
@@ -37,6 +39,7 @@ public class ConversationOrchestrator {
     }
 
     public ChatReply reply(CustomerPrincipal principal, long shopId, String message, String orderNo, AgentRunInput input) {
+        if (CustomerQuestionScope.isClearlyUnrelated(message)) return ChatReply.outOfScope();
         AssistantRoute route = router.route(message);
         if (route != AssistantRoute.LOGISTICS) return reply(principal, shopId, message, orderNo);
         return agent.execute(route, principal, shopId, message, orderNo, input);

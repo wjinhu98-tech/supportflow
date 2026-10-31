@@ -9,6 +9,8 @@ import dev.supportflow.chat.application.model.KnowledgeStatus;
 import dev.supportflow.common.security.model.CustomerIdentity;
 import dev.supportflow.common.security.model.CustomerPrincipal;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Optional;
@@ -25,6 +27,30 @@ class ConversationOrchestratorTest {
     private final CustomerPrincipal principal = new CustomerPrincipal("buyer", "not-a-real-hash",
             new CustomerIdentity(200), List.of());
     private final ConversationOrchestrator orchestrator = new ConversationOrchestrator(new ConversationRouter(), knowledge, agent);
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "这个是通过查数据库回答的吗", "刚刚回答的问题", "明天天气怎么样", "帮我写一段Java代码",
+            "帮我写查询订单的SQL", "请写一个退款接口的Java代码"
+    })
+    void unrelatedQuestionsAreRejectedBeforeKnowledgeOrAgentExecution(String message) {
+        for (String selected : new String[] {null, "SF10001"}) {
+            ChatReply response = orchestrator.reply(principal, 100, message, selected);
+            assertThat(response.reply()).isEqualTo("对不起，我无法回复您的问题。");
+            assertThat(response.orders()).isEmpty();
+            assertThat(response.knowledge()).isNull();
+            assertThat(orchestrator.reply(principal, 100, message, selected, null)).isEqualTo(response);
+        }
+        verifyNoInteractions(knowledge, agent);
+    }
+
+    @Test
+    void productDevelopmentCapabilityIsAProductFaqInsteadOfACodingRequest() {
+        String message = "电脑是否支持Java开发";
+        when(knowledge.tryAnswerDetailed(100, message)).thenReturn(Optional.of(answer("当前电脑的配置说明")));
+        assertThat(orchestrator.reply(principal, 100, message, null).reply()).isEqualTo("当前电脑的配置说明");
+        verifyNoInteractions(agent);
+    }
 
     @Test
     void shouldAnswerKnowledgeWithoutInvokingBusinessAgent() {

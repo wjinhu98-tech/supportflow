@@ -13,6 +13,7 @@ import dev.supportflow.chat.application.model.ChatReply;
 import dev.supportflow.chat.application.model.ChatReplyType;
 import dev.supportflow.chat.application.model.KnowledgeStatus;
 import dev.supportflow.chat.application.ProductOrderQuestion;
+import dev.supportflow.chat.application.CustomerQuestionScope;
 import dev.supportflow.chat.application.model.OrderSelectionIntent;
 import dev.supportflow.common.security.model.CustomerPrincipal;
 import dev.supportflow.order.application.OrderQueryService;
@@ -81,6 +82,9 @@ public class ConversationContextEngine {
         var context = request.resetContext() || previous == null || !previous.activeAt(now)
                 ? ConversationContextRef.none() : previous;
         String message = request.message().strip();
+        if (CustomerQuestionScope.isClearlyUnrelated(message)) {
+            return ChatResponse.from(ChatReply.outOfScope()).withContext(ConversationContextRef.none());
+        }
         // Sensitive/write intent keeps the original explicit-input path. A remembered subject is never consent.
         if (NO_INHERITED_ARGUMENTS.matcher(message).find()) {
             return enrich(orchestrate(principal, shopId, request.message(), request.orderNo(), runKey, request),

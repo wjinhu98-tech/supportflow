@@ -19,12 +19,12 @@ class ShopKnowledgeServiceTest {
     private final String id = UUID.randomUUID().toString();
 
     @Test
-    void quotesCompleteImmutablePublishedContentWithVersion() {
+    void directlyAnswersFromCompletePublishedContentWithoutAuditLabels() {
         String original = "礼盒包装使用蓝色纸盒。\n\n可附赠一张空白贺卡。";
         when(repository.publishedForShop(100)).thenReturn(List.of(source(id, 1, original)));
         assertThat(service.answer(100, "知识库 礼盒包装"))
-                .contains(original, "[来源：kb-" + id + "@v1]", "资料原文开始", "资料原文结束")
-                .contains("不是订单状态或业务操作结果", "15天", "客服审批");
+                .isEqualTo(original)
+                .doesNotContain("kb-" + id, "资料原文", "15天", "客服审批");
         verify(repository).publishedForShop(100);
     }
 
@@ -32,7 +32,7 @@ class ShopKnowledgeServiceTest {
     void ordinaryReliableFaqMatchWorksWithoutKnowledgeCommand() {
         when(repository.publishedForShop(100)).thenReturn(List.of(source(id, 1, "礼盒包装采用蓝色纸盒。")));
         assertThat(service.tryAnswer(100, "礼盒包装是什么颜色？")).hasValueSatisfying(reply ->
-                assertThat(reply).contains("蓝色纸盒", "kb-" + id + "@v1"));
+                assertThat(reply).contains("蓝色纸盒").doesNotContain("kb-" + id));
     }
 
     @Test
@@ -53,7 +53,7 @@ class ShopKnowledgeServiceTest {
     void offlineIsObservedOnNextReadRatherThanServingCachedPublication() {
         when(repository.publishedForShop(100)).thenReturn(List.of(source(id, 1, "礼盒包装为蓝色。")))
                 .thenReturn(List.of());
-        assertThat(service.answer(100, "知识库 礼盒包装")).contains("蓝色", "@v1");
+        assertThat(service.answer(100, "知识库 礼盒包装")).contains("蓝色").doesNotContain("@v1");
         assertThat(service.answer(100, "知识库 礼盒包装")).contains("目前不知道").doesNotContain("蓝色", "@v1");
         verify(repository, times(2)).publishedForShop(100);
     }
@@ -62,15 +62,18 @@ class ShopKnowledgeServiceTest {
     void aSavedReplyKeepsOldSourceWhileNewReadsUseNewPublishedRevision() {
         when(repository.publishedForShop(100)).thenReturn(List.of(source(id, 1, "礼盒包装为蓝色。")))
                 .thenReturn(List.of(source(id, 2, "礼盒包装为橙色。")));
-        String historicalReply = service.answer(100, "知识库 礼盒包装");
-        assertThat(service.answer(100, "知识库 礼盒包装")).contains("橙色", "@v2").doesNotContain("蓝色", "@v1");
-        assertThat(historicalReply).contains("蓝色", "@v1").doesNotContain("橙色", "@v2");
+        KnowledgeAnswer historical = service.answerDetailed(100, "知识库 礼盒包装");
+        KnowledgeAnswer current = service.answerDetailed(100, "知识库 礼盒包装");
+        assertThat(current.reply()).contains("橙色").doesNotContain("蓝色", "@v1", "@v2");
+        assertThat(current.evidence().sources().getFirst().version()).isEqualTo("v2");
+        assertThat(historical.reply()).contains("蓝色").doesNotContain("橙色", "@v1", "@v2");
+        assertThat(historical.evidence().sources().getFirst().version()).isEqualTo("v1");
     }
 
     @Test
     void protectedBusinessRuleUsesControlledCatalogWithoutReadingMerchantClaims() {
         assertThat(service.answer(100, "知识库 售后期限规则"))
-                .contains("15天", "客服", "after-sale-review@").doesNotContain("365天", "kb-");
+                .contains("15天", "客服").doesNotContain("365天", "kb-", "after-sale-review@");
         assertThat(service.tryAnswer(100, "退款申请是否直接执行？")).isEmpty();
         verifyNoInteractions(repository);
     }

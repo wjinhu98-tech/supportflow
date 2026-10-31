@@ -243,15 +243,15 @@ class KnowledgeManagementIT {
         String keyword = unique();
         JsonNode draft = create(100, keyword, "GENERAL-FAQ-ANSWER " + keyword);
         String general = "请介绍 " + keyword;
-        assertThat(chatAnswer(100, general)).isEqualTo("收到你的问题：" + general);
+        assertThat(chatAnswer(100, general)).isEqualTo("对不起，我无法回复您的问题。");
         mutate("editor", 100, draft, "publish");
         JsonNode response = chatResponse(100, general);
         assertSource(response, draft, "v1", "GENERAL-FAQ-ANSWER " + keyword);
         assertThat(response.path("reply").asString()).contains("GENERAL-FAQ-ANSWER")
                 .doesNotContain("收到你的问题：");
-        assertThat(chatAnswer(101, general)).isEqualTo("收到你的问题：" + general);
+        assertThat(chatAnswer(101, general)).isEqualTo("对不起，我无法回复您的问题。");
         String unknown = "请介绍 " + unique();
-        assertThat(chatAnswer(100, unknown)).isEqualTo("收到你的问题：" + unknown);
+        assertThat(chatAnswer(100, unknown)).isEqualTo("对不起，我无法回复您的问题。");
     }
 
     @Test
@@ -281,9 +281,8 @@ class KnowledgeManagementIT {
 
         JsonNode response = chatResponse(shop, "能放张祝福卡吗？");
         assertSource(response, draft, "v1", content);
-        assertThat(response.path("reply").asString()).contains("贺卡")
-                .doesNotContain("ORIGINAL-CONTENT-END");
-        assertThat(response.path("reply").asString().length()).isLessThan(content.length());
+        assertThat(response.path("reply").asString()).isEqualTo(content)
+                .doesNotContain("展开来源", "资料原文开始", "kb-" + draft.path("id").asString());
         assertThat(response.path("orders").size()).isZero();
         assertThat(response.path("nextAfterId").isNull()).isTrue();
         assertThat(response.toString()).doesNotContain("\"tenantId\"", "\"staffId\"", "\"buyerId\"");

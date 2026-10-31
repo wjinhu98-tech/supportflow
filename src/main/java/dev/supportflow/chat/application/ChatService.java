@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.Objects;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 /**
  * 店铺由HTTP路径提供，身份由认证提供；模型只识别订单号。
@@ -20,6 +21,10 @@ import java.util.Optional;
  */
 @Service
 public class ChatService {
+
+    private static final Pattern GREETING = Pattern.compile(
+            "(?:你好|您好|嗨|哈喽|hello|hi|在吗|谢谢|多谢|再见)[！!？?。,.，\\s]*",
+            Pattern.CASE_INSENSITIVE);
 
     private final OrderQueryService orderQueryService;
     private final OrderIntentRecognizer orderIntentRecognizer;
@@ -64,7 +69,11 @@ public class ChatService {
         // 识别器只收到消息，不接收身份、权限或任何数据库中的订单详情。
         OrderIntent intent = orderIntentRecognizer.recognize(message);
         if (intent.type() == OrderIntentType.OTHER) {
-            return ChatReply.text("收到你的问题：" + message);
+            // OTHER is also returned when the optional recognizer is disabled; it is not proof of scope.
+            if (GREETING.matcher(message.strip()).matches() || CustomerQuestionScope.hasBusinessSubject(message)) {
+                return ChatReply.text("收到你的问题：" + message);
+            }
+            return ChatReply.outOfScope();
         }
         String orderNo = intent.orderNo() != null ? intent.orderNo() : selectedOrderNo;
         if (orderNo == null) {

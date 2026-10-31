@@ -901,7 +901,7 @@ class OrderApiIT {
         String message = "A".repeat(1000);
         chatPost("customer-200", message)
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.reply").value("收到你的问题：" + message))
+                .andExpect(jsonPath("$.reply").value("对不起，我无法回复您的问题。"))
                 .andExpect(jsonPath("$.type").value("TEXT"))
                 .andExpect(jsonPath("$.orders.length()").value(0));
     }
@@ -1243,12 +1243,26 @@ class OrderApiIT {
     }
 
     @Test
-    @DisplayName("非查单意图保留普通聊天回显并返回无订单TEXT结果")
-    void shouldPreserveOrdinaryChatWhenModelReturnsOther() throws Exception {
+    @DisplayName("业务无关的回答机制问题统一回复且不调用订单识别器")
+    void shouldDeclineAnswerMechanismQuestionsWithoutCallingTheRecognizer() throws Exception {
+        for (String message : List.of("这个是通过查数据库回答的吗", "刚刚回答的问题")) {
+            chatPost("customer-200", message)
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.reply").value("对不起，我无法回复您的问题。"))
+                    .andExpect(jsonPath("$.type").value("TEXT"))
+                    .andExpect(jsonPath("$.orders.length()").value(0))
+                    .andExpect(jsonPath("$.knowledge").value(org.hamcrest.Matchers.nullValue()));
+        }
+        verifyNoInteractions(orderIntentRecognizer);
+    }
+
+    @Test
+    @DisplayName("业务无关消息返回统一回复且不携带订单数据")
+    void shouldDeclineUnrelatedChatWhenModelReturnsOther() throws Exception {
         String message = "  你好，今天心情不错。  ";
         chatPost("customer-200", message)
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.reply").value("收到你的问题：" + message))
+                .andExpect(jsonPath("$.reply").value("对不起，我无法回复您的问题。"))
                 .andExpect(jsonPath("$.type").value("TEXT"))
                 .andExpect(jsonPath("$.orders.length()").value(0))
                 .andExpect(jsonPath("$.nextAfterId").value(org.hamcrest.Matchers.nullValue()));

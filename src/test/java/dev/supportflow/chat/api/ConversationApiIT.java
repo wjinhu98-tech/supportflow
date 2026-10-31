@@ -515,6 +515,33 @@ class ConversationApiIT {
     }
 
     @Test
+    void shouldPersistUnrelatedRepliesWithoutBorrowingSelectedOrderOrKnowledge() throws Exception {
+        long shop = SHOP.incrementAndGet();
+        Fixture order = order(shop, 200, "SHIPPED");
+        String conversation = create("buyer", shop).path("id").asString();
+        JsonNode initial = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "查询此订单", order.number()).andExpect(status().isOk()).andReturn()));
+        assertOrderContext(initial, order.number());
+
+        for (String question : List.of("这个是通过查数据库回答的吗", "刚刚回答的问题")) {
+            JsonNode turn = body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                    question, order.number()).andExpect(status().isOk()).andReturn());
+            JsonNode response = assistant(turn);
+            assertThat(response.path("reply").asString()).isEqualTo("对不起，我无法回复您的问题。");
+            assertThat(response.path("type").asString()).isEqualTo("TEXT");
+            assertThat(response.path("orders").isEmpty()).isTrue();
+            assertThat(response.path("knowledge").isNull()).isTrue();
+            assertThat(response.path("context").path("kind").asString()).isEqualTo("NONE");
+            assertThat(storedResponse(turn.path("messages").get(1).path("id").asString())).isEqualTo(response);
+        }
+
+        JsonNode current = assistant(body(send("buyer", shop, conversation, UUID.randomUUID().toString(),
+                "查询此订单", order.number()).andExpect(status().isOk()).andReturn()));
+        assertOrderContext(current, order.number());
+        assertThat(current.path("orders").get(0).path("orderNo").asString()).isEqualTo(order.number());
+    }
+
+    @Test
     void shouldPersistKnowledgeSourcesAcrossDraftChangesRepublishOfflineAndIdempotentReplay() throws Exception {
         long shop = SHOP.incrementAndGet();
         String token = "faq" + UUID.randomUUID().toString().replace("-", "");
@@ -527,6 +554,8 @@ class ConversationApiIT {
         JsonNode first = body(send("buyer", shop, conversation, key, message, null)
                 .andExpect(status().isOk()).andReturn());
         JsonNode firstSnapshot = first.path("messages").get(1).path("response");
+        assertThat(firstSnapshot.path("reply").asString()).isEqualTo(original)
+                .doesNotContain("展开来源", "[来源：", "kb-" + article);
         assertKnowledgeSource(firstSnapshot, article, "v1", token, original);
         assertThat(storedResponse(first.path("messages").get(1).path("id").asString())).isEqualTo(firstSnapshot);
 

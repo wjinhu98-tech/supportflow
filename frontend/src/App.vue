@@ -22,8 +22,6 @@ import {
   X,
 } from '@lucide/vue'
 import OrderCard from './components/OrderCard.vue'
-import KnowledgeSources from './components/KnowledgeSources.vue'
-import ConversationContextNotice from './components/ConversationContextNotice.vue'
 import AfterSalesPanel from './components/AfterSalesPanel.vue'
 import RefundDialog from './components/RefundDialog.vue'
 import ReceiptConfirmationDialog from './components/ReceiptConfirmationDialog.vue'
@@ -55,10 +53,6 @@ const {
   shopDirectoryError,
   deletingConversation,
   deleteCurrentConversation,
-  conversationContext,
-  contextResetPending,
-  contextExpired,
-  clearConversationTopic,
   nextMessageBeforeId,
   conversationsLoading,
   historyLoading,
@@ -863,14 +857,6 @@ watch(
                 {{ humanRequesting ? '正在联系…' : '联系人工客服' }}
               </button>
             </template>
-            <button
-              v-if="connected && activeConversation"
-              type="button"
-              :disabled="humanLoading || humanSubmitting || humanRequesting"
-              @click="refreshHumanSupport()"
-            >
-              刷新人工服务
-            </button>
             <p
               v-if="humanError"
               role="alert"
@@ -892,22 +878,6 @@ watch(
               </button>
             </p>
           </div>
-          <ConversationContextNotice
-            v-if="!humanActive"
-            :context="conversationContext"
-            :pending-reset="contextResetPending"
-            :expired="contextExpired"
-            :disabled="
-              busy ||
-              historyLoading ||
-              conversationsLoading ||
-              refundSubmitting ||
-              receiptSubmitting ||
-              connecting
-            "
-            @clear="clearConversationTopic"
-          />
-
           <div
             v-if="selectedOrder"
             class="selected-context"
@@ -1059,11 +1029,6 @@ watch(
                   <div class="message-bubble">
                     <p>{{ message.text }}</p>
                   </div>
-                  <KnowledgeSources
-                    v-if="message.knowledge?.status === 'ANSWERED'"
-                    :knowledge="message.knowledge"
-                    :historical="message.historical"
-                  />
                   <div
                     v-if="message.orders?.length"
                     class="message-order-list"

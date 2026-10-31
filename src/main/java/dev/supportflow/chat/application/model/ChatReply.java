@@ -47,6 +47,10 @@ public record ChatReply(
         return new ChatReply(reply, ChatReplyType.TEXT, List.of(), null);
     }
 
+    public static ChatReply outOfScope() {
+        return text("对不起，我无法回复您的问题。");
+    }
+
     public static ChatReply knowledge(String reply, KnowledgeEvidence evidence) {
         return new ChatReply(reply, ChatReplyType.TEXT, List.of(), null,
                 Objects.requireNonNull(evidence, "knowledge evidence must not be null"));

@@ -662,7 +662,7 @@ test('real API does not reveal another buyer owned-order details', async ({ page
   await expect(page.getByTestId('chat-message').filter({ hasText: '已发货' })).toHaveCount(0)
 })
 
-test('real knowledge citations and recorded logistics stay separate from same-number shop orders', async ({
+test('real knowledge audit evidence and recorded logistics stay separate from same-number shop orders', async ({
   page,
 }) => {
   await connect(page, 'frontend-buyer', password)
@@ -675,7 +675,7 @@ test('real knowledge citations and recorded logistics stay separate from same-nu
   )
   await expect(
     page.getByTestId('chat-message').last().getByTestId('knowledge-sources'),
-  ).toBeVisible()
+  ).toHaveCount(0)
 
   await selectOrder(page, 'SF10001')
   const logistics = await chat(page, '查物流')

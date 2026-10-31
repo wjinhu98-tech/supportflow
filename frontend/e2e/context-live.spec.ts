@@ -50,7 +50,7 @@ async function ask(page: Page, text: string) {
   }
 }
 
-test('restored order context supports a fresh read without selecting a historical card and can be explicitly cleared', async ({
+test('restored order context supports a fresh read and cancelling the current selection resets it', async ({
   page,
 }, testInfo) => {
   test.setTimeout(75_000)
@@ -60,11 +60,9 @@ test('restored order context supports a fresh read without selecting a historica
   const first = await ask(page, '查订单 SF10001')
   expect(first.answer.context?.kind).toBe('ORDER')
   expect(first.answer.context?.orderNo).toBe('SF10001')
-  await expect(page.getByTestId('conversation-context')).toContainText('SF10001')
 
   await page.reload()
   await connect(page, 'frontend-buyer', password)
-  await expect(page.getByTestId('conversation-context')).toContainText('SF10001')
   await expect(page.getByTestId('selected-order')).toHaveCount(0)
   const followed = await ask(page, '这单现在是什么状态？')
   expect(followed.requestBody.orderNo == null).toBe(true)
@@ -72,11 +70,12 @@ test('restored order context supports a fresh read without selecting a historica
   expect(followed.answer.orders[0]?.status).toBe('SHIPPED')
   expect(followed.answer.context?.kind).toBe('ORDER')
   await page.screenshot({
-    path: testInfo.outputPath('conversation-context-desktop.png'),
+    path: testInfo.outputPath('order-follow-up-desktop.png'),
     fullPage: true,
   })
 
-  await page.getByTestId('context-clear').click()
+  await page.getByRole('button', { name: '取消选中订单', exact: true }).click()
+  await expect(page.getByTestId('selected-order')).toHaveCount(0)
   const cleared = await ask(page, '这单现在是什么状态？')
   expect(cleared.requestBody.resetContext).toBe(true)
   expect(cleared.requestBody.orderNo == null).toBe(true)
@@ -124,7 +123,6 @@ test('knowledge follow-ups reload the current publication and never resurrect an
 
     await page.reload()
     await connect(page, 'frontend-buyer', password)
-    await expect(page.getByTestId('conversation-context')).toBeVisible()
     await expect(page.getByTestId('selected-order')).toHaveCount(0)
     const saved = await api<KnowledgeArticle>(client, 'PUT', `${knowledgeBase}/${article.id}`, {
       title: article.title,
@@ -157,9 +155,9 @@ test('knowledge follow-ups reload the current publication and never resurrect an
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(
       true,
     )
-    await page.getByTestId('conversation-context').scrollIntoViewIfNeeded()
+    await page.getByTestId('chat-message').last().scrollIntoViewIfNeeded()
     await page.screenshot({
-      path: testInfo.outputPath('conversation-context-mobile.png'),
+      path: testInfo.outputPath('knowledge-follow-up-mobile.png'),
       fullPage: true,
     })
 

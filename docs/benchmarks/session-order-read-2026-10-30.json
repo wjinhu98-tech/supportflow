@@ -1,0 +1,656 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-10-30T13:16:35.379Z",
+  "scope": "Single-host isolated LAB, one fixed owned-order HTTP GET through Nginx, same authenticated buyer session. Not an Agent/LLM benchmark or production capacity limit.",
+  "provenance": {
+    "sourceReport": "2026-10-30T13-18-18-498Z-f90d2ec0-7252-451b-86f2-d46e2959b0f4.json",
+    "applicationSourceSha": "6c6aa65532bf4812dec50b8cbadbed67b5fc6e8f",
+    "ciRun": "https://github.com/wjinhu98-tech/supportflow/actions/runs/41055715917",
+    "ciArtifactId": 12976888057,
+    "artifactSha256": "1f6a7b68683ea22b214a5412fb62460cab9185109dc42cfaf3dff9d17761c56e",
+    "backendJarSha256": "caedc884985e7ec18b3b9982be2d150647618ccaede32610202df5410afc6086",
+    "measurementScriptSha256LfNormalized": "cd788ba6536d395922d68070e22757e1ed75b0053e7dc7464616701389afb35d",
+    "measurementScriptChanges": "Explicit request ceiling is 10000; default remains 1000.",
+    "runtime": {
+      "authenticationMode": "database",
+      "basicEnabled": false,
+      "deepSeekEnabled": false,
+      "ragEnabled": true
+    },
+    "containers": [
+      {
+        "name": "supportflow-lab-backend-1",
+        "imageTag": "supportflow-lab-backend:capacity-6c6aa65532bf",
+        "imageId": "sha256:76a9bdc4c7928aa280b20efd95d9e64ed0173c7b63e7d15ec1e86c2dba1812c9",
+        "nanoCpus": 1000000000,
+        "memoryBytes": 805306368
+      },
+      {
+        "name": "supportflow-lab-mysql-1",
+        "imageTag": "mysql:8.0.45",
+        "imageId": "sha256:4af1f8815716546f5b12410f7621f37f93db8dd11a184706ef59111930b8c2ff",
+        "nanoCpus": 1000000000,
+        "memoryBytes": 805306368
+      },
+      {
+        "name": "supportflow-lab-frontend-1",
+        "imageTag": "supportflow-lab-frontend:capacity-6c6aa65532bf",
+        "imageId": "sha256:7f9ee749f58bd2d714065c64d284bc23114e9d39a6e06514bb0d3a0a52286510",
+        "nanoCpus": 500000000,
+        "memoryBytes": 134217728
+      }
+    ],
+    "deepSeekDisabledEvidence": "The verified CI JAR has deepseek.enabled=false in application-lab.yml; active profile is lab and no environment override enables it."
+  },
+  "runtime": {
+    "docker": {
+      "serverVersion": "29.7.2",
+      "logicalCpus": 12,
+      "memoryBytes": 16694149120
+    },
+    "javaVersion": "21.0.12.1",
+    "mysqlImage": "mysql:8.0.45",
+    "platform": "linux/amd64"
+  },
+  "measurement": {
+    "schemaVersion": 1,
+    "purpose": "local_isolated_learning_measurement_not_production_capacity",
+    "target": "http://127.0.0.1:18090",
+    "route": "/api/v1/shops/100/orders/LAB-000001",
+    "methods": [
+      "GET"
+    ],
+    "automaticRetries": 0,
+    "authentication": {
+      "mechanism": "server_cookie_session",
+      "loginBeforeMeasurement": true
+    },
+    "startedAt": "2026-10-30T13:16:35.379Z",
+    "configuration": {
+      "seconds": 30,
+      "concurrency": [
+        1,
+        4,
+        8
+      ],
+      "maxRequests": 10000,
+      "dockerStats": true,
+      "help": false,
+      "timeoutMs": 5000,
+      "warmupMaxRequests": 20,
+      "warmupDurationMs": 3000
+    },
+    "machine": {
+      "platform": "win32",
+      "release": "10.0.19045",
+      "arch": "x64",
+      "node": "v24.15.0",
+      "cpuModel": "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz",
+      "logicalCpus": 12,
+      "totalMemoryBytes": 34208538624
+    },
+    "verification": {
+      "markerRequired": "x-supportflow-environment: isolated-lab",
+      "account": "lab-buyer",
+      "shopId": 100,
+      "orderNo": "LAB-000001",
+      "orderStatus": "SHIPPED",
+      "orderAmount": 199.9,
+      "currency": "CNY"
+    },
+    "faultValidation": {
+      "mode": "separate_automated_mock_tests",
+      "command": "node --test scripts/capacity-lab.test.mjs",
+      "executedByBenchmark": false,
+      "realModelRequests": 0
+    },
+    "stages": [
+      {
+        "concurrency": 1,
+        "configuredDurationMs": 30000,
+        "maxRequests": 10000,
+        "stopReason": "DURATION_LIMIT",
+        "attempt": 4702,
+        "ok": 4701,
+        "httpErrors": 0,
+        "timeouts": 0,
+        "networkErrors": 0,
+        "invalidResponses": 0,
+        "safetyErrors": 0,
+        "aborted": 1,
+        "elapsedMs": 30022.6504,
+        "httpStatuses": {
+          "200": 4701
+        },
+        "latencyPopulation": "validated_http_200_only",
+        "latencySampleCount": 4701,
+        "p50Ms": 4.666700000001583,
+        "p95Ms": 9.981399999998757,
+        "p99Ms": 47.47260000000006,
+        "attemptRps": 156.61508685455698,
+        "actualRps": 156.58177866934759,
+        "successfulRps": 156.58177866934759,
+        "responseCorrectness": {
+          "validated": 4701,
+          "passed": 4701,
+          "failed": 0
+        },
+        "docker": {
+          "before": {
+            "status": "sampled",
+            "containers": [
+              {
+                "Name": "supportflow-lab-backend-1",
+                "CPUPerc": "1.69%",
+                "MemUsage": "271.4MiB / 768MiB",
+                "MemPerc": "35.34%",
+                "NetIO": "147kB / 273kB",
+                "BlockIO": "0B / 0B",
+                "PIDs": "48"
+              },
+              {
+                "Name": "supportflow-lab-mysql-1",
+                "CPUPerc": "5.29%",
+                "MemUsage": "440.3MiB / 768MiB",
+                "MemPerc": "57.34%",
+                "NetIO": "27.4MB / 63.3MB",
+                "BlockIO": "168MB / 1e+03MB",
+                "PIDs": "42"
+              },
+              {
+                "Name": "supportflow-lab-frontend-1",
+                "CPUPerc": "0.00%",
+                "MemUsage": "11.05MiB / 128MiB",
+                "MemPerc": "8.63%",
+                "NetIO": "33.4kB / 40.9kB",
+                "BlockIO": "0B / 0B",
+                "PIDs": "13"
+              }
+            ]
+          },
+          "after": {
+            "status": "sampled",
+            "containers": [
+              {
+                "Name": "supportflow-lab-backend-1",
+                "CPUPerc": "0.36%",
+                "MemUsage": "306.6MiB / 768MiB",
+                "MemPerc": "39.92%",
+                "NetIO": "10.5MB / 7.49MB",
+                "BlockIO": "0B / 0B",
+                "PIDs": "48"
+              },
+              {
+                "Name": "supportflow-lab-mysql-1",
+                "CPUPerc": "0.86%",
+                "MemUsage": "440MiB / 768MiB",
+                "MemPerc": "57.29%",
+                "NetIO": "30.4MB / 69.9MB",
+                "BlockIO": "168MB / 1GB",
+                "PIDs": "42"
+              },
+              {
+                "Name": "supportflow-lab-frontend-1",
+                "CPUPerc": "0.00%",
+                "MemUsage": "12.21MiB / 128MiB",
+                "MemPerc": "9.54%",
+                "NetIO": "5.95MB / 7.55MB",
+                "BlockIO": "0B / 0B",
+                "PIDs": "13"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "concurrency": 4,
+        "configuredDurationMs": 30000,
+        "maxRequests": 10000,
+        "stopReason": "DURATION_LIMIT",
+        "attempt": 8338,
+        "ok": 8334,
+        "httpErrors": 0,
+        "timeouts": 0,
+        "networkErrors": 0,
+        "invalidResponses": 0,
+        "safetyErrors": 0,
+        "aborted": 4,
+        "elapsedMs": 30044.322999999997,
+        "httpStatuses": {
+          "200": 8334
+        },
+        "latencyPopulation": "validated_http_200_only",
+        "latencySampleCount": 8334,
+        "p50Ms": 4.689599999997881,
+        "p95Ms": 70.66129999999976,
+        "p99Ms": 80.09679999999935,
+        "attemptRps": 277.5233111426742,
+        "actualRps": 277.39017450984005,
+        "successfulRps": 277.39017450984005,
+        "responseCorrectness": {
+          "validated": 8334,
+          "passed": 8334,
+          "failed": 0
+        },
+        "docker": {
+          "before": {
+            "status": "sampled",
+            "containers": [
+              {
+                "Name": "supportflow-lab-backend-1",
+                "CPUPerc": "0.23%",
+                "MemUsage": "306.2MiB / 768MiB",
+                "MemPerc": "39.87%",
+                "NetIO": "10.5MB / 7.5MB",
+                "BlockIO": "0B / 0B",
+                "PIDs": "48"
+              },
+              {
+                "Name": "supportflow-lab-mysql-1",
+                "CPUPerc": "5.49%",
+                "MemUsage": "441MiB / 768MiB",
+                "MemPerc": "57.42%",
+                "NetIO": "30.4MB / 69.9MB",
+                "BlockIO": "168MB / 1GB",
+                "PIDs": "42"
+              },
+              {
+                "Name": "supportflow-lab-frontend-1",
+                "CPUPerc": "0.01%",
+                "MemUsage": "12.05MiB / 128MiB",
+                "MemPerc": "9.41%",
+                "NetIO": "5.95MB / 7.55MB",
+                "BlockIO": "0B / 0B",
+                "PIDs": "13"
+              }
+            ]
+          },
+          "after": {
+            "status": "sampled",
+            "containers": [
+              {
+                "Name": "supportflow-lab-backend-1",
+                "CPUPerc": "0.32%",
+                "MemUsage": "314.3MiB / 768MiB",
+                "MemPerc": "40.93%",
+                "NetIO": "28.9MB / 20.3MB",
+                "BlockIO": "0B / 0B",
+                "PIDs": "48"
+              },
+              {
+                "Name": "supportflow-lab-mysql-1",
+                "CPUPerc": "0.54%",
+                "MemUsage": "441.1MiB / 768MiB",
+                "MemPerc": "57.44%",
+                "NetIO": "35.9MB / 81.4MB",
+                "BlockIO": "168MB / 1GB",
+                "PIDs": "44"
+              },
+              {
+                "Name": "supportflow-lab-frontend-1",
+                "CPUPerc": "0.00%",
+                "MemUsage": "15.28MiB / 128MiB",
+                "MemPerc": "11.94%",
+                "NetIO": "16.5MB / 21MB",
+                "BlockIO": "0B / 0B",
+                "PIDs": "13"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "concurrency": 8,
+        "configuredDurationMs": 30000,
+        "maxRequests": 10000,
+        "stopReason": "DURATION_LIMIT",
+        "attempt": 8653,
+        "ok": 8645,
+        "httpErrors": 0,
+        "timeouts": 0,
+        "networkErrors": 0,
+        "invalidResponses": 0,
+        "safetyErrors": 0,
+        "aborted": 8,
+        "elapsedMs": 30025.258499999996,
+        "httpStatuses": {
+          "200": 8645
+        },
+        "latencyPopulation": "validated_http_200_only",
+        "latencySampleCount": 8645,
+        "p50Ms": 6.371100000003935,
+        "p95Ms": 89.66139999999723,
+        "p99Ms": 103.20889999999781,
+        "attemptRps": 288.1906911808936,
+        "actualRps": 287.92424884535137,
+        "successfulRps": 287.92424884535137,
+        "responseCorrectness": {
+          "validated": 8645,
+          "passed": 8645,
+          "failed": 0
+        },
+        "docker": {
+          "before": {
+            "status": "sampled",
+            "containers": [
+              {
+                "Name": "supportflow-lab-backend-1",
+                "CPUPerc": "5.99%",
+                "MemUsage": "314.2MiB / 768MiB",
+                "MemPerc": "40.91%",
+                "NetIO": "28.9MB / 20.3MB",
+                "BlockIO": "0B / 0B",
+                "PIDs": "48"
+              },
+              {
+                "Name": "supportflow-lab-mysql-1",
+                "CPUPerc": "0.78%",
+                "MemUsage": "441.1MiB / 768MiB",
+                "MemPerc": "57.43%",
+                "NetIO": "35.9MB / 81.4MB",
+                "BlockIO": "168MB / 1GB",
+                "PIDs": "44"
+              },
+              {
+                "Name": "supportflow-lab-frontend-1",
+                "CPUPerc": "2.93%",
+                "MemUsage": "14.43MiB / 128MiB",
+                "MemPerc": "11.27%",
+                "NetIO": "16.5MB / 21MB",
+                "BlockIO": "0B / 0B",
+                "PIDs": "13"
+              }
+            ]
+          },
+          "after": {
+            "status": "sampled",
+            "containers": [
+              {
+                "Name": "supportflow-lab-backend-1",
+                "CPUPerc": "0.20%",
+                "MemUsage": "317MiB / 768MiB",
+                "MemPerc": "41.27%",
+                "NetIO": "47.9MB / 33.6MB",
+                "BlockIO": "0B / 0B",
+                "PIDs": "53"
+              },
+              {
+                "Name": "supportflow-lab-mysql-1",
+                "CPUPerc": "0.82%",
+                "MemUsage": "441.8MiB / 768MiB",
+                "MemPerc": "57.52%",
+                "NetIO": "41.7MB / 93.4MB",
+                "BlockIO": "168MB / 1GB",
+                "PIDs": "46"
+              },
+              {
+                "Name": "supportflow-lab-frontend-1",
+                "CPUPerc": "0.02%",
+                "MemUsage": "16.09MiB / 128MiB",
+                "MemPerc": "12.57%",
+                "NetIO": "27.6MB / 35.1MB",
+                "BlockIO": "0B / 0B",
+                "PIDs": "13"
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "status": "COMPLETED",
+    "preflight": "PASSED",
+    "warmup": {
+      "concurrency": 1,
+      "configuredDurationMs": 3000,
+      "maxRequests": 20,
+      "stopReason": "REQUEST_LIMIT",
+      "attempt": 20,
+      "ok": 20,
+      "httpErrors": 0,
+      "timeouts": 0,
+      "networkErrors": 0,
+      "invalidResponses": 0,
+      "safetyErrors": 0,
+      "aborted": 0,
+      "elapsedMs": 413.1396,
+      "httpStatuses": {
+        "200": 20
+      },
+      "latencyPopulation": "validated_http_200_only",
+      "latencySampleCount": 20,
+      "p50Ms": 9.978899999999953,
+      "p95Ms": 64.07999999999993,
+      "p99Ms": 64.98950000000002,
+      "attemptRps": 48.40978690979998,
+      "actualRps": 48.40978690979998,
+      "successfulRps": 48.40978690979998,
+      "responseCorrectness": {
+        "validated": 20,
+        "passed": 20,
+        "failed": 0
+      }
+    },
+    "finishedAt": "2026-10-30T13:18:18.496Z"
+  },
+  "monitoring": {
+    "sourceReport": "2026-10-30T13-18-18-498Z-f90d2ec0-7252-451b-86f2-d46e2959b0f4.json",
+    "startedAt": "2026-10-30T13:16:35.379Z",
+    "finishedAt": "2026-10-30T13:18:18.496Z",
+    "samplingStepSeconds": 15,
+    "note": "Scrape samples during this benchmark; not continuous peaks or production limits.",
+    "metrics": {
+      "processCpu": {
+        "query": "process_cpu_usage{job=\"supportflow-backend\"}",
+        "sampleCount": 7,
+        "status": "SAMPLED",
+        "min": 0.07636363636363637,
+        "max": 0.9864864864864865,
+        "series": [
+          {
+            "values": [
+              [
+                1793366195.379,
+                0.07636363636363637
+              ],
+              [
+                1793366210.379,
+                0.9223021582733812
+              ],
+              [
+                1793366225.379,
+                0.87
+              ],
+              [
+                1793366240.379,
+                0.8186046511627907
+              ],
+              [
+                1793366255.379,
+                0.9864864864864865
+              ],
+              [
+                1793366270.379,
+                0.888095238095238
+              ],
+              [
+                1793366285.379,
+                0.7668831168831168
+              ]
+            ]
+          }
+        ]
+      },
+      "jvmUsedBytes": {
+        "query": "sum(jvm_memory_used_bytes{job=\"supportflow-backend\"})",
+        "sampleCount": 7,
+        "status": "SAMPLED",
+        "min": 123188944,
+        "max": 164821840,
+        "series": [
+          {
+            "values": [
+              [
+                1793366195.379,
+                123188944
+              ],
+              [
+                1793366210.379,
+                145321504
+              ],
+              [
+                1793366225.379,
+                156625272
+              ],
+              [
+                1793366240.379,
+                154309096
+              ],
+              [
+                1793366255.379,
+                162237512
+              ],
+              [
+                1793366270.379,
+                162423520
+              ],
+              [
+                1793366285.379,
+                164821840
+              ]
+            ]
+          }
+        ]
+      },
+      "poolActive": {
+        "query": "hikaricp_connections_active{job=\"supportflow-backend\"}",
+        "sampleCount": 7,
+        "status": "SAMPLED",
+        "min": 0,
+        "max": 2,
+        "series": [
+          {
+            "values": [
+              [
+                1793366195.379,
+                0
+              ],
+              [
+                1793366210.379,
+                0
+              ],
+              [
+                1793366225.379,
+                0
+              ],
+              [
+                1793366240.379,
+                1
+              ],
+              [
+                1793366255.379,
+                2
+              ],
+              [
+                1793366270.379,
+                1
+              ],
+              [
+                1793366285.379,
+                2
+              ]
+            ]
+          }
+        ]
+      },
+      "poolPending": {
+        "query": "hikaricp_connections_pending{job=\"supportflow-backend\"}",
+        "sampleCount": 7,
+        "status": "SAMPLED",
+        "min": 0,
+        "max": 0,
+        "series": [
+          {
+            "values": [
+              [
+                1793366195.379,
+                0
+              ],
+              [
+                1793366210.379,
+                0
+              ],
+              [
+                1793366225.379,
+                0
+              ],
+              [
+                1793366240.379,
+                0
+              ],
+              [
+                1793366255.379,
+                0
+              ],
+              [
+                1793366270.379,
+                0
+              ],
+              [
+                1793366285.379,
+                0
+              ]
+            ]
+          }
+        ]
+      },
+      "poolTimeouts": {
+        "query": "hikaricp_connections_timeout_total{job=\"supportflow-backend\"}",
+        "sampleCount": 7,
+        "status": "SAMPLED",
+        "min": 0,
+        "max": 0,
+        "series": [
+          {
+            "values": [
+              [
+                1793366195.379,
+                0
+              ],
+              [
+                1793366210.379,
+                0
+              ],
+              [
+                1793366225.379,
+                0
+              ],
+              [
+                1793366240.379,
+                0
+              ],
+              [
+                1793366255.379,
+                0
+              ],
+              [
+                1793366270.379,
+                0
+              ],
+              [
+                1793366285.379,
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "limitations": [
+    "Login and BCrypt execute before measurement; authenticated account checks and order SQL remain in each measured request.",
+    "Prometheus samples at 15-second intervals across the complete benchmark window including warmup and before/after snapshots. Sampled maxima are not continuous peaks or per-stage attribution.",
+    "Duration-stop cancellations are separate from completed-request errors and excluded from successful latency percentiles.",
+    "This is a short closed-loop run of one fixed order in a 5000-order seed dataset; no whole-site, production or model-service capacity claim.",
+    "The 2026-10-26 Basic-authentication baseline used a different version and workload cost, so these results do not establish a controlled optimization factor."
+  ]
+}

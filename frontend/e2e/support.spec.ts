@@ -67,7 +67,13 @@ test('an uncertain human send is retained without replay and explicit retry uses
   })
   await send(page, '请核实这条消息')
   await expect(page.getByTestId('buyer-support-status')).toContainText('待核实消息：请核实这条消息')
-  await page.getByRole('button', { name: '刷新人工服务', exact: true }).click()
+  await page.waitForResponse(
+    (response) =>
+      response.request().method() === 'GET' &&
+      /\/support$/.test(new URL(response.url()).pathname) &&
+      response.status() === 200,
+    { timeout: 10_000 },
+  )
   expect(ids).toHaveLength(1)
   await page.getByRole('button', { name: '重试这条消息', exact: true }).click()
   await expect(page.getByTestId('chat-message')).toContainText('请核实这条消息')

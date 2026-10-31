@@ -20,9 +20,11 @@ test('only the fixed literal isolated origin is permitted', () => {
 
 test('CLI bounds reject destination overrides and unbounded or duplicated stages', () => {
   assert.deepEqual(parseArgs([]).concurrency, [1, 4, 8]);
+  assert.equal(parseArgs([]).maxRequests, 1000);
   assert.equal(parseArgs(['--seconds=30', '--max-requests=1000', '--concurrency=1,16']).seconds, 30);
+  assert.equal(parseArgs(['--max-requests=10000']).maxRequests, 10000);
   for (const argument of ['--target=http://127.0.0.1:8080', '--password-file=other', '--output=other',
-    '--seconds=61', '--seconds=0', '--max-requests=1001', '--max-requests=0', '--concurrency=17',
+    '--seconds=61', '--seconds=0', '--max-requests=10001', '--max-requests=0', '--concurrency=17',
     '--concurrency=4,1', '--concurrency=1,1', '--concurrency=1,2,4,8,16']) {
     assert.throws(() => parseArgs([argument]), { message: 'INVALID_ARGUMENTS' });
   }
@@ -161,6 +163,20 @@ test('stage reservations cannot exceed the request cap or concurrency bound', as
   assert.equal(result.attempt, 37);
 });
 
+test('stages preserve the default cap and stop exactly at the explicit 10000-request ceiling', async () => {
+  for (const maxRequests of [undefined, 10_000]) {
+    let calls = 0;
+    const expected = maxRequests ?? 1000;
+    const result = await runStage({ concurrency: 16, durationMs: 30_000, maxRequests,
+      request: async () => { calls++; return { kind: 'ok', status: 200, elapsedMs: 1 }; } });
+    assert.equal(calls, expected);
+    assert.equal(result.maxRequests, expected);
+    assert.equal(result.attempt, expected);
+    assert.equal(result.ok, expected);
+    assert.equal(result.stopReason, 'REQUEST_LIMIT');
+  }
+});
+
 test('stop aborts all in-flight requests without admitting replacements', async () => {
   const stop = new AbortController();
   let admitted = 0;
@@ -204,7 +220,7 @@ test('environment mismatch stops the stage immediately and preserves correctness
 });
 
 test('invalid stage settings fail before a request can start', async () => {
-  for (const changed of [{ concurrency: 17 }, { durationMs: 60_001 }, { maxRequests: 1001 }, { maxRequests: 0 }]) {
+  for (const changed of [{ concurrency: 17 }, { durationMs: 60_001 }, { maxRequests: 10001 }, { maxRequests: 0 }]) {
     await assert.rejects(runStage({ concurrency: 1, durationMs: 1000, maxRequests: 10,
       request: async () => assert.fail('Unsafe stages must never call transport'), ...changed }), { message: 'INVALID_STAGE' });
   }

@@ -52,6 +52,15 @@ public final class PublicReferenceCatalog {
                         0, List.of("canonical-public-reference"))).findFirst();
     }
 
+    /** Display only the reviewed answer text; the complete canonical document remains audit evidence. */
+    java.util.Optional<String> answerContent(KnowledgeMatch match) {
+        return entries.stream().filter(entry -> {
+            KnowledgeDocument document = entry.document();
+            return document.sourceId().equals(match.sourceId()) && document.version().equals(match.version())
+                    && document.title().equals(match.title()) && document.content().equals(match.content());
+        }).map(Entry::summary).findFirst();
+    }
+
     record Entry(String id, List<Long> shops, String title, List<String> keywords, String url, String publisher, String summary) {
         Entry { shops = List.copyOf(shops); keywords = List.copyOf(keywords); }
         KnowledgeDocument document() {

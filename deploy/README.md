@@ -4,6 +4,10 @@
 
 这是学习和容量测量的单机基线，不是生产部署、微服务拆分或高可用方案。实际构建、启动、业务验收和容量结果需要单独验证，不能从配置上推断吞吐或延迟。
 
+本文用于**从源码构建的 Compose 环境**，默认启用本地 BGE 检索并只读挂载已校验的模型文件。下载 GitHub 交付包后，请使用[交付安装说明](../docs/delivery-install.md)：交付包默认关闭 RAG，安装者只需要 Docker/Compose，可另行准备模型后启用。两条路径都关闭 DeepSeek，不挂载真实模型 Key。
+
+当前会话版本的固定订单读取实测、确切 CI 构建来源与镜像复现步骤见[部署和容量记录](../docs/deployment-and-capacity.md#当前基线2026-10-30-会话登录版本)。其中的镜像覆盖文件仅用于在已有 V22 LAB 上固定这次应用构建。
+
 ## 服务与访问边界
 
 | 服务                         | 宿主机入口                        | 用途与上限                                                              |
@@ -24,7 +28,14 @@ Nginx access log 仅记录方法、状态码、请求时间与上游状态，不
 
 ## 构建与首次启动
 
-前提是 Docker Desktop 已启动并支持 Linux 容器、Docker Compose 的健康/成功依赖条件，以及本机 Java 21 和 Maven。先在仓库根目录完成统一验证并生成最终 Spring Boot jar，例如执行 `mvn verify`。后端镜像只复制 `target/supportflow-backend-0.1.0-SNAPSHOT.jar`，不在镜像构建时重新运行 Maven。
+前提是 Docker Desktop 已启动并支持 Linux 容器、Docker Compose 的健康/成功依赖条件，以及本机 Java 21、Maven 和 PowerShell 7（`pwsh`）。在仓库根目录先准备并校验本地 BGE 模型，再完成统一验证并生成最终 Spring Boot jar：
+
+```powershell
+pwsh -File scripts/setup-rag-model.ps1
+mvn verify
+```
+
+模型脚本按固定 revision 和校验值准备 `.local/models/bge-small-zh-v1.5/model_quantized.onnx` 与 `vocab.txt`；缺文件时下载，已有文件只做校验，失败时保留原文件。它不调用 DeepSeek。源码 Compose 显式启用本地 RAG，缺少或校验不通过的模型会阻止后端启动；全量集成测试也使用这些文件。后端镜像只复制 `target/supportflow-backend-0.1.0-SNAPSHOT.jar`，不在镜像构建时重新运行 Maven。
 
 在仓库根目录的 PowerShell 中准备本实验专用凭证：
 
@@ -54,18 +65,18 @@ docker compose -f deploy/compose.yml ps -a
 ```text
 mysql 首次启动
   → init-lab.sh：只建 supportflow_lab、lab_app、lab_migrator 和初始库权限
-  → migrate：LabDeploymentTool migrate，迁移账号运行 Flyway
+  → migrate：LabDeploymentTool migrate，迁移账号运行 Flyway V1–V22
   → grant：root 仅授应用所需表/列写权限，此时业务表已经存在
   → seed：LabDeploymentTool seed，迁移账号写入实验数据与商家关系
-  → seed-accounts：迁移账号只导入缺失的 lab-buyer / lab-merchant 账号，保留现有账号状态及密码
+  → seed-accounts：导入缺失的 lab-buyer / lab-merchant，保留已有状态及密码，并为有效实验商家补充人工接待权限
   → backend：lab_app 启动，Flyway=false，readiness 检查通过
       ├─ frontend：同源网页与 /api 反向代理
       └─ prometheus：用独立运维账号抓取管理端
 ```
 
-`migrate`、`seed` 和 `seed-accounts` 固定访问容器地址 `mysql:3306/supportflow_lab`，不读取本机日常配置。前两者只挂载迁移密码文件；`seed-accounts` 额外挂载既有买家与商家 bcrypt 哈希，复制原身份与操作权限，只插入缺失账号，不更新已有密码、禁用状态或店铺授权。它不会创建 `lab-ops` 业务账号。`seed` 写入店铺 100、买家 200 的 5000 笔实验订单及所需商家映射；`LAB-000001` 为已发货、199.90 CNY 的实验订单。它不用于回退或重置日常业务数据。
+`migrate`、`seed` 和 `seed-accounts` 固定访问容器地址 `mysql:3306/supportflow_lab`，不读取本机日常配置。前两者只挂载迁移密码文件；`seed-accounts` 额外挂载既有买家与商家 bcrypt 哈希，只插入缺失账号，不更新已有密码、禁用状态或店铺授权。它还为已有有效商家员工绑定补充 `CHAT_SUPPORT`；首次补充会提升账号安全版本，使旧会话在后续请求中失效，重复执行不重复提升版本。它不会创建 `lab-ops` 业务账号。`seed` 写入店铺 100、买家 200 的 5000 笔实验订单及所需商家映射；`LAB-000001` 为已发货、199.90 CNY 的实验订单。它不用于回退或重置日常业务数据。
 
-MySQL 首次 init 只运行在新数据卷。应用最初只有新库 `SELECT`，迁移账号有该库的 `SELECT, INSERT, UPDATE, CREATE, INDEX, ALTER`。`grant` 在迁移成功后才授表/列写权限，避免向不存在的表授权；应用只有订单 `status/received_at` 列更新、收货审计插入、售后/执行/会话/知识表相应写权限，以及 V18 买家订单删除记录、V19 知识导入记录和 V21 持久化向量的插入权限。V20 账号表只能查询，应用不能创建、修改或删除账号；不获 DELETE、DDL、GRANT OPTION 或商家授权关系写权限。删除、导入和向量记录不可修改，原订单保留；升级时先运行 `migrate`、`grant` 和 `seed-accounts`，再更新后端。初始库级权限转义数据库名中的下划线，避免 MySQL 的库权限通配语义扩大匹配范围。
+MySQL 首次 init 只运行在新数据卷。应用最初只有新库 `SELECT`，迁移账号有该库的 `SELECT, INSERT, UPDATE, CREATE, INDEX, ALTER`。`grant` 在迁移成功后才授表/列写权限，避免向不存在的表授权；应用只有订单 `status/received_at` 列更新、收货审计插入、售后/执行/会话/知识表相应写权限，以及 V18 买家订单删除记录、V19 知识导入记录和 V21 持久化向量的插入权限。V22 人工接待与处理权表可读写，人工消息表只能查询和插入，不能修改历史消息。V20 账号表只能查询，应用不能创建、修改或删除账号；不获 DELETE、DDL、GRANT OPTION 或商家授权关系写权限。删除、导入和向量记录不可修改，原订单保留；升级时先运行 `migrate`、`grant` 和 `seed-accounts`，再更新后端。初始库级权限转义数据库名中的下划线，避免 MySQL 的库权限通配语义扩大匹配范围。
 
 已有实验卷升级时，在新镜像构建完成、MySQL 正常运行后依次执行：
 

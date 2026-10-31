@@ -36,7 +36,9 @@ class PublicKnowledgeServiceTest {
             assertThat(source.sourceId()).isEqualTo(second.sourceId()); assertThat(source.version()).isEqualTo(second.version());
             assertThat(source.content()).isEqualTo(second.content());
         });
-        assertThat(answer.reply()).contains(second.content()).doesNotContain(first.title());
+        assertThat(answer.reply()).contains("适用于支持相应功能的Android手机", "应以设备实际界面及配件手册为准")
+                .doesNotContain(first.title(), second.title(), second.sourceId(), second.version(),
+                        "【公开使用参考】", "来源：", "原文：", "https://", "核对日期：");
         verify(selector).select(102, QUESTION, List.of(first, second));
     }
 
@@ -45,7 +47,9 @@ class PublicKnowledgeServiceTest {
         var forged = new KnowledgeMatch(first.sourceId(), first.version(), first.title(), "PRIVATE-CONTENT", 1, List.of());
         for (var matches : List.of(List.of(privateSource), List.of(first, privateSource), List.of(forged))) {
             when(rag.search(eq(102L), anyList(), eq(QUESTION))).thenReturn(matches);
-            assertThat(knowledge.answerDetailed(102, QUESTION).evidence().sources()).hasSize(matches.size());
+            var answer = knowledge.answerDetailed(102, QUESTION);
+            assertThat(answer.evidence().sources()).hasSize(matches.size());
+            assertThat(answer.reply()).contains("PRIVATE-CONTENT");
         }
         verifyNoInteractions(selector);
     }

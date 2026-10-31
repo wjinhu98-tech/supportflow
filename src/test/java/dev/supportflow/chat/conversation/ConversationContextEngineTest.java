@@ -43,6 +43,46 @@ class ConversationContextEngineTest {
     private final ConversationContextEngine engine = new ConversationContextEngine(orchestrator, knowledge, orders,
             new ConversationRouter(), Clock.fixed(NOW, ZoneOffset.UTC));
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "这个是通过查数据库回答的吗", "刚刚回答的问题", "明天天气怎么样", "帮我写一段Java代码",
+            "帮我写查询订单的SQL", "请写一个退款接口的Java代码"
+    })
+    void unrelatedQuestionsCannotBorrowAnyRememberedOrSelectedSubject(String message) {
+        for (ConversationContextRef previous : List.of(ConversationContextRef.none(), orderContext(), knowledgeContext())) {
+            for (String selected : new String[] {null, "SF10001"}) {
+                ChatResponse response = reply(message, selected, previous);
+                assertThat(response.reply()).isEqualTo("对不起，我无法回复您的问题。");
+                assertThat(response.orders()).isEmpty();
+                assertThat(response.knowledge()).isNull();
+                assertThat(response.context().kind()).isEqualTo(ConversationContextKind.NONE);
+            }
+        }
+        verifyNoInteractions(orders, knowledge, orchestrator);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"电脑是否支持Java开发", "这个商品的材质代码是什么意思"})
+    void technicalWordsInProductQuestionsStillUseCurrentShopKnowledge(String message) {
+        when(knowledge.tryAnswerDetailed(100, message))
+                .thenReturn(Optional.of(answer(SOURCE, "v1", "当前商品的使用说明")));
+        ChatResponse response = reply(message, "SF10001", orderContext());
+        assertThat(response.reply()).isEqualTo("当前商品的使用说明");
+        assertThat(response.context().kind()).isEqualTo(ConversationContextKind.KNOWLEDGE);
+        verify(knowledge).tryAnswerDetailed(100, message);
+        verifyNoInteractions(orders, orchestrator);
+    }
+
+    @Test
+    void technicalWordsInAnExplicitAfterSaleReasonRemainBusinessInput() {
+        String message = "申请售后 原因：程序里提示通过查数据库回答出错";
+        when(orchestrator.reply(principal, 100, message, "SF10001"))
+                .thenReturn(ChatReply.text("原有售后校验结果"));
+        assertThat(reply(message, "SF10001", orderContext()).reply()).isEqualTo("原有售后校验结果");
+        verify(orchestrator).reply(principal, 100, message, "SF10001");
+        verifyNoInteractions(orders, knowledge);
+    }
+
     @Test
     void aNewOwnedOrderCardEstablishesOnlyItsPublicReference() {
         when(orchestrator.reply(principal, 100, "查订单 SF10001", "SF10001"))

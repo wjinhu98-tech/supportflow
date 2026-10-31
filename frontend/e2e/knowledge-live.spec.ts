@@ -1,5 +1,10 @@
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
-import type { ChatResponse, KnowledgeArticle, KnowledgeAuditPage } from '../src/types'
+import type {
+  ChatResponse,
+  KnowledgeArticle,
+  KnowledgeAuditPage,
+  ShopConversationWindow,
+} from '../src/types'
 import { connect, send } from './helpers'
 import { sessionAccount } from './session'
 
@@ -359,7 +364,7 @@ test('a lost publish response is read back without replaying publication', async
   }
 })
 
-test('synonym FAQ evidence is collapsible plain text and history keeps the cited revision after offline', async ({
+test('knowledge answers show plain text while audit snapshots keep the cited revision after offline', async ({
   page,
 }, testInfo) => {
   test.setTimeout(75_000)
@@ -405,10 +410,11 @@ test('synonym FAQ evidence is collapsible plain text and history keeps the cited
     }
     const result = turn.messages.find((message) => message.role === 'ASSISTANT')!.response!
     expect(result.knowledge?.status).toBe('ANSWERED')
-    expect(result.reply.length).toBeLessThan(1000)
-    expect(result.reply).not.toContain(original)
-    expect(result.reply).toContain('展开来源')
-    expect(result.reply).not.toContain('演示贺卡可手写祝福语')
+    expect(result.reply.length).toBeLessThanOrEqual(4000)
+    expect(result.reply).toContain(original)
+    expect(result.reply).not.toContain('展开来源')
+    expect(result.reply).not.toContain(title)
+    expect(result.reply).not.toContain(`[来源：kb-${draft.id}`)
     expect(result.knowledge?.sources).toContainEqual({
       sourceId: `kb-${draft.id}`,
       version: `v${published.publishedRevision}`,
@@ -416,44 +422,42 @@ test('synonym FAQ evidence is collapsible plain text and history keeps the cited
       content: original,
     })
     const message = page.getByTestId('chat-message').last()
-    const source = message.getByTestId('knowledge-source').filter({ hasText: title })
-    await expect(source).toHaveCount(1)
-    await expect(source.getByTestId('knowledge-source-content')).not.toBeVisible()
-    await source.getByTestId('knowledge-source-toggle').click()
-    await expect(source.getByTestId('knowledge-source-content')).toBeVisible()
-    await expect(source.getByTestId('knowledge-source-content')).toContainText('<img')
-    await expect(source.locator('img,script,iframe,a')).toHaveCount(0)
+    await expect(message.locator('.message-bubble')).toContainText(original)
+    await expect(message.getByTestId('knowledge-sources')).toHaveCount(0)
+    await expect(message.locator('img,script,iframe,a')).toHaveCount(0)
     await page.screenshot({
-      path: testInfo.outputPath('knowledge-evidence-desktop.png'),
+      path: testInfo.outputPath('knowledge-answer-desktop.png'),
       fullPage: true,
     })
     await page.setViewportSize({ width: 390, height: 844 })
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(
       true,
     )
-    await source.getByTestId('knowledge-source-toggle').scrollIntoViewIfNeeded()
     await page.screenshot({
-      path: testInfo.outputPath('knowledge-evidence-mobile.png'),
+      path: testInfo.outputPath('knowledge-answer-mobile.png'),
       fullPage: true,
     })
     await call(editor, 'POST', `${base}/${draft.id}/offline`, {
       expectedVersion: published.version,
     })
 
+    const restoredHistory = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'GET' &&
+        new URL(response.url()).pathname === '/api/v1/shops/100/chat/window' &&
+        response.status() === 200,
+    )
     await page.reload()
     await connect(page, 'frontend-buyer', password)
-    const restored = page
-      .getByTestId('chat-message')
-      .last()
-      .getByTestId('knowledge-source')
-      .filter({ hasText: title })
-    await expect(restored).toHaveCount(1)
-    await expect(
-      page.getByTestId('chat-message').last().getByTestId('knowledge-sources'),
-    ).toContainText(/历史|快照/)
-    await expect(restored.getByTestId('knowledge-source-content')).not.toBeVisible()
-    await restored.getByTestId('knowledge-source-toggle').click()
-    await expect(restored.getByTestId('knowledge-source-content')).toContainText(original)
+    const saved = (await (await restoredHistory).json()) as ShopConversationWindow
+    const savedAnswer = saved.messages.find(
+      (item) => item.role === 'ASSISTANT' && item.response?.reply === result.reply,
+    )
+    expect(savedAnswer?.response?.knowledge).toEqual(result.knowledge)
+    const restored = page.getByTestId('chat-message').filter({ hasText: result.reply }).last()
+    await expect(restored.locator('.message-bubble')).toContainText(original)
+    await expect(restored.getByTestId('knowledge-sources')).toHaveCount(0)
+    await expect(restored.locator('img,script,iframe,a')).toHaveCount(0)
     expect(unexpectedSourceRequests).toBe(0)
   } finally {
     await editor.dispose()

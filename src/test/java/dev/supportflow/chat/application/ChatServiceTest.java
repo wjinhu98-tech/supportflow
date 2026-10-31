@@ -14,6 +14,8 @@ import dev.supportflow.order.domain.model.SupportOrder;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.security.access.AccessDeniedException;
 
@@ -53,6 +55,24 @@ class ChatServiceTest {
         assertThat(result.type()).isEqualTo(ChatReplyType.TEXT);
         assertThat(result.orders()).isEmpty();
         assertThat(result.nextAfterId()).isNull();
+        verifyNoInteractions(orderQueryService);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"讲个笑话", "写一首诗", "解释量子力学", "今天的新闻是什么"})
+    void shouldDeclineUnrelatedMessagesWithoutOrderData(String message) {
+        ChatReply result = reply(message);
+        assertThat(result.reply()).isEqualTo("对不起，我无法回复您的问题。");
+        assertThat(result.type()).isEqualTo(ChatReplyType.TEXT);
+        assertThat(result.orders()).isEmpty();
+        assertThat(result.knowledge()).isNull();
+        verifyNoInteractions(orderQueryService);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"查询订单", "商品材质怎么保养", "耳机的包装是什么"})
+    void shouldNotTreatAnUnrecognizedBusinessQuestionAsUnrelated(String message) {
+        assertThat(reply(message).reply()).isNotEqualTo("对不起，我无法回复您的问题。");
         verifyNoInteractions(orderQueryService);
     }
 

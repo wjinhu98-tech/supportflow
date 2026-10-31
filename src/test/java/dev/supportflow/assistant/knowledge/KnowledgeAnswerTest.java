@@ -21,20 +21,19 @@ class KnowledgeAnswerTest {
     private final KnowledgeService service = new KnowledgeService(repository);
 
     @Test
-    void aLongSourceIsExpandableWithoutSelectingOnlyItsPositiveParagraph() {
+    void aLongAnswerRetainsEveryConditionWhileSourceMetadataStaysInAuditEvidence() {
         String content = "以下仅为本地演示，不代表实际服务承诺。\n\n演示贺卡可手写祝福语。\n\n其他资料：" + "背景说明。".repeat(200);
         when(repository.publishedForShop(100)).thenReturn(List.of(source(1, content)));
         KnowledgeAnswer answer = service.answerDetailed(100, "知识库：能放张祝福卡吗？");
         assertThat(answer.evidence().status()).isEqualTo(KnowledgeStatus.ANSWERED);
-        assertThat(answer.reply()).hasSizeLessThan(1000).contains("演示", "展开来源", "完整说明")
-                .doesNotContain("贺卡可手写祝福语", "背景说明。", "[来源：", "资料原文开始");
+        assertThat(answer.reply()).isEqualTo(content)
+                .doesNotContain("展开来源", "[来源：", "资料原文开始", "【演示】贺卡书写说明", "kb-" + ID);
         assertThat(answer.evidence().sources()).singleElement().satisfies(citation -> {
             assertThat(citation.sourceId()).isEqualTo("kb-" + ID);
             assertThat(citation.version()).isEqualTo("v1");
             assertThat(citation.content()).isEqualTo(content);
         });
-        // Existing internal callers retain their complete legacy citation rendering.
-        assertThat(service.answer(100, "知识库：贺卡")).contains(content, "[来源：kb-" + ID + "@v1]");
+        assertThat(service.answer(100, "知识库：贺卡")).isEqualTo(content);
     }
 
     @Test
@@ -43,6 +42,15 @@ class KnowledgeAnswerTest {
         when(repository.publishedForShop(100)).thenReturn(List.of(source(1, content)));
         assertThat(service.answerDetailed(100, "贺卡能写字吗").reply())
                 .contains("贺卡可以手写祝福语", "但不能定制印刷", "必须以实际商品说明为准");
+    }
+
+    @Test
+    void aBusinessConditionInABodyHeadingMustRemainVisible() {
+        String content = "# 购买满两件才可附赠\n\n贺卡可以附赠。";
+        when(repository.publishedForShop(100)).thenReturn(List.of(source(1, content)));
+        KnowledgeAnswer answer = service.answerDetailed(100, "贺卡可以附赠吗？");
+        assertThat(answer.reply()).isEqualTo(content).contains("购买满两件才可附赠");
+        assertThat(answer.evidence().sources().getFirst().content()).isEqualTo(content);
     }
 
     @Test
@@ -58,7 +66,7 @@ class KnowledgeAnswerTest {
     }
 
     @Test
-    void theCompleteSourceBoundaryNeverBecomesAPartialQuotation() {
+    void theFormerExpansionBoundaryNowReturnsTheCompleteAnswer() {
         String complete = "贺卡说明：" + "字".repeat(895);
         assertThat(complete).hasSize(900);
         when(repository.publishedForShop(100)).thenReturn(List.of(source(1, complete)));
@@ -66,20 +74,19 @@ class KnowledgeAnswerTest {
         String overlong = complete + "。";
         when(repository.publishedForShop(100)).thenReturn(List.of(source(1, overlong)));
         KnowledgeAnswer answer = service.answerDetailed(100, "贺卡");
-        assertThat(answer.reply()).contains("展开来源").doesNotContain(complete);
+        assertThat(answer.reply()).isEqualTo(overlong).doesNotContain("展开来源");
         assertThat(answer.evidence().sources().getFirst().content()).isEqualTo(overlong);
     }
 
     @Test
-    void controlledPublicDocumentsAlsoUseCompleteQuotesOrExpansionWithoutDroppingConditions() {
+    void controlledPublicDocumentsRetainAllConditionsInTheAnswer() {
         String shortContent = "贺卡可以附赠。\n\n购买满两件才可附赠。";
         String longContent = shortContent + "\n\n其他说明：" + "背景资料。".repeat(200);
         for (String content : List.of(shortContent, longContent)) {
             var controlled = new KnowledgeService(List.of(new KnowledgeDocument("public-gift", "v1",
                     "贺卡说明", List.of("贺卡"), content)));
             KnowledgeAnswer answer = controlled.answerDetailed(100, "贺卡可以附赠吗");
-            if (content.length() <= 900) assertThat(answer.reply()).contains(content);
-            else assertThat(answer.reply()).contains("展开来源").doesNotContain("贺卡可以附赠。");
+            assertThat(answer.reply()).isEqualTo(content).doesNotContain("展开来源");
             assertThat(answer.evidence().sources().getFirst().content()).isEqualTo(content);
         }
     }
@@ -89,16 +96,16 @@ class KnowledgeAnswerTest {
         String content = "贺卡支持定制" + "的相关说明".repeat(300) + "，但当前演示不提供该服务。";
         when(repository.publishedForShop(100)).thenReturn(List.of(source(1, content)));
         KnowledgeAnswer answer = service.answerDetailed(100, "贺卡支持定制吗");
-        assertThat(answer.reply()).contains("展开来源", "完整说明").doesNotContain("支持定制");
+        assertThat(answer.reply()).isEqualTo(content).endsWith("但当前演示不提供该服务。");
         assertThat(answer.evidence().sources().getFirst().content()).isEqualTo(content);
     }
 
     @Test
-    void tooManyQualificationsLeadToSourceExpansionInsteadOfASelectivePositiveClaim() {
+    void repeatedQualificationsRemainVisibleInsteadOfASelectivePositiveClaim() {
         String content = "贺卡可以书写。\n\n" + "仅在演示环境使用，实际条件以商品说明为准。\n\n".repeat(55);
         when(repository.publishedForShop(100)).thenReturn(List.of(source(1, content)));
         KnowledgeAnswer answer = service.answerDetailed(100, "贺卡可书写吗");
-        assertThat(answer.reply()).contains("展开来源").doesNotContain("贺卡可以书写");
+        assertThat(answer.reply()).isEqualTo(content.strip()).doesNotContain("展开来源");
         assertThat(answer.evidence().sources().getFirst().content()).isEqualTo(content.strip());
     }
 
@@ -203,6 +210,21 @@ class KnowledgeAnswerTest {
         var empty = new KnowledgeEvidence(KnowledgeStatus.NO_MATCH, List.of());
         assertThatThrownBy(() -> new KnowledgeAnswer(" ", empty)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new KnowledgeAnswer("字".repeat(4001), empty)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void anAnswerBeyondTheHardLimitDefersWithoutDroppingAConditionOrLosingAuditEvidence() {
+        String content = "贺卡可附赠。" + "说明".repeat(1990) + "但需要先核实具体条件。";
+        var controlled = new KnowledgeService(List.of(
+                new KnowledgeDocument("gift-first", "v1", "贺卡说明一", List.of("贺卡"), content),
+                new KnowledgeDocument("gift-second", "v1", "贺卡说明二", List.of("贺卡"), content)));
+        KnowledgeAnswer answer = controlled.answerDetailed(100, "贺卡可附赠吗");
+        assertThat(answer.reply()).hasSizeLessThanOrEqualTo(KnowledgeAnswer.MAX_REPLY_LENGTH)
+                .contains("暂时无法准确答复", "联系店铺客服核实")
+                .doesNotContain("贺卡可附赠", "展开来源");
+        assertThat(answer.evidence().status()).isEqualTo(KnowledgeStatus.ANSWERED);
+        assertThat(answer.evidence().sources()).hasSize(2).allSatisfy(source ->
+                assertThat(source.content()).isEqualTo(content));
     }
 
     private static PublishedKnowledge source(int revision, String content) {
