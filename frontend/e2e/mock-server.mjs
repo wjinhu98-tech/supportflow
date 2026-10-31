@@ -209,6 +209,16 @@ const server = http.createServer(async (request, response) => {
       { id: 100, name: '演示店铺100', merchantId: 1, merchantName: '演示商家' },
     ])
   }
+  if (url.pathname === '/api/v1/orders' && request.method === 'GET') {
+    if (['chat-staff', 'review-only', 'knowledge-only'].includes(owner))
+      return failure(response, 403, 'ACCESS_DENIED', '无权查看买家订单。')
+    const afterId = Number(url.searchParams.get('afterId') ?? 0)
+    record.accepted = true
+    return respond(response, 200, {
+      items: afterId === 0 ? firstPage : allOrders.slice(firstPage.length),
+      nextAfterId: afterId === 0 ? nextCursor : null,
+    })
+  }
   const orderList = /^\/api\/v1\/shops\/([1-9][0-9]*)\/orders$/.exec(url.pathname)
   if (orderList && request.method === 'GET') {
     const shopId = Number(orderList[1])

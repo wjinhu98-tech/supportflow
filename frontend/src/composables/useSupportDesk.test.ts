@@ -10,7 +10,9 @@ import type {
   ConversationMessagePage,
   StoredChatMessage,
   Order,
+  OrderPage,
   ReceiptConfirmation,
+  SupportSnapshot,
 } from '../types'
 
 const mocks = vi.hoisted(() => ({
@@ -24,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   sendSupportMessage: vi.fn(),
   closeSupport: vi.fn(),
   getShopOrder: vi.fn(),
+  allOrders: vi.fn(),
   chat: vi.fn(),
   reply: vi.fn(),
   openShopWindow: vi.fn(),
@@ -58,6 +61,7 @@ vi.mock('../api/client', async (importOriginal) => {
       sendSupportMessage = mocks.sendSupportMessage
       closeSupport = mocks.closeSupport
       getShopOrder = mocks.getShopOrder
+      allOrders = mocks.allOrders
       chat = mocks.chat
       async shopOrders(shopId: string, cursor: number | null, signal: AbortSignal) {
         const response = await mocks.chat(
@@ -218,6 +222,7 @@ describe('explicit human handoff', () => {
     desk.selectedOrder.value = order
     await desk.requestHumanSupport()
     expect(desk.humanActive.value).toBe(true)
+    mocks.supportSnapshot.mockResolvedValue({ session, messages: [], nextBeforeId: null })
     expect(desk.selectedOrder.value).toBeNull()
     expect(desk.conversationContext.value).toBeNull()
     await desk.sendMessage('我想咨询商品问题')
@@ -314,6 +319,7 @@ beforeEach(() => {
     capabilities: { reviewAfterSales: false, manageKnowledge: false },
   })
   mocks.chat.mockReset().mockResolvedValue(selection())
+  mocks.allOrders.mockReset().mockResolvedValue({ items: [order], nextAfterId: null })
   mocks.reply.mockReset().mockResolvedValue(textReply)
   mocks.shops.mockReset().mockResolvedValue([
     { shopId: 100, name: '原有店铺' },
@@ -359,6 +365,265 @@ beforeEach(() => {
 afterEach(() => {
   for (const scope of scopes.splice(0)) scope.stop()
   vi.useRealTimers()
+})
+
+describe('account-wide order workspace', () => {
+  const otherShopOrder: Order = { ...order, shopId: 101, totalAmount: 899 }
+  const otherConversation: Conversation = {
+    ...conversation,
+    id: '00000000-0000-4000-8000-000000000101',
+    shopId: 101,
+  }
+
+  function shopResponses() {
+    mocks.chat.mockImplementation(async (shop: string) =>
+      selection([{ ...order, shopId: Number(shop) }]),
+    )
+    mocks.openShopWindow.mockImplementation(async (shop: string) =>
+      shop === '101' ? otherConversation : conversation,
+    )
+    mocks.shopWindowMessages.mockImplementation(async (shop: string) => ({
+      conversation: shop === '101' ? otherConversation : conversation,
+      messages: [],
+      nextBeforeId: null,
+    }))
+  }
+
+  it('lists same-number orders from different shops without widening the current-shop refund choices', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    mocks.allOrders.mockClear().mockResolvedValue({
+      items: [order, otherShopOrder],
+      nextAfterId: null,
+    })
+    mocks.chat.mockClear()
+    await desk.loadAccountOrders()
+    expect(desk.accountOrders.value).toEqual([order, otherShopOrder])
+    expect(desk.orders.value).toEqual([order])
+    expect(mocks.allOrders).toHaveBeenCalledWith(null, expect.any(AbortSignal))
+    expect(mocks.chat).not.toHaveBeenCalled()
+    await desk.openRefundForm()
+    expect(desk.refundOpen.value).toBe(true)
+    expect(desk.orders.value.every((item) => item.shopId === 100)).toBe(true)
+    expect(mocks.applyAfterSale).not.toHaveBeenCalled()
+  })
+
+  it('uses the account cursor and composite identity across pages, then stops at the end', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const third = { ...order, shopId: 103, orderNo: 'SF10002' }
+    mocks.allOrders
+      .mockReset()
+      .mockResolvedValueOnce({ items: [order, otherShopOrder], nextAfterId: 7347 })
+      .mockResolvedValueOnce({ items: [order, third], nextAfterId: null })
+    await desk.loadAccountOrders()
+    await desk.loadAccountOrders(true)
+    expect(mocks.allOrders.mock.calls.map(([cursor]) => cursor)).toEqual([null, 7347])
+    expect(desk.accountOrders.value).toEqual([order, otherShopOrder, third])
+    expect(desk.accountNextAfterId.value).toBeNull()
+    await desk.loadAccountOrders(true)
+    expect(mocks.allOrders).toHaveBeenCalledTimes(2)
+  })
+
+  it('preserves the account list and its pagination while changing the consulted shop', async () => {
+    shopResponses()
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    mocks.allOrders.mockReset().mockResolvedValue({
+      items: [order, otherShopOrder],
+      nextAfterId: 7347,
+    })
+    await desk.loadAccountOrders()
+    await desk.changeShop('101')
+    expect(desk.shopId.value).toBe('101')
+    expect(desk.orders.value[0]?.shopId).toBe(101)
+    expect(desk.accountOrders.value).toEqual([order, otherShopOrder])
+    expect(desk.accountNextAfterId.value).toBe(7347)
+    expect(mocks.allOrders).toHaveBeenCalledOnce()
+  })
+
+  it('allows an in-flight account read to finish across a shop switch', async () => {
+    shopResponses()
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const pending = deferred<OrderPage>()
+    mocks.allOrders.mockReset().mockReturnValueOnce(pending.promise)
+    const reading = desk.loadAccountOrders()
+    const signal = mocks.allOrders.mock.calls[0]![1] as AbortSignal
+    await desk.changeShop('101')
+    expect(signal.aborted).toBe(false)
+    pending.resolve({ items: [order, otherShopOrder], nextAfterId: null })
+    await reading
+    expect(desk.accountOrders.value).toEqual([order, otherShopOrder])
+    expect(desk.accountOrdersBusy.value).toBe(false)
+  })
+
+  it('clears account data on logout and ignores the previous account response after reconnecting', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const pending = deferred<OrderPage>()
+    const nextBuyerOrder = { ...order, orderNo: 'OTHER-BUYER-01' }
+    mocks.allOrders
+      .mockReset()
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValue({ items: [nextBuyerOrder], nextAfterId: null })
+    const reading = desk.loadAccountOrders()
+    const signal = mocks.allOrders.mock.calls[0]![1] as AbortSignal
+    desk.disconnect()
+    expect(desk.accountOrders.value).toEqual([])
+    expect(desk.accountNextAfterId.value).toBeNull()
+    expect(desk.accountOrdersBusy.value).toBe(false)
+    mocks.currentAccount.mockResolvedValueOnce({
+      username: 'another-buyer',
+      accountType: 'BUYER',
+      capabilities: { reviewAfterSales: false, manageKnowledge: false },
+    })
+    await desk.connect('another-buyer', 'test')
+    await desk.loadAccountOrders()
+    pending.resolve({ items: [order, otherShopOrder], nextAfterId: 7347 })
+    await reading
+    expect(signal.aborted).toBe(true)
+    expect(desk.username.value).toBe('another-buyer')
+    expect(desk.accountOrders.value).toEqual([nextBuyerOrder])
+    expect(desk.accountNextAfterId.value).toBeNull()
+  })
+
+  it('enters the selected order shop and sends only its owned-order consultation there', async () => {
+    shopResponses()
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    desk.accountOrders.value = [order, otherShopOrder]
+    mocks.reply.mockResolvedValue({
+      ...textReply,
+      type: 'ORDER_DETAILS',
+      orders: [otherShopOrder],
+    })
+    await desk.selectOrder(otherShopOrder)
+    expect(desk.shopId.value).toBe('101')
+    expect(new URL(window.location.href).searchParams.get('shopId')).toBe('101')
+    expect(desk.activeConversation.value).toEqual(otherConversation)
+    expect(desk.selectedOrder.value).toEqual(otherShopOrder)
+    expect(mocks.sendConversationMessage).toHaveBeenCalledOnce()
+    expect(mocks.sendConversationMessage.mock.calls[0]?.slice(0, 2)).toEqual([
+      '101',
+      otherConversation.id,
+    ])
+    expect(mocks.reply.mock.calls[0]?.slice(0, 3)).toEqual([
+      '101',
+      '咨询此订单',
+      otherShopOrder.orderNo,
+    ])
+    expect(desk.accountOrders.value).toEqual([order, otherShopOrder])
+  })
+
+  it('waits for target-shop human state before choosing a read-only consultation instead of AI', async () => {
+    shopResponses()
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const pending = deferred<SupportSnapshot>()
+    mocks.supportSnapshot.mockImplementation((shop: string) =>
+      shop === '101'
+        ? pending.promise
+        : Promise.resolve({ session: null, messages: [], nextBeforeId: null }),
+    )
+    mocks.getShopOrder.mockResolvedValueOnce(otherShopOrder)
+    const selecting = desk.selectOrder(otherShopOrder)
+    await vi.waitFor(() =>
+      expect(mocks.supportSnapshot.mock.calls.some(([shop]) => shop === '101')).toBe(true),
+    )
+    expect(mocks.reply).not.toHaveBeenCalled()
+    expect(mocks.getShopOrder).not.toHaveBeenCalled()
+    const timestamp = '2026-10-30T00:00:00Z'
+    pending.resolve({
+      session: {
+        id: crypto.randomUUID(),
+        status: 'WAITING',
+        assigned: false,
+        assignedToMe: false,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        closedAt: null,
+      },
+      messages: [],
+      nextBeforeId: null,
+    })
+    await selecting
+    expect(desk.humanActive.value).toBe(true)
+    expect(desk.selectedOrder.value).toEqual(otherShopOrder)
+    expect(mocks.getShopOrder).toHaveBeenCalledWith(
+      '101',
+      otherShopOrder.orderNo,
+      expect.any(AbortSignal),
+    )
+    expect(mocks.sendConversationMessage).not.toHaveBeenCalled()
+    expect(mocks.sendSupportMessage).not.toHaveBeenCalled()
+  })
+
+  it('abandons a cross-shop consultation if its account is replaced while the target window is opening', async () => {
+    shopResponses()
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    const pending = deferred<Conversation>()
+    mocks.openShopWindow.mockImplementation((shop: string) =>
+      shop === '101' && mocks.currentAccount.mock.calls.length === 1
+        ? pending.promise
+        : Promise.resolve(shop === '101' ? otherConversation : conversation),
+    )
+    const selecting = desk.selectOrder(otherShopOrder)
+    await vi.waitFor(() =>
+      expect(mocks.openShopWindow).toHaveBeenCalledWith('101', expect.any(AbortSignal)),
+    )
+    mocks.currentAccount.mockResolvedValueOnce({
+      username: 'another-buyer',
+      accountType: 'BUYER',
+      capabilities: { reviewAfterSales: false, manageKnowledge: false },
+    })
+    await desk.connect('another-buyer', 'test')
+    pending.resolve(otherConversation)
+    await selecting
+    expect(desk.username.value).toBe('another-buyer')
+    expect(desk.selectedOrder.value).toBeNull()
+    expect(mocks.reply).not.toHaveBeenCalled()
+    expect(mocks.sendConversationMessage).not.toHaveBeenCalled()
+  })
+
+  it('updates and deletes only the matching shop entry in both order caches', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    desk.accountOrders.value = [order, otherShopOrder]
+    desk.openReceiptConfirmation(order)
+    await desk.confirmReceipt()
+    const completed = { ...order, status: 'COMPLETED', receivedAt: eligible.receivedAt }
+    expect(desk.accountOrders.value).toEqual([completed, otherShopOrder])
+    expect(desk.orders.value[0]).toEqual(completed)
+    desk.closeReceiptConfirmation()
+    desk.ownedAfterSales.value = []
+    desk.openOrderDeletion(completed)
+    await desk.confirmOrderDeletion()
+    expect(desk.accountOrders.value).toEqual([otherShopOrder])
+    expect(desk.orders.value).toEqual([])
+    expect(desk.isOrderDeleted(otherShopOrder)).toBe(false)
+  })
+
+  it('does not let an older account read undo a confirmed receipt or its loaded page', async () => {
+    const desk = createDesk()
+    await desk.connect('buyer', 'test')
+    desk.accountOrders.value = [order, otherShopOrder]
+    desk.accountNextAfterId.value = 7347
+    desk.openReceiptConfirmation(order)
+    const pending = deferred<OrderPage>()
+    mocks.allOrders.mockReset().mockReturnValueOnce(pending.promise)
+    const reading = desk.loadAccountOrders()
+    await desk.confirmReceipt()
+    const completed = { ...order, status: 'COMPLETED', receivedAt: eligible.receivedAt }
+    expect(desk.accountOrders.value).toEqual([completed, otherShopOrder])
+    pending.resolve({ items: [order], nextAfterId: null })
+    await reading
+    expect(desk.accountOrders.value).toEqual([completed, otherShopOrder])
+    expect(desk.accountNextAfterId.value).toBe(7347)
+    expect(desk.accountOrdersBusy.value).toBe(false)
+    expect(mocks.allOrders).toHaveBeenCalledOnce()
+  })
 })
 
 describe('useSupportDesk', () => {
@@ -1672,14 +1937,6 @@ describe('useSupportDesk', () => {
     expect(mocks.reply).toHaveBeenCalledTimes(1)
   })
 
-  it('refuses selecting a card from another shop', async () => {
-    const desk = createDesk()
-    await desk.connect('buyer', 'test')
-    await desk.selectOrder({ ...order, shopId: 101 })
-    expect(desk.selectedOrder.value).toBeNull()
-    expect(mocks.chat).toHaveBeenCalledTimes(1)
-  })
-
   it('resets order and conversation context when changing shop', async () => {
     const desk = createDesk()
     await desk.connect('buyer', 'test')
@@ -1761,6 +2018,7 @@ describe('useSupportDesk', () => {
     const pending = deferred<ChatResponse>()
     mocks.reply.mockReturnValueOnce(pending.promise)
     const oldRequest = desk.selectOrder(order)
+    await vi.waitFor(() => expect(mocks.reply).toHaveBeenCalledOnce())
     desk.clearConversation()
     pending.resolve(textReply)
     await oldRequest

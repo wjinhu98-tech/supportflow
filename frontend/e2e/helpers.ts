@@ -32,6 +32,7 @@ export async function showChat(page: Page) {
 }
 
 export async function switchShop(page: Page, shopId: string) {
+  await showChat(page)
   await page.getByRole('button', { name: '切换店铺', exact: true }).click()
   await page.getByTestId('shop-input').fill(shopId)
   await page.getByTestId('shop-confirm').click()

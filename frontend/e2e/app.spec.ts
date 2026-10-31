@@ -45,7 +45,7 @@ test('buyer confirms order deletion, sees pending-after-sale conflicts, and remo
 }, testInfo) => {
   const target = 'SF10001'
   let deletions = 0
-  await page.route('**/api/v1/shops/100/orders?*', async (route) => {
+  await page.route('**/api/v1/orders?*', async (route) => {
     const response = await route.fetch()
     const data = await response.json()
     if (Array.isArray(data.items))
@@ -94,6 +94,139 @@ test('buyer confirms order deletion, sees pending-after-sale conflicts, and remo
   )
   expect(deletions).toBe(2)
   await page.screenshot({ path: testInfo.outputPath('order-deleted.png'), fullPage: true })
+})
+
+test('cross-shop receipt and deletion require confirmation and update only the targeted account order', async ({
+  page,
+}) => {
+  const orderNo = 'SF10001'
+  const shippedOrder = {
+    shopId: 101,
+    orderNo,
+    status: 'SHIPPED',
+    statusDescription: '已发货',
+    totalAmount: 899,
+    currency: 'CNY',
+    createdAt: '2026-10-20T01:00:00Z',
+    updatedAt: '2026-10-20T01:00:00Z',
+    receivedAt: null,
+  }
+  const receivedAt = '2026-10-31T03:00:00Z'
+  const completedOrder = {
+    ...shippedOrder,
+    status: 'COMPLETED',
+    statusDescription: '已完成',
+    receivedAt,
+    updatedAt: receivedAt,
+  }
+  let accountReads = 0
+  let receipts = 0
+  let deletions = 0
+  await page.route('**/api/v1/orders?*', async (route) => {
+    accountReads++
+    const response = await route.fetch()
+    const data = await response.json()
+    data.items = data.items.map((order: { shopId: number; orderNo: string }) =>
+      order.shopId === 101 && order.orderNo === orderNo ? shippedOrder : order,
+    )
+    await route.fulfill({ response, json: data })
+  })
+  await page.route(`**/api/v1/shops/101/orders/${orderNo}/receipt-confirmation`, async (route) => {
+    expect(route.request().method()).toBe('POST')
+    expect(route.request().headers()['x-csrf-token']).toBeTruthy()
+    expect(route.request().postData()).toBeNull()
+    receipts++
+    await route.fulfill({
+      status: 200,
+      json: {
+        order: completedOrder,
+        alreadyConfirmed: false,
+        eligibility: {
+          shopId: 101,
+          orderNo,
+          status: 'ELIGIBLE',
+          canSubmit: true,
+          message: '确认收货后十五天内可申请售后。',
+          receivedAt,
+          deadlineAt: '2026-11-15T03:00:00Z',
+          checkedAt: receivedAt,
+          windowDays: 15,
+        },
+      },
+    })
+  })
+  await page.route(`**/api/v1/shops/101/orders/${orderNo}`, async (route) => {
+    expect(route.request().method()).toBe('DELETE')
+    expect(route.request().headers()['x-csrf-token']).toBeTruthy()
+    expect(route.request().postData()).toBeNull()
+    deletions++
+    await route.fulfill({ status: 204 })
+  })
+  await connect(page)
+  await showOrders(page)
+  await page.getByTestId('load-more-orders').click()
+  const panel = page.getByTestId('orders-panel')
+  const cards = panel.getByTestId('order-card')
+  const sameNumberIn100 = panel.locator(
+    '[data-testid="order-card"][data-shop-id="100"][data-order-no="SF10001"]',
+  )
+  const targetIn101 = panel.locator(
+    '[data-testid="order-card"][data-shop-id="101"][data-order-no="SF10001"]',
+  )
+  await expect(cards).toHaveCount(26)
+  await expect(sameNumberIn100.locator('[data-status]')).toHaveAttribute('data-status', 'SHIPPED')
+  const readsBeforeActions = accountReads
+  const receiptAction = targetIn101.getByRole('button', {
+    name: `确认收货 ${orderNo}`,
+    exact: true,
+  })
+  await receiptAction.click()
+  await expect(page).toHaveURL(/[?&]shopId=101(?:&|$)/)
+  const receiptDialog = page.getByTestId('receipt-confirmation-dialog')
+  await expect(receiptDialog).toContainText('101')
+  await expect(panel).toBeVisible()
+  await expect(page.getByTestId('message-input')).not.toBeVisible()
+  expect(receipts).toBe(0)
+  await receiptDialog.locator('footer button').first().click()
+  await expect(receiptDialog).not.toBeVisible()
+  expect(receipts).toBe(0)
+  await receiptAction.click()
+  await page.getByTestId('confirm-receipt-submit').click()
+  await expect(page.getByTestId('receipt-confirmation-result')).toBeVisible()
+  expect(receipts).toBe(1)
+  await receiptDialog.locator('footer button').first().click()
+  await expect(targetIn101.locator('[data-status]')).toHaveAttribute('data-status', 'COMPLETED')
+  await expect(sameNumberIn100.locator('[data-status]')).toHaveAttribute('data-status', 'SHIPPED')
+  await expect(cards).toHaveCount(26)
+
+  // Re-enter from another shop so deletion must also switch its target before opening.
+  await switchShop(page, '100')
+  await showOrders(page)
+  await expect(targetIn101.locator('[data-status]')).toHaveAttribute('data-status', 'COMPLETED')
+  const deletionAction = targetIn101.getByRole('button', {
+    name: `删除订单 ${orderNo}`,
+    exact: true,
+  })
+  await deletionAction.click()
+  await expect(page).toHaveURL(/[?&]shopId=101(?:&|$)/)
+  const deletionDialog = page.getByTestId('order-deletion-dialog')
+  await expect(deletionDialog).toContainText('101')
+  await expect(panel).toBeVisible()
+  await expect(page.getByTestId('message-input')).not.toBeVisible()
+  expect(deletions).toBe(0)
+  await deletionDialog.locator('footer button').first().click()
+  await expect(deletionDialog).not.toBeVisible()
+  expect(deletions).toBe(0)
+  await deletionAction.click()
+  await page.getByTestId('confirm-order-deletion').click()
+  await expect(deletionDialog).not.toBeVisible()
+  await expect(targetIn101).toHaveCount(0)
+  await expect(cards).toHaveCount(25)
+  await expect(sameNumberIn100.locator('[data-status]')).toHaveAttribute('data-status', 'SHIPPED')
+  await expect(panel).toBeVisible()
+  expect(deletions).toBe(1)
+  // These mutations update the cached account list rather than fetching stale fixtures again.
+  expect(accountReads).toBe(readsBeforeActions)
 })
 
 test('shop options include the new shops and deleting a window requires explicit confirmation', async ({
@@ -222,7 +355,7 @@ for (const viewport of [
     await page.route('**/products/demo/white-mouse.png', async (route) => {
       await route.fulfill({ status: 404, body: 'Missing test product image' })
     })
-    await page.route('**/api/v1/shops/100/orders?*', async (route) => {
+    await page.route('**/api/v1/orders?*', async (route) => {
       const upstream = await route.fetch()
       const result = await upstream.json()
       result.items = [
@@ -405,7 +538,7 @@ test('login exchanges credentials once, then proxy uses HttpOnly session cookie 
   expect((await recorded(request)).every((entry) => !entry.hasAuthorization)).toBe(true)
   expect(business[0]?.path).toBe('/api/v1/shops/100/chat/window')
   const orderRead = (await recorded(request)).find(
-    (entry) => entry.path === '/api/v1/shops/100/orders?afterId=0&size=20',
+    (entry) => entry.path === '/api/v1/orders?afterId=0&size=20',
   )
   expect(orderRead).toMatchObject({
     method: 'GET',
@@ -473,15 +606,55 @@ test('pagination uses the opaque server cursor and appends without losing earlie
   const cards = page.getByTestId('orders-panel').getByTestId('order-card')
   await expect(cards).toHaveCount(20)
   await page.getByTestId('load-more-orders').click()
-  await expect(cards).toHaveCount(21)
+  await expect(cards).toHaveCount(26)
   await expect(cards.first()).toContainText('SF10001')
-  await expect(cards.last()).toContainText('SF10021')
+  await expect(cards.last()).toContainText('SF103002')
   await expect(page.getByTestId('load-more-orders')).toHaveCount(0)
   const read = (await recorded(request))
-    .filter((entry) => entry.path.startsWith('/api/v1/shops/100/orders?'))
+    .filter((entry) => entry.path.startsWith('/api/v1/orders?'))
     .at(-1)
   expect(read?.method).toBe('GET')
-  expect(read?.path).toBe('/api/v1/shops/100/orders?afterId=7347&size=20')
+  expect(read?.path).toBe('/api/v1/orders?afterId=7347&size=20')
+})
+
+test('account orders retain same-number purchases in different shops and consultation enters the order shop', async ({
+  page,
+  request,
+}) => {
+  await connect(page)
+  const shop100Message = '仅属于店铺100的咨询记录'
+  await send(page, shop100Message)
+  await expect(page.getByTestId('chat-message').last()).toContainText(shop100Message)
+  await showOrders(page)
+  await expect(page.getByRole('button', { name: '切换店铺', exact: true })).not.toBeVisible()
+  await page.getByTestId('load-more-orders').click()
+  const panel = page.getByTestId('orders-panel')
+  const cards = panel.getByTestId('order-card')
+  await expect(cards).toHaveCount(26)
+  await expect(panel.locator('[data-order-no="SF10001"]')).toHaveCount(2)
+  const otherShop = panel.locator(
+    '[data-testid="order-card"][data-shop-id="101"][data-order-no="SF10001"]',
+  )
+  await expect(otherShop).toContainText('101')
+  await otherShop.getByRole('button', { name: '咨询此订单 SF10001', exact: true }).click()
+  await expect(page).toHaveURL(/[?&]shopId=101(?:&|$)/)
+  await expect(page.getByTestId('conversation-panel')).toBeVisible()
+  await expect(page.getByTestId('orders-panel')).not.toBeVisible()
+  await expect(page.getByTestId('chat-message').last()).toContainText('待发货')
+  await expect(page.getByTestId('chat-message').last()).toContainText('899.00')
+  await expect(page.getByTestId('chat-message').filter({ hasText: shop100Message })).toHaveCount(0)
+  const consultation = (await recorded(request)).filter(
+    (entry) => entry.method === 'POST' && entry.body?.message === '咨询此订单',
+  )
+  expect(consultation.at(-1)?.path).toMatch(
+    /^\/api\/v1\/shops\/101\/chat\/conversations\/[a-f0-9-]+\/messages$/,
+  )
+  expect(consultation.at(-1)?.body?.orderNo).toBe('SF10001')
+  await showOrders(page)
+  await expect(cards).toHaveCount(26)
+  await expect(panel.locator('[data-order-no="SF10001"]')).toHaveCount(2)
+  await switchShop(page, '100')
+  await expect(page.getByTestId('chat-message').last()).toContainText(shop100Message)
 })
 
 test('order selection submits the scoped order and retains it for the next question', async ({
@@ -543,8 +716,8 @@ test('shop switch clears old context and queries the same order number only in t
   await expect(page.getByTestId('chat-message').filter({ hasText: '已发货' })).toHaveCount(0)
   await showOrders(page)
   const cards = page.getByTestId('orders-panel').getByTestId('order-card')
-  await expect(cards).toHaveCount(1)
-  await expect(cards.first()).toContainText('待发货')
+  await expect(cards).toHaveCount(20)
+  await expect(cards.first()).toContainText('已发货')
   await send(page, '查订单 SF10001')
   await expect(page.getByTestId('chat-message').last()).toContainText('待发货')
   const lastPost = (await recorded(request)).filter((entry) => entry.method === 'POST').at(-1)
@@ -554,12 +727,14 @@ test('shop switch clears old context and queries the same order number only in t
   expect(lastPost?.body).toEqual(expect.objectContaining({ message: '查订单 SF10001' }))
 })
 
-test('empty shop has no invented order cards', async ({ page }) => {
+test('an empty consultation shop does not erase the buyer account order list', async ({ page }) => {
   await connect(page)
   await switchShop(page, '999')
   await showOrders(page)
-  await expect(page.getByTestId('orders-panel').getByTestId('order-card')).toHaveCount(0)
-  await expect(page.getByRole('heading', { name: '暂未加载到订单', exact: true })).toBeVisible()
+  await expect(page.getByTestId('orders-panel').getByTestId('order-card')).toHaveCount(20)
+  await send(page, '我的订单')
+  await expect(page.getByTestId('chat-message').last()).toContainText('当前店铺暂无订单')
+  await expect(page.getByTestId('chat-message').last().getByTestId('order-card')).toHaveCount(0)
 })
 
 for (const [message, expectedMessage] of [
@@ -647,7 +822,7 @@ test('shop switch cannot display an earlier shop pending reply', async ({ page, 
     .toBe(true)
   await switchShop(page, '101')
   await showOrders(page)
-  await expect(page.getByTestId('orders-panel').getByTestId('order-card')).toHaveCount(1)
+  await expect(page.getByTestId('orders-panel').getByTestId('order-card')).toHaveCount(20)
   await page.waitForTimeout(1700)
   await expect(
     page.getByTestId('chat-message').filter({ hasText: '已过期的延时回复' }),

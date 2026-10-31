@@ -1331,6 +1331,28 @@ export class ApiClient {
     return data
   }
 
+  async allOrders(afterId: number | null = null, signal?: AbortSignal): Promise<OrderPage> {
+    if (afterId !== null && (!Number.isSafeInteger(afterId) || afterId < 1))
+      throw new ApiError('请选择有效的订单分页位置。')
+    const data = await this.queued(() =>
+      this.request(`/api/v1/orders?afterId=${afterId ?? 0}&size=20`, { method: 'GET' }, signal),
+    )
+    if (
+      !isRecord(data) ||
+      !Array.isArray(data.items) ||
+      data.items.length > 20 ||
+      !data.items.every(validOrder) ||
+      !(
+        data.nextAfterId === null ||
+        (typeof data.nextAfterId === 'number' &&
+          Number.isSafeInteger(data.nextAfterId) &&
+          data.nextAfterId > (afterId ?? 0))
+      )
+    )
+      throw new ApiError('订单列表格式不正确，请刷新后重试。', 0, 'INVALID_RESPONSE')
+    return data as unknown as OrderPage
+  }
+
   async shopOrders(
     shopId: string,
     afterId: number | null = null,

@@ -40,6 +40,8 @@ flowchart TD
 
 ### 1. 买家查看一笔订单
 
+订单页先通过 `GET /api/v1/orders` 分页读取认证买家的跨店订单，不传买家 ID，也不按当前聊天店铺过滤。点击某张卡片后，前端切换到该订单所属店铺，恢复该店会话与人工接待状态，再进入下面的单笔查询流程。全店列表与店内退款候选使用独立状态和游标。
+
 输入是认证身份、URL 中的 `shopId` 和 `orderNo`。`OrderController.getOwnedOrder` 调用 `OrderQueryService.getOwnedOrder`，再调用 `JdbcSupportOrderRepository.findByOrderNo`。SQL 同时限定 `tenant_id`、`buyer_id` 和 `order_no`，并排除已有买家删除标记的订单。输出是当前可访问的订单卡片，包括已有的商品快照和图片字段；历史缺失字段保持为空。
 
 这里没有把整张订单交给模型判断归属。按商品名查单也复用店铺与买家范围；多笔匹配时展示候选，由买家选择。列表以实际返回记录的 ID 做游标，多读一行判断还有没有下一页。

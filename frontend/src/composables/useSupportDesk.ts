@@ -25,6 +25,15 @@ export function useSupportDesk() {
   const ordersBusy = ref(false)
   const orders = ref<Order[]>([])
   const nextAfterId = ref<number | null>(null)
+  const accountOrders = ref<Order[]>([])
+  const accountNextAfterId = ref<number | null>(null)
+  const accountOrdersBusy = ref(false)
+  const accountOrdersError = ref<string | null>(null)
+  const orderNavigationBusy = ref(false)
+  let accountLifetime = new AbortController()
+  let accountOrdersVersion = 0
+  let orderNavigationRequest = new AbortController()
+  let orderNavigationVersion = 0
   const selectedOrder = ref<Order | null>(null)
   const messages = ref<ChatMessage[]>([])
   const activeConversation = ref<Conversation | null>(null)
@@ -263,6 +272,14 @@ export function useSupportDesk() {
   }
 
   function resetAccount() {
+    accountLifetime.abort()
+    accountLifetime = new AbortController()
+    accountOrdersVersion++
+    cancelOrderNavigation()
+    accountOrders.value = []
+    accountNextAfterId.value = null
+    accountOrdersBusy.value = false
+    accountOrdersError.value = null
     client?.dispose()
     connectingClient?.dispose()
     resetContext()
@@ -329,6 +346,7 @@ export function useSupportDesk() {
       await loadShops()
       if (signal.aborted) return false
       await loadOrders()
+      if (!signal.aborted) await loadAccountOrders()
       if (!signal.aborted) await loadConversations()
       return connected.value
     } catch (failure) {
@@ -378,13 +396,55 @@ export function useSupportDesk() {
     }
   }
 
-  async function changeShop(value: string) {
+  async function loadAccountOrders(loadMore = false) {
+    if (!client || !connected.value || accountOrdersBusy.value || businessWriteInProgress()) return
+    if (loadMore && accountNextAfterId.value === null) return
+    const activeClient = client
+    const signal = accountLifetime.signal
+    const version = accountOrdersVersion
+    const cursor = loadMore ? accountNextAfterId.value : null
+    accountOrdersBusy.value = true
+    accountOrdersError.value = null
+    try {
+      const response = await activeClient.allOrders(cursor, signal)
+      if (signal.aborted || client !== activeClient || version !== accountOrdersVersion) return
+      if (response.nextAfterId !== null && cursor !== null && response.nextAfterId <= cursor)
+        throw new ApiError('分页游标没有前进，请刷新订单后重试。')
+      const items = loadMore ? [...accountOrders.value, ...response.items] : response.items
+      accountOrders.value = Array.from(
+        new Map(
+          items
+            .filter((order) => !isOrderDeleted(order))
+            .map((order) => [`${order.shopId}/${order.orderNo}`, order]),
+        ).values(),
+      )
+      accountNextAfterId.value = response.nextAfterId
+    } catch (failure) {
+      if (!signal.aborted && client === activeClient) {
+        accountOrdersError.value =
+          failure instanceof ApiError ? failure.message : '暂时无法读取你的订单，请稍后重试。'
+        if (failure instanceof ApiError && failure.status === 401) report(failure, signal)
+      }
+    } finally {
+      if (!signal.aborted && client === activeClient) accountOrdersBusy.value = false
+    }
+  }
+
+  function cancelOrderNavigation() {
+    orderNavigationRequest.abort()
+    orderNavigationRequest = new AbortController()
+    orderNavigationVersion++
+    orderNavigationBusy.value = false
+  }
+
+  async function changeShop(value: string, fromOrderNavigation = false) {
     if (deletingConversation.value) return
     const normalized = value.trim()
     if (!validShopId(normalized)) {
       error.value = '店铺 ID 必须为有效的正整数。'
       return
     }
+    if (!fromOrderNavigation) cancelOrderNavigation()
     if (normalized === shopId.value) return
     const reconnectNeeded = connecting.value
     resetContext()
@@ -401,6 +461,51 @@ export function useSupportDesk() {
     if (connected.value) {
       await loadOrders()
       if (!signal.aborted) await loadConversations()
+    }
+  }
+
+  async function enterOrderShop(order: Order, consultation = true): Promise<boolean> {
+    if (
+      !client ||
+      !connected.value ||
+      connecting.value ||
+      busy.value ||
+      orderNavigationBusy.value ||
+      human.submitting.value ||
+      humanRequesting.value ||
+      businessWriteInProgress() ||
+      isOrderDeleted(order) ||
+      !validShopId(String(order.shopId))
+    )
+      return false
+    const activeClient = client
+    const targetShop = String(order.shopId)
+    const signal = AbortSignal.any([accountLifetime.signal, orderNavigationRequest.signal])
+    const version = ++orderNavigationVersion
+    orderNavigationBusy.value = true
+    const current = () =>
+      !signal.aborted && client === activeClient && connected.value && shopId.value === targetShop
+    try {
+      if (shopId.value !== targetShop) await changeShop(targetShop, true)
+      if (!current()) return false
+      if (consultation) {
+        const shopSignal = context.signal
+        if (!activeConversation.value) await loadConversations()
+        if (!current() || shopSignal.aborted) return false
+        if (!activeConversation.value) {
+          error.value = '暂时无法进入这家店铺的咨询，请稍后重试。'
+          return false
+        }
+        await human.refresh()
+        if (!current() || shopSignal.aborted) return false
+        if (!human.ready.value) {
+          error.value = '暂时无法核实店铺客服状态，请稍后重试。'
+          return false
+        }
+      }
+      return current()
+    } finally {
+      if (version === orderNavigationVersion) orderNavigationBusy.value = false
     }
   }
 
@@ -632,7 +737,13 @@ export function useSupportDesk() {
     }
   }
 
-  async function selectOrder(order: Order, selectionIntent: OrderSelectionIntent | null = null) {
+  async function selectOrder(
+    order: Order,
+    selectionIntent: OrderSelectionIntent | null = null,
+  ): Promise<boolean> {
+    // A stale product-candidate continuation cannot navigate into another shop.
+    if (selectionIntent !== null && order.shopId !== Number(shopId.value)) return false
+    if (!(await enterOrderShop(order))) return false
     if (
       !connected.value ||
       busy.value ||
@@ -641,27 +752,33 @@ export function useSupportDesk() {
       isOrderDeleted(order) ||
       order.shopId !== Number(shopId.value)
     )
-      return
+      return false
     if (human.active.value) {
-      if (!client || ordersBusy.value) return
+      if (!client || ordersBusy.value) return false
       const signal = context.signal
       const sessionId = human.session.value?.id
       ordersBusy.value = true
       try {
         const current = await client.getShopOrder(shopId.value, order.orderNo, signal)
-        if (!signal.aborted && human.active.value && human.session.value?.id === sessionId)
+        if (!signal.aborted && human.active.value && human.session.value?.id === sessionId) {
           selectedOrder.value = current
+          return true
+        }
       } catch (failure) {
         report(failure, signal)
       } finally {
         if (!signal.aborted) ordersBusy.value = false
       }
-      return
+      return false
     }
     // Re-query ownership and state before treating a historical snapshot as current.
     selectedOrder.value = null
+    const signal = context.signal
     // A candidate can continue only these two reads; never replay the user's original text.
     await sendMessage(selectionIntent === 'LOGISTICS' ? '查物流' : '咨询此订单', order.orderNo)
+    return (
+      !signal.aborted && connected.value && shopId.value === String(order.shopId) && !error.value
+    )
   }
 
   function clearSelectedOrder() {
@@ -830,6 +947,8 @@ export function useSupportDesk() {
         `${order.shopId}/${order.orderNo}`,
       ])
       orders.value = orders.value.filter((item) => !sameOrder(item, order))
+      accountOrdersVersion++
+      accountOrders.value = accountOrders.value.filter((item) => !sameOrder(item, order))
       if (sameOrder(selectedOrder.value, order)) selectedOrder.value = null
       if (
         conversationContext.value?.kind === 'ORDER' &&
@@ -920,7 +1039,11 @@ export function useSupportDesk() {
       const result = await client.confirmReceipt(shopId.value, order.orderNo, signal)
       if (signal.aborted || version !== receiptVersion) return
       const updated = result.order
+      accountOrdersVersion++
       orders.value = orders.value.map((item) => (sameOrder(item, updated) ? updated : item))
+      accountOrders.value = accountOrders.value.map((item) =>
+        sameOrder(item, updated) ? updated : item,
+      )
       if (sameOrder(selectedOrder.value, updated)) {
         selectedEligibility.value = result.eligibility
         selectedOrder.value = updated
@@ -1130,6 +1253,8 @@ export function useSupportDesk() {
     }
   }
   onScopeDispose(() => {
+    accountLifetime.abort()
+    cancelOrderNavigation()
     client?.dispose()
     void connectingClient?.logout().catch(() => undefined)
     if (contextExpiryTimer !== null) clearTimeout(contextExpiryTimer)
@@ -1219,6 +1344,11 @@ export function useSupportDesk() {
     ordersBusy,
     orders,
     nextAfterId,
+    accountOrders,
+    accountNextAfterId,
+    accountOrdersBusy,
+    accountOrdersError,
+    orderNavigationBusy,
     selectedOrder,
     messages,
     error,
@@ -1227,6 +1357,8 @@ export function useSupportDesk() {
     disconnect,
     changeShop,
     loadOrders,
+    loadAccountOrders,
+    enterOrderShop,
     selectOrder,
     clearSelectedOrder,
     sendMessage,

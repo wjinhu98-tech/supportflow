@@ -59,7 +59,7 @@ V22 新增 `support_human_session`、`support_human_message`、`support_chat_sco
 
 买家入口为 `/api/v1/shops/{shopId}/chat/conversations/{conversationId}/support`，支持查询状态、申请、分页读取消息、发送消息和结束服务。商家入口为 `/api/v1/merchant/shops/{shopId}/support-sessions`，支持队列、详情、接待、发送和结束。所有写请求需要 CSRF，并沿用已有按认证身份的限流。
 
-订单列表使用只读 `GET /api/v1/shops/{shopId}/orders`，不借用聊天入口，所以人工接待时仍能刷新本人在当前店铺的订单。它支持 `afterId` 和 `size` 游标分页，沿用原有订单归属和删除可见性校验。
+订单页使用只读 `GET /api/v1/orders` 展示当前买家跨店订单，不借用聊天入口，人工接待期间也能查看。店内退款候选继续使用 `GET /api/v1/shops/{shopId}/orders`，两份列表和游标分开保存。点击订单咨询后进入订单所属店铺；若该店已有人工接待，则只读取订单详情并进入人工聊天，不自动发送智能消息或代发人工消息。两个列表都沿用买家归属与删除可见性校验。
 
 订单确认收货、退款申请和商家售后审批继续走各自独立的业务接口。客服的一段聊天回复不能替代这些校验和审批。
 

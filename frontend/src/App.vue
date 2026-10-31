@@ -111,6 +111,13 @@ const {
   disconnect,
   changeShop,
   loadOrders,
+  accountOrders,
+  accountNextAfterId,
+  accountOrdersBusy,
+  accountOrdersError,
+  orderNavigationBusy,
+  loadAccountOrders,
+  enterOrderShop,
   selectOrder,
   clearSelectedOrder,
   sendMessage,
@@ -175,7 +182,7 @@ const canSend = computed(
     messageDraft.value.trim().length > 0,
 )
 const orderCountLabel = computed(
-  () => `${orders.value.length}${nextAfterId.value !== null ? '+' : ''}`,
+  () => `${accountOrders.value.length}${accountNextAfterId.value !== null ? '+' : ''}`,
 )
 
 function openLogin() {
@@ -256,14 +263,20 @@ async function submitMessage(text = messageDraft.value) {
 
 async function requestOrders(loadMore = false) {
   retryAction = () => requestOrders(loadMore)
-  await loadOrders(loadMore)
+  await loadAccountOrders(loadMore)
 }
 
 async function consultOrder(order: Order, selectionIntent: OrderSelectionIntent | null = null) {
   retryAction = refreshConversation
-  if (humanActive.value) activeView.value = 'orders'
-  else await focusConversation()
-  await selectOrder(order, selectionIntent)
+  if (await selectOrder(order, selectionIntent)) await focusConversation()
+}
+
+async function openAccountReceipt(order: Order) {
+  if (await enterOrderShop(order, false)) openReceiptConfirmation(order)
+}
+
+async function openAccountDeletion(order: Order) {
+  if (await enterOrderShop(order, false)) openOrderDeletion(order)
 }
 
 async function refreshConversation() {
@@ -460,13 +473,14 @@ watch(
             data-testid="open-after-sales"
             @click="openAfterSales"
           >
-            售后进度
+            店铺 {{ shopId }} 售后进度
           </button>
           <button
+            v-if="activeView === 'chat'"
             class="shop-switch"
             type="button"
             aria-label="切换店铺"
-            :disabled="deletingConversation"
+            :disabled="deletingConversation || orderNavigationBusy"
             @click="openShop"
           >
             <span class="shop-switch-icon">
@@ -591,7 +605,7 @@ watch(
             <div class="heading-line">
               <h2 id="orders-heading">我的订单</h2>
               <span
-                v-if="connected && orders.length"
+                v-if="connected && accountOrders.length"
                 class="count-chip"
               >
                 {{ orderCountLabel }}
@@ -602,25 +616,32 @@ watch(
               type="button"
               aria-label="刷新订单"
               title="刷新订单"
-              :disabled="!connected || ordersBusy || busy"
+              :disabled="!connected || accountOrdersBusy || orderNavigationBusy || busy"
               @click="requestOrders()"
             >
               <RefreshCw
                 :size="16"
-                :class="{ spinning: ordersBusy }"
+                :class="{ spinning: accountOrdersBusy }"
                 aria-hidden="true"
               />
             </button>
           </div>
-          <p class="panel-description">仅展示你在当前店铺的订单</p>
+          <p class="panel-description">查看你在全部店铺的订单，咨询时自动进入对应店铺。</p>
           <div class="orders-scope">
             <Store
               :size="14"
               aria-hidden="true"
             />
-            <span>店铺 {{ shopId }}</span>
-            <span class="scope-tag">当前店铺</span>
+            <span>全部店铺</span>
+            <span class="scope-tag">仅本人订单</span>
           </div>
+          <p
+            v-if="accountOrdersError"
+            role="alert"
+            class="history-notice"
+          >
+            {{ accountOrdersError }}
+          </p>
           <div class="orders-scroll">
             <div
               v-if="!connected"
@@ -635,7 +656,7 @@ watch(
               </div>
               <h3>你的订单，在这里</h3>
               <p>
-                连接账号后，查看当前店铺的
+                连接账号后，查看全部店铺的
                 <br />
                 真实订单并发起咨询。
               </p>
@@ -652,7 +673,7 @@ watch(
               </button>
             </div>
             <div
-              v-else-if="ordersBusy && !orders.length"
+              v-else-if="accountOrdersBusy && !accountOrders.length"
               class="order-skeletons"
               role="status"
               aria-label="正在加载订单"
@@ -668,7 +689,7 @@ watch(
               </div>
             </div>
             <div
-              v-else-if="!orders.length"
+              v-else-if="!accountOrders.length"
               class="empty-state order-empty"
             >
               <div class="empty-icon">
@@ -682,12 +703,12 @@ watch(
               <p>
                 这里会展示当前账号在
                 <br />
-                店铺 {{ shopId }} 的订单。
+                全部店铺的订单。
               </p>
               <button
                 class="text-button"
                 type="button"
-                :disabled="ordersBusy"
+                :disabled="accountOrdersBusy"
                 @click="requestOrders()"
               >
                 重新加载
@@ -699,29 +720,35 @@ watch(
             </div>
             <template v-else>
               <OrderCard
-                v-for="order in orders"
+                v-for="order in accountOrders"
                 :key="`${order.shopId}-${order.orderNo}`"
                 :order="order"
                 :selected="
                   selectedOrder?.orderNo === order.orderNo && selectedOrder?.shopId === order.shopId
                 "
-                :busy="busy || receiptSubmitting || orderDeletionSubmitting"
+                :busy="
+                  busy ||
+                  ordersBusy ||
+                  orderNavigationBusy ||
+                  receiptSubmitting ||
+                  orderDeletionSubmitting
+                "
                 :deleted="isOrderDeleted(order)"
                 :deletion-blocked="orderDeletionBlocked(order)"
                 @select="consultOrder"
-                @confirm-receipt="openReceiptConfirmation"
-                @delete-order="openOrderDeletion"
+                @confirm-receipt="openAccountReceipt"
+                @delete-order="openAccountDeletion"
               />
               <button
-                v-if="nextAfterId !== null"
+                v-if="accountNextAfterId !== null"
                 type="button"
                 class="load-more"
                 data-testid="load-more-orders"
-                :disabled="ordersBusy || busy"
+                :disabled="accountOrdersBusy || orderNavigationBusy || busy"
                 @click="requestOrders(true)"
               >
                 <LoaderCircle
-                  v-if="ordersBusy"
+                  v-if="accountOrdersBusy"
                   class="spinning"
                   :size="14"
                   aria-hidden="true"
@@ -731,7 +758,7 @@ watch(
                   :size="14"
                   aria-hidden="true"
                 />
-                {{ ordersBusy ? '正在加载' : '加载更多订单' }}
+                {{ accountOrdersBusy ? '正在加载' : '加载更多订单' }}
               </button>
               <p
                 v-else

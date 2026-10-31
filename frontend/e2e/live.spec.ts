@@ -52,14 +52,26 @@ async function chat(page: Page, message: string) {
   return body
 }
 
-async function selectOrder(page: Page, orderNo: string) {
+async function selectOrder(
+  page: Page,
+  orderNo: string,
+  targetShop = new URL(page.url()).searchParams.get('shopId') ?? '100',
+) {
   await showOrders(page)
-  const card = page
-    .getByTestId('orders-panel')
-    .getByTestId('order-card')
-    .filter({ has: page.getByRole('button', { name: `咨询此订单 ${orderNo}`, exact: true }) })
+  const panel = page.getByTestId('orders-panel')
+  const card = panel.locator(
+    `[data-testid="order-card"][data-shop-id="${targetShop}"][data-order-no="${orderNo}"]`,
+  )
+  for (let pageNumber = 0; pageNumber < 10 && (await card.count()) === 0; pageNumber++) {
+    const more = page.getByTestId('load-more-orders')
+    if (!(await more.isVisible())) break
+    const count = await panel.getByTestId('order-card').count()
+    await more.click()
+    await expect.poll(() => panel.getByTestId('order-card').count()).toBeGreaterThan(count)
+  }
   await expect(card).toHaveCount(1)
   await card.getByRole('button', { name: /^咨询此订单/ }).click()
+  await expect(page).toHaveURL(new RegExp(`[?&]shopId=${targetShop}(?:&|$)`))
   await expect(page.getByRole('button', { name: '会话', exact: true })).toHaveAttribute(
     'aria-current',
     'page',
@@ -74,7 +86,9 @@ async function selectOrder(page: Page, orderNo: string) {
 async function selectFreshAfterSaleOrder(page: Page) {
   await showOrders(page)
   const usedOrderNos = new Set((await ownedTickets(page)).map((ticket) => ticket.orderNo))
-  const cards = page.getByTestId('orders-panel').getByTestId('order-card')
+  const cards = page
+    .getByTestId('orders-panel')
+    .locator('[data-testid="order-card"][data-shop-id="100"]')
   const available = await cards.allTextContents()
   let orderNo: string | undefined
   for (const candidate of available.flatMap(
@@ -416,7 +430,9 @@ test('real Spring Security CSRF and real MySQL owned-order selection', async ({ 
   await showOrders(page)
   const panel = page.getByTestId('orders-panel')
   await expect(panel.getByTestId('order-card')).toHaveCount(20)
-  const order = panel.getByTestId('order-card').filter({ hasText: 'SF10001' })
+  const order = panel.locator(
+    '[data-testid="order-card"][data-shop-id="100"][data-order-no="SF10001"]',
+  )
   await expect(order).toHaveCount(1)
   await order.getByRole('button', { name: /^咨询此订单/ }).click()
   await expect(page.getByTestId('chat-message').last()).toContainText('已发货')
@@ -425,7 +441,7 @@ test('real Spring Security CSRF and real MySQL owned-order selection', async ({ 
   expect(cookie?.httpOnly).toBe(true)
   await showOrders(page)
   await page.getByTestId('load-more-orders').click()
-  await expect(panel.getByTestId('order-card')).toHaveCount(24)
+  await expect(panel.getByTestId('order-card')).toHaveCount(29)
 })
 
 test('real buyer deletion hides an ended order across reads and reconnect while retaining its chat snapshot', async ({
@@ -449,7 +465,7 @@ test('real buyer deletion hides an ended order across reads and reconnect while 
     expect(response.status()).toBe(200)
     return response.json()
   }
-  // This account and product belong only to this case; buyer200's shared 24-order baseline is untouched.
+  // This account and product belong only to this case; buyer200's shared 29-order baseline is untouched.
   await connect(page, 'frontend-delete-buyer', password)
   const before = await page.request.get(orderPath, { headers })
   expect(before.status()).toBe(200)
@@ -494,7 +510,7 @@ test('real buyer deletion hides an ended order across reads and reconnect while 
   const refresh = page.waitForResponse(
     (response) =>
       response.request().method() === 'GET' &&
-      new URL(response.url()).pathname === '/api/v1/shops/100/orders',
+      new URL(response.url()).pathname === '/api/v1/orders',
   )
   await page.getByRole('button', { name: '刷新订单', exact: true }).click()
   const refreshed = await refresh
@@ -534,7 +550,7 @@ test('receipt confirmation needs explicit consent and persists the server receip
   await showOrders(page)
   await page.getByTestId('load-more-orders').click()
   const panel = page.getByTestId('orders-panel')
-  await expect(panel.getByTestId('order-card')).toHaveCount(24)
+  await expect(panel.getByTestId('order-card')).toHaveCount(29)
   const historic = panel.getByTestId('order-card').filter({ hasText: 'PAGE-021' })
   await expect(historic.locator('[data-status="COMPLETED"]')).toBeVisible()
   await expect(
@@ -626,7 +642,7 @@ test('receipt confirmation needs explicit consent and persists the server receip
   await connect(page, 'frontend-buyer', password)
   await showOrders(page)
   await page.getByTestId('load-more-orders').click()
-  await expect(panel.getByTestId('order-card')).toHaveCount(24)
+  await expect(panel.getByTestId('order-card')).toHaveCount(29)
   await selectOrder(page, 'SFRECEIPT01')
   await showOrders(page)
   await expect(page.getByTestId('order-after-sale-deadline')).toBeVisible()
@@ -635,15 +651,19 @@ test('receipt confirmation needs explicit consent and persists the server receip
   )
 })
 
-test('real API keeps same-number orders scoped to the active shop and rejects a missing order', async ({
+test('real account orders retain both shops and consulting a same-number order enters its own shop', async ({
   page,
 }) => {
   await connect(page, 'frontend-buyer', 'Frontend-Test-Only!')
-  await switchShop(page, '101')
   await showOrders(page)
   const panel = page.getByTestId('orders-panel')
-  await expect(panel.getByTestId('order-card')).toHaveCount(1)
-  await panel.getByRole('button', { name: /^咨询此订单/ }).click()
+  await page.getByTestId('load-more-orders').click()
+  await expect(panel.getByTestId('order-card')).toHaveCount(29)
+  await expect(panel.locator('[data-order-no="SF10001"]')).toHaveCount(2)
+  await expect(panel.locator('[data-shop-id="102"]')).toHaveCount(2)
+  await expect(panel.locator('[data-shop-id="103"]')).toHaveCount(2)
+  await expect(panel.getByTestId('order-card').filter({ hasText: 'SF20001' })).toHaveCount(0)
+  await selectOrder(page, 'SF10001', '101')
   await expect(page.getByTestId('chat-message').last()).toContainText('待发货')
   await expect(page.getByTestId('chat-message').last()).toContainText('899.00')
   await send(page, '查订单 SF10002')

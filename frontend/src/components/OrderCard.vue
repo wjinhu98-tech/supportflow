@@ -46,6 +46,8 @@ watch(
     class="order-card"
     :class="{ 'is-selected': selected, 'is-compact': compact, 'has-products': order.items?.length }"
     data-testid="order-card"
+    :data-shop-id="order.shopId"
+    :data-order-no="order.orderNo"
   >
     <ul
       v-if="order.items?.length"

@@ -34,11 +34,14 @@ test('live buyer handoff, chat-only staff claim/reply, close and AI restoration'
   await showOrders(page)
   const cards = page.getByTestId('orders-panel').getByTestId('order-card')
   await expect(cards).toHaveCount(20)
-  await cards
-    .first()
+  await page
+    .getByTestId('orders-panel')
+    .locator('[data-testid="order-card"][data-shop-id="100"][data-order-no="SF10001"]')
     .getByRole('button', { name: /^咨询此订单/ })
     .click()
-  await expect(page.locator('.order-detail')).toBeVisible()
+  await expect(page.getByTestId('conversation-panel')).toBeVisible()
+  await expect(page.getByTestId('selected-order')).toContainText('SF10001')
+  await expect(page.locator('.order-detail')).not.toBeVisible()
   await showChat(page)
   await page.getByRole('button', { name: '申请退款', exact: true }).click()
   const refund = page.getByRole('dialog', { name: '申请退款', exact: true })
